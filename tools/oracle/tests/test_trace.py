@@ -43,3 +43,13 @@ def test_bad_json_is_invalid(tmp_path):
     p = tmp_path / "t.jsonl"
     _write(p, ["{not json"])
     assert load_trace(p).status == "invalid"
+
+
+def test_directory_is_invalid(tmp_path):
+    assert load_trace(tmp_path).status == "invalid"
+
+
+def test_non_utf8_file_is_invalid(tmp_path):
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(b"\xff\xfe\x00")
+    assert load_trace(p).status == "invalid"

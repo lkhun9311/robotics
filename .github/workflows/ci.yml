@@ -14,7 +14,7 @@ jobs:
         run: |
           set -a; . ./.env; set +a
           docker build --target dev --build-arg ROS_IMAGE="$ROS_IMAGE" \
-            -t robotics-dev:ci -f docker/Dockerfile .
+            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" -t robotics-dev:ci -f docker/Dockerfile .
       - name: Run checks
         run: docker run --rm -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
       - name: Build and smoke-run the runtime image

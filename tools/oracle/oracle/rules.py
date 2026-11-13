@@ -26,6 +26,12 @@ from oracle.obligations import check as check_obligations
 from oracle.trace import load_trace
 
 PASS, FAIL, INCONCLUSIVE, NOT_RUN = "PASS", "FAIL", "INCONCLUSIVE", "NOT_RUN"
+
+# Contract values the oracle owns. A trace may declare them, but it cannot change them:
+# the judged side never supplies its own thresholds. Project-declared (spec §10.1,
+# storage analysis/2026-11-13-lease-bound.md): lease <= 48 ms, stop deadline 2W = 4 ms.
+MAX_LEASE_NS = 48_000_000
+STOP_DEADLINE_NS = 4_000_000
 EXIT_CODES = {PASS: 0, FAIL: 1, INCONCLUSIVE: 2, NOT_RUN: 3}
 IDENTITY = ("session", "generation", "valid_until_ns")
 
@@ -75,14 +81,21 @@ def _schema_problems(events: list) -> list:
     return problems
 
 
-def judge(events: list) -> Verdict:
+def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
     problems = _schema_problems(events)
+    if not problems:
+        begin = events[0]
+        if begin["stop_deadline_ns"] != STOP_DEADLINE_NS:
+            problems.append(f"declared stop_deadline_ns {begin['stop_deadline_ns']} != contract {STOP_DEADLINE_NS}")
+        if not 0 < begin["lease_ns"] <= MAX_LEASE_NS:
+            problems.append(f"declared lease_ns {begin['lease_ns']} outside (0, {MAX_LEASE_NS}]")
+        if begin["scenario"] == "unit" and not allow_unit_scenario:
+            problems.append("scenario 'unit' is reserved for oracle unit tests")
     if problems:
         return Verdict(INCONCLUSIVE, problems)
 
     fails: list[str] = []
     incomplete: list[str] = []
-    begin = events[0]
 
     active: dict | None = None
     max_session = max_generation = 0
@@ -102,7 +115,8 @@ def judge(events: list) -> Verdict:
             closed_sessions.add((active["manager"], active["session"]))
             closed_generations.add((active["manager"], active["generation"]))
             active = None
-        ob = {"t": t, "latched_t": t if latched else None, "reset": False, "enable": False}
+        ob = {"t": t, "latched_t": t if latched else None, "reset": False, "recovered": False,
+              "requested": False, "enable": False}
         faults.append(ob)
         return ob
 
@@ -112,6 +126,11 @@ def judge(events: list) -> Verdict:
             m, ses, gen = e["manager"], e["session"], e["generation"]
             if (m, ses) in closed_sessions or (m, gen) in closed_generations:
                 fails.append(f"t={t}: permit reuses a closed session/generation {ses}/{gen}")
+            if e["expires_ns"] - t > begin["lease_ns"]:
+                fails.append(f"t={t}: permit lasts {e['expires_ns'] - t} ns, longer than the lease {begin['lease_ns']} ns")
+            if (active is not None and (m, ses, gen) == (active["manager"], active["session"], active["generation"])
+                    and t >= active["expires_ns"]):
+                fails.append(f"t={t}: permit renews an expired permit {ses}/{gen}")
             if ses < max_session or gen < max_generation:
                 fails.append(f"t={t}: session/generation goes backwards to {ses}/{gen}")
             if active is not None and active["generation"] != gen:
@@ -130,18 +149,29 @@ def judge(events: list) -> Verdict:
             if e["to"] == "FAULT_LATCHED":
                 if open_fault is None:
                     open_fault = open_obligation(t, latched=True)
-                elif open_fault["latched_t"] is None:
-                    open_fault["latched_t"] = t
+                else:
+                    if open_fault["latched_t"] is None:
+                        open_fault["latched_t"] = t
+                    # A failed recovery re-latches: everything earned since must be earned again.
+                    open_fault.update(reset=False, recovered=False, requested=False, enable=False)
             elif e["from"] == "FAULT_LATCHED" and e["to"] == "RECOVERING":
                 if open_fault is not None and open_fault["latched_t"] is not None:
                     open_fault["reset"] = True
+            elif e["from"] == "RECOVERING" and e["to"] == "READY":
+                if open_fault is not None and open_fault["reset"]:
+                    open_fault["recovered"] = True
+            elif e["from"] == "READY" and e["to"] == "ARMING" and e["event"] == "ENABLE_REQUEST":
+                # Only an accepted enable counts, and only after an explicit request that came
+                # after recovery finished.
+                if open_fault is not None and open_fault["recovered"] and open_fault["requested"]:
+                    open_fault["enable"] = True
             elif e["to"] == "ENABLED" and open_fault is not None:
                 if not (open_fault["reset"] and open_fault["enable"]):
                     fails.append(f"t={t}: ENABLED after a fault without explicit reset and enable")
                 open_fault = None
         elif kind == "enable_request":
-            if open_fault is not None and open_fault["reset"]:
-                open_fault["enable"] = True
+            if open_fault is not None and open_fault["recovered"]:
+                open_fault["requested"] = True
         elif kind == "command_sent":
             seq = e["seq"]
             if seq in sent:
@@ -195,7 +225,7 @@ def judge(events: list) -> Verdict:
                 fails.append(f"t={t}: seq {seq} applied as {original['session']}/{original['generation']} "
                              f"!= permit {active['session']}/{active['generation']}")
 
-    deadline = begin["stop_deadline_ns"]
+    deadline = STOP_DEADLINE_NS
     for ob in faults:
         if ob["latched_t"] is None:
             fails.append(f"fault at t={ob['t']} but production never reported FAULT_LATCHED")

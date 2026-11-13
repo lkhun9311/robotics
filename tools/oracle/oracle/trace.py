@@ -19,7 +19,11 @@ def load_trace(path) -> LoadResult:
     p = Path(path)
     if not p.exists():
         return LoadResult("missing", error=f"{p} does not exist")
-    lines = [line for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return LoadResult("invalid", error=f"{p} unreadable: {exc}")
+    lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return LoadResult("empty", error=f"{p} has no events")
     events: list[dict] = []

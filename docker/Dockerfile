@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 # SPDX-License-Identifier: Apache-2.0
 ARG ROS_IMAGE
-ARG RUNTIME_IMAGE
+# Default keeps every stage's FROM resolvable when only the dev target is built (BuildKit
+# resolves all stages); release builds pass the pinned digest from .env.
+ARG RUNTIME_IMAGE=ros:jazzy-ros-core
 FROM ${ROS_IMAGE} AS base
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive

@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 
-from oracle.rules import FAIL, INCONCLUSIVE, NOT_RUN, PASS, judge, judge_file
+import functools
+
+from oracle import rules
+from oracle.rules import FAIL, INCONCLUSIVE, NOT_RUN, PASS, judge_file
+
+# The `unit` scenario (no obligations) is reachable only from these tests, never from judge_file.
+judge = functools.partial(rules.judge, allow_unit_scenario=True)
 
 MS = 1_000_000
 CLOCK = "fake_host_mono"
@@ -156,7 +162,7 @@ def _fault_then(extra, after=()):
         transition(3 * MS, "STOPPING", "FAULT_LATCHED", "STOP_CONFIRMED"),
         *extra,
         transition(9 * MS, "ARMING", "ENABLED", "ARMING_CONFIRMED"),
-        permit(9 * MS, session=2, generation=5, expires=60 * MS),
+        permit(9 * MS, session=2, generation=5, expires=57 * MS),
         sent(10 * MS, session=2, generation=5),
         applied(10 * MS, session=2, generation=5),
         *after,
@@ -164,11 +170,13 @@ def _fault_then(extra, after=()):
     ]
 
 
-ACCEPTED_RESET = [ev(4 * MS, "reset_request"), transition(4 * MS, "FAULT_LATCHED", "RECOVERING", "RESET_REQUEST")]
+ACCEPTED_RESET = [ev(4 * MS, "reset_request"), transition(4 * MS, "FAULT_LATCHED", "RECOVERING", "RESET_REQUEST"),
+                  transition(4 * MS, "RECOVERING", "READY", "RECOVERY_VERIFIED")]
+ACCEPTED_ENABLE = [ev(5 * MS, "enable_request"), transition(5 * MS, "READY", "ARMING", "ENABLE_REQUEST")]
 
 
 def test_resume_after_fault_needs_accepted_reset_then_enable():
-    assert judge(_fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")])).result == PASS
+    assert judge(_fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE])).result == PASS
 
 
 def test_resume_without_enable_request_fails():
@@ -177,12 +185,13 @@ def test_resume_without_enable_request_fails():
 
 
 def test_enable_request_before_reset_does_not_count():
-    v = judge(_fault_then([ev(4 * MS, "enable_request"), *ACCEPTED_RESET]))
+    v = judge(_fault_then([ev(3 * MS, "enable_request"), *ACCEPTED_RESET,
+                           transition(5 * MS, "READY", "ARMING", "ENABLE_REQUEST")]))
     assert v.result == FAIL
 
 
 def test_rejected_reset_does_not_count():
-    v = judge(_fault_then([ev(4 * MS, "reset_request"), ev(5 * MS, "enable_request")]))
+    v = judge(_fault_then([ev(4 * MS, "reset_request"), *ACCEPTED_ENABLE]))
     assert v.result == FAIL and reasons(v, "without explicit reset and enable")
 
 
@@ -196,7 +205,7 @@ def test_recovery_with_the_pre_fault_identity_fails_even_without_a_revoke():
 
 
 def test_new_session_with_the_pre_fault_generation_fails():
-    events = _fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")])
+    events = _fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE])
     for e in events:
         if e["kind"] in ("permit_issued", "command_sent", "command_applied") and e["t_ns"] >= 9 * MS:
             e["generation"] = 1
@@ -207,7 +216,7 @@ def test_new_session_with_the_pre_fault_generation_fails():
 def test_every_fault_must_latch_within_the_deadline():
     late_second = [ev(12 * MS, "fault_injected", name="injected_fault"),
                    transition(20 * MS, "STOPPING", "FAULT_LATCHED", "STOP_CONFIRMED")]
-    v = judge(_fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")], after=late_second))
+    v = judge(_fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE], after=late_second))
     assert v.result == FAIL and reasons(v, "deadline")
 
 
@@ -226,7 +235,7 @@ def test_apply_after_a_shortened_permit_expires_fails():
 
 
 def test_missing_latch_report_fails():
-    events = [e for e in _fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")])
+    events = [e for e in _fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE])
               if e.get("to") != "FAULT_LATCHED"]
     v = judge(events)
     assert v.result == FAIL and reasons(v, "never reported FAULT_LATCHED")
@@ -234,7 +243,7 @@ def test_missing_latch_report_fails():
 
 def test_second_fault_needs_its_own_latch_report():
     second = [ev(12 * MS, "fault_injected", name="injected_fault"), revoke(12 * MS, session=2, generation=5)]
-    v = judge(_fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")], after=second))
+    v = judge(_fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE], after=second))
     assert v.result == FAIL and reasons(v, "never reported FAULT_LATCHED")
 
 
@@ -246,7 +255,7 @@ def test_apply_while_latched_fails():
 
 
 def test_reusing_a_closed_session_or_generation_fails():
-    events = _fault_then([*ACCEPTED_RESET, ev(5 * MS, "enable_request")])
+    events = _fault_then([*ACCEPTED_RESET, *ACCEPTED_ENABLE])
     for e in events:
         if e["kind"] in ("permit_issued", "command_sent", "command_applied") and e["t_ns"] >= 9 * MS:
             e["session"], e["generation"] = 1, 1
@@ -303,3 +312,48 @@ def test_time_going_backwards_is_inconclusive(tmp_path):
     p = tmp_path / "t.jsonl"
     p.write_text(json.dumps(ev(5, "a")) + "\n" + json.dumps(ev(4, "b")) + "\n", encoding="utf-8")
     assert judge_file(p).result == INCONCLUSIVE
+
+
+def test_failed_recovery_clears_the_accepted_reset():
+    relatch = [ev(4 * MS, "reset_request"), transition(4 * MS, "FAULT_LATCHED", "RECOVERING", "RESET_REQUEST"),
+               transition(4 * MS, "RECOVERING", "FAULT_LATCHED", "RECOVERY_FAILED"), *ACCEPTED_ENABLE]
+    v = judge(_fault_then(relatch))
+    assert v.result == FAIL and reasons(v, "without explicit reset and enable")
+
+
+def test_rejected_enable_request_does_not_count():
+    # The request arrives during RECOVERING and is rejected; production later enables by itself.
+    events = _fault_then([ev(4 * MS, "reset_request"),
+                          transition(4 * MS, "FAULT_LATCHED", "RECOVERING", "RESET_REQUEST"),
+                          ev(4 * MS, "enable_request"),
+                          transition(5 * MS, "RECOVERING", "READY", "RECOVERY_VERIFIED"),
+                          transition(6 * MS, "READY", "ARMING", "ARMING_CONFIRMED")])
+    v = judge(events)
+    assert v.result == FAIL and reasons(v, "without explicit reset and enable")
+
+
+def test_declared_deadline_must_match_the_oracle_contract():
+    events = base()
+    events[0]["stop_deadline_ns"] = 10**18
+    v = judge(events)
+    assert v.result == INCONCLUSIVE and reasons(v, "stop_deadline_ns")
+
+
+def test_permit_longer_than_the_contract_lease_fails():
+    events = [begin(), permit(1 * MS, expires=10**12), sent(10 * MS), applied(10 * MS), end()]
+    v = judge(events)
+    assert v.result == FAIL and reasons(v, "longer than the lease")
+
+
+def test_renewing_an_expired_permit_fails():
+    events = [begin(), permit(1 * MS, expires=5 * MS), permit(6 * MS, expires=50 * MS),
+              sent(10 * MS), applied(10 * MS), end()]
+    v = judge(events)
+    assert v.result == FAIL and reasons(v, "renews an expired permit")
+
+
+def test_unit_scenario_is_not_reachable_from_files(tmp_path):
+    p = tmp_path / "t.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in base()), encoding="utf-8")
+    v = judge_file(p)
+    assert v.result == INCONCLUSIVE and reasons(v, "unit")

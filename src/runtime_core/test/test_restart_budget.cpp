@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "runtime_core/restart_budget.hpp"
 
 namespace rc = runtime_core;
@@ -33,4 +35,9 @@ TEST(RestartBudget, RefusedAttemptsAreNotRecorded) {
   EXPECT_TRUE(b.try_consume(sec(0)));
   EXPECT_FALSE(b.try_consume(sec(5)));
   EXPECT_TRUE(b.try_consume(sec(10)));
+}
+
+TEST(RestartBudget, RejectsNonPositiveWindow) {
+  EXPECT_THROW((rc::RestartBudget{3, rc::Duration{0}}), std::invalid_argument);
+  EXPECT_THROW((rc::RestartBudget{3, rc::Duration{-1}}), std::invalid_argument);
 }
