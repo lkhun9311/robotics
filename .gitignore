@@ -1,0 +1,11 @@
+# build
+build/
+install/
+log/
+*.o
+*.so
+__pycache__/
+
+# editor / tooling
+.vscode/
+.idea/
