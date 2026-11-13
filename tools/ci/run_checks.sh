@@ -51,7 +51,15 @@ gcovr --root src/runtime_core --exclude 'src/runtime_core/test/.*' \
   --txt artifacts/coverage.txt --xml artifacts/coverage.xml build/asan/runtime_core
 cat artifacts/coverage.txt
 
-echo "== python tests =="
-python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest.xml tools
+echo "== python tests (release harness; traces kept in artifacts/traces/release) =="
+LOGIC_SIM_BIN="$PWD/install/release/runtime_core/lib/runtime_core/logic_sim" \
+ORACLE_TRACE_DIR="$PWD/artifacts/traces/release" \
+  python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest.xml tools
+
+echo "== oracle x harness (ASan + UBSan harness; traces in artifacts/traces/asan) =="
+LOGIC_SIM_BIN="$PWD/install/asan/runtime_core/lib/runtime_core/logic_sim" \
+ORACLE_TRACE_DIR="$PWD/artifacts/traces/asan" \
+  python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest-asan.xml \
+  tools/oracle/tests/test_logic_sim_integration.py
 
 echo "== all checks passed =="
