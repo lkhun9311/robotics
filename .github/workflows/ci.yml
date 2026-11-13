@@ -17,6 +17,14 @@ jobs:
             -t robotics-dev:ci -f docker/Dockerfile .
       - name: Run checks
         run: docker run --rm -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
+      - name: Build and smoke-run the runtime image
+        run: |
+          set -a; . ./.env; set +a
+          docker build --target runtime --build-arg ROS_IMAGE="$ROS_IMAGE" \
+            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" -t robotics-runtime:ci -f docker/Dockerfile .
+          docker run --rm robotics-runtime:ci --scenario normal --defect none --out /tmp/t.jsonl
+          rc=0; docker run --rm robotics-runtime:ci --scenario nope --defect none --out /tmp/t.jsonl || rc=$?
+          test "$rc" -eq 2
       - name: Keep test results, coverage and traces
         if: always()
         uses: actions/upload-artifact@v4
