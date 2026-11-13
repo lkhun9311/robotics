@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+      args:
+        ROS_IMAGE: ${ROS_IMAGE:?set ROS_IMAGE in .env}
+    image: robotics-dev:local
+    working_dir: /ws
+    init: true
+    volumes:
+      - ./:/ws
+      - build:/ws/build
+      - install:/ws/install
+      - log:/ws/log
+    cap_add: [SYS_NICE, NET_ADMIN, IPC_LOCK]
+    ulimits:
+      rtprio: 99
+      memlock:
+        soft: -1
+        hard: -1
+volumes:
+  build: {}
+  install: {}
+  log: {}
