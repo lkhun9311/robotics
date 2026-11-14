@@ -517,22 +517,28 @@ def judge_m4(obs):
     notes.append(f"RPDO1/RPDO2: {len(stream)} updates, DLC 8, equal to wire.py; RPDO3 "
                  f"{[d.hex() for d in cws]} (DLC 2)")
     # The DLC 7 RPDO1 written by the test.
+    # The window is closed on the bank's own clock: `before` is the last snapshot before the
+    # harness sent the DLC 7 frame; `after` is the first snapshot after the bank actuated the
+    # control pair sent behind it, so the bank had dispatched the DLC 7 frame by then (a snapshot
+    # between the send and the dispatch still shows the old count). Lely sends only DLC 8 RPDOs,
+    # so nothing else in the window can raise `malformed`.
     bad, control = h["bad"], h["control"]
     snaps = records(obs, "dispatch", node=NODE)
-    before = [r for r in snaps if r["t_ns"] / 1e9 < bad["t"]]
-    after = [r for r in snaps if r["t_ns"] / 1e9 > bad["t"]]
-    need(before and after, "no dispatch snapshot on both sides of the DLC 7 frame")
     actuated = records(obs, "drive", node=NODE, kind="actuated")
-    need(any(r["seq"] == control["seq"] and r["tag"] == tag for r in actuated),
-         f"the DLC 8 control pair (seq {control['seq']}) was not actuated, so the missing "
-         f"actuation of the DLC 7 frame would prove nothing")
+    controls = [r for r in actuated if r["seq"] == control["seq"] and r["tag"] == tag]
+    need(controls, f"the DLC 8 control pair (seq {control['seq']}) was not actuated, so the "
+                   f"missing actuation of the DLC 7 frame would prove nothing")
+    before = [r for r in snaps if r["t_ns"] / 1e9 < bad["t"]]
+    after = [r for r in snaps if r["t_ns"] > controls[0]["t_ns"]]
+    need(before and after, "no dispatch snapshot before the DLC 7 frame and after the control "
+                           "pair's actuation")
     delta = after[0]["malformed"] - before[-1]["malformed"]
     check(delta == 1, f"node 3 malformed count rose by {delta} across the DLC 7 RPDO1")
     check(not any(r["seq"] == bad["seq"] for r in actuated),
           f"the DLC 7 RPDO1 (seq {bad['seq']}) was actuated")
     notes.append(f"DLC 7 RPDO1 seq {bad['seq']}: malformed {before[-1]['malformed']} -> "
-                 f"{after[0]['malformed']} in the next snapshot, no kActuated; control pair seq "
-                 f"{control['seq']} (DLC 8) actuated")
+                 f"{after[0]['malformed']} in the first snapshot after the control pair (seq "
+                 f"{control['seq']}, DLC 8) was actuated; no kActuated of the DLC 7 frame")
     return notes
 
 

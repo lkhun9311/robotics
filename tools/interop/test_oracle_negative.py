@@ -137,3 +137,44 @@ def test_m1_lely_pdo_at_first_sync_after_command_passes(cs):
 def test_m1_lely_pdo_at_second_sync_after_command_fails(cs):
     status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 2))
     assert status == "FAIL" and "Lely decoded PDO values" in text, f"{status}: {text}"
+
+
+# M4: the malformed count is read in the first dispatch snapshot after the bank actuated the
+# control pair sent behind the DLC 7 frame (the bank's clock), not in the first snapshot after
+# the harness's send time: a snapshot between the send and the dispatch shows the old count.
+
+def m4_with_snapshot(obs, t_ns, malformed):
+    """Adds a node 3 dispatch snapshot at t_ns with the given malformed count."""
+    snap = next(r for r in obs["bank"] if r.get("event") == "dispatch" and
+                r.get("node") == judges.NODE)
+    i = next(i for i, r in enumerate(obs["bank"]) if r["t_ns"] > t_ns)
+    obs["bank"].insert(i, dict(snap, t_ns=t_ns, malformed=malformed))
+    return obs
+
+
+def m4_snapshots(obs):
+    bad = obs["harness"]["bad"]["t"]
+    snaps = [r for r in obs["bank"] if r.get("event") == "dispatch" and
+             r.get("node") == judges.NODE]
+    control = next(r for r in obs["bank"] if r.get("event") == "drive" and
+                   r.get("kind") == "actuated" and r.get("node") == judges.NODE and
+                   r.get("seq") == obs["harness"]["control"]["seq"])
+    before = [r for r in snaps if r["t_ns"] / 1e9 < bad][-1]
+    after = next(r for r in snaps if r["t_ns"] > control["t_ns"])
+    return before, after
+
+
+def test_m4_snapshot_between_send_and_dispatch_passes():
+    obs = load("M4")
+    before, _ = m4_snapshots(obs)
+    t_ns = int(obs["harness"]["bad"]["t"] * 1e9) + 100_000  # 0.1 ms after the send
+    status, text = judges.verdict(m4_with_snapshot(obs, t_ns, before["malformed"]))
+    assert status == "PASS", f"{status}: {text}"
+
+
+def test_m4_count_unchanged_after_the_control_actuation_fails():
+    obs = load("M4")
+    before, after = m4_snapshots(obs)
+    after["malformed"] = before["malformed"]
+    status, text = judges.verdict(obs)
+    assert status == "FAIL" and "malformed count rose by 0" in text, f"{status}: {text}"
