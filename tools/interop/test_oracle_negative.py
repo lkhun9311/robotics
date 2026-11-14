@@ -117,11 +117,12 @@ def test_m1_heartbeat_right_after_boot_up_fails(cs):
 # synchronous reception), so the TPDO the node sent right before the command is reported by
 # Lely at its first SYNC after the command. Only that one SYNC of lag is tolerated.
 
-def m1_lely_pdo_group(obs, cs, nth_sync):
-    """Adds Lely rpdo lines for node 3 at Lely's nth SYNC after the NMT command cs."""
+def m1_lely_pdo_group(obs, cs, nth_sync, after_s=0.0):
+    """Adds Lely rpdo lines for node 3 after Lely's nth SYNC line after the NMT command cs
+    (after_s later than that line)."""
     sent = next(e["t"] for e in obs["peer"] if e.get("event") == "nmt_sent" and e["cs"] == cs)
     t = [e["t"] for e in obs["peer"] if e.get("event") == "sync" and e["t"] > sent][nth_sync - 1]
-    group = [{"t": t + 1e-6 * (i + 1), "event": "rpdo", "node": judges.NODE, "index": 0x6041,
+    group = [{"t": t + after_s + 1e-6 * (i + 1), "event": "rpdo", "node": judges.NODE, "index": 0x6041,
               "sub": 0, "value": 0x0260} for i in range(1)]
     obs["peer"] = sorted(obs["peer"] + group, key=lambda e: e["t"])
     return obs
@@ -136,6 +137,23 @@ def test_m1_lely_pdo_at_first_sync_after_command_passes(cs):
 @pytest.mark.parametrize("cs", [0x02, 0x80])
 def test_m1_lely_pdo_at_second_sync_after_command_fails(cs):
     status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 2))
+    assert status == "FAIL" and "Lely decoded PDO values" in text, f"{status}: {text}"
+
+
+# M1 Stopped/Pre-op judges Lely's lines from its second SYNC line after the command, by order
+# of Lely's own lines and not by a time window around the first one: a peer preempted between
+# its sync line and the rpdo lines of that SYNC still prints them before its next sync line.
+
+@pytest.mark.parametrize("cs", [0x02, 0x80])
+def test_m1_lely_pdo_late_within_first_sync_passes(cs):
+    # 6 ms after the first SYNC line (before the second): failed under the earlier 1 ms window.
+    status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 1, after_s=0.006))
+    assert status == "PASS", f"{status}: {text}"
+
+
+@pytest.mark.parametrize("cs", [0x02, 0x80])
+def test_m1_lely_pdo_late_within_second_sync_fails(cs):
+    status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 2, after_s=0.006))
     assert status == "FAIL" and "Lely decoded PDO values" in text, f"{status}: {text}"
 
 
