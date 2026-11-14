@@ -2,9 +2,14 @@
 
 ![ci](https://github.com/lkhun9311/robotics/actions/workflows/ci.yml/badge.svg?branch=dev)
 
-A simulation-based robot system runtime: a C++ hardware abstraction layer, a partial
-CANopen / CiA 402 stack over virtual CAN, fault injection and real-time loop measurement,
-built on ROS 2 Jazzy, ros2_control and MuJoCo.
+A simulation-based robot system runtime, built in stages.
+
+- **Done (E0, E1):** a pinned ROS 2 Jazzy toolchain with CI, a cyclictest baseline, and a
+  ROS-free C++ core of command and permit contracts, checked by an independent judge in
+  logic time.
+- **Planned (E2 onward):** a C++ hardware abstraction layer, a partial CANopen / CiA 402
+  stack over virtual CAN, fault injection and real-time loop measurement, on ros2_control
+  and MuJoCo.
 
 ## Status
 
@@ -23,7 +28,10 @@ built on ROS 2 Jazzy, ros2_control and MuJoCo.
 - Output from an old trajectory generation is blocked after a new execution starts.
 - After an injected fault, motion resumes only after an explicit Reset and then an explicit
   Enable, with a new session and generation.
-- A backend that lacks a required guarantee is refused at activation.
+- Each backend profile states, per guarantee, whether the device supports it, the host
+  provides it, it does not apply, or it is unknown or unsupported; `missing_capabilities()`
+  lists what a backend lacks for a given set of requirements. Nothing refuses activation on
+  that list yet: the activation path arrives with the project's own HAL (E3).
 
 The judge (`tools/oracle`) is written in Python and does not import the C++ code. It judges
 the command as sent, the faults the scenario injected, and evidence that each scenario reached
