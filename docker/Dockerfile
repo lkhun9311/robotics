@@ -47,6 +47,7 @@ RUN apt-get update \
       ros-jazzy-mujoco-ros2-control ros-jazzy-joint-trajectory-controller \
       ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli ros-jazzy-xacro \
       ros-jazzy-robot-state-publisher ros-jazzy-control-msgs python3-numpy ffmpeg \
+      ros-jazzy-lely-core-libraries \
  && rm -rf /var/lib/apt/lists/*
 # Menagerie UR5e: fetched at build time, verified against the checked-in sums.
 COPY tools/models/menagerie.py models/universal_robots_ur5e/SHA256SUMS /tmp/models/
