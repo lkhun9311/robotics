@@ -107,9 +107,10 @@ What the contract fixes:
   latest stop is unconfirmed, the drive refuses every entry into Operation Enabled, also after
   Fault Reset and a new commit; only observing the joint at rest (below 0.01 rad/s for 5 ticks)
   clears it.
-- A command pair dropped because the drive was not Operation Enabled binds its target to its
-  sequence number: the same sequence may be sent again with a new deadline, but another target
-  for it is an integrity violation.
+- A command pair dropped because the drive was not Operation Enabled, or a sequence number
+  evicted from the full eight-slot assembly window, binds its target to its sequence number:
+  another target for it is an integrity violation. A master re-sends the command under a new
+  sequence number (host obligation 8).
 - A policy stop sets a latch that survives reset node and reset communication and clears only
   through an explicit policy reset.
 - Fault layers separate controlled faults from torque loss; after torque loss the drive stays in
@@ -181,7 +182,11 @@ Residual risks and deviations:
    sequence number to one target and treats a different target for a used sequence number as an
    integrity violation; but if a master re-sends a sequence number with a new target and that
    RPDO1 is lost while a delayed copy of the earlier RPDO1 arrives, the drive cannot tell it from
-   a legitimate re-send and would actuate the earlier target under the new deadline.
+   a legitimate re-send and would actuate the earlier target under the new deadline. A re-sent
+   sequence number must also be byte-identical in both RPDOs: a new deadline or a new target
+   takes a new sequence number. Otherwise a late fragment of the original, arriving while its
+   deadline is still open, is a second payload for that sequence number: an integrity violation
+   that latches the policy stop and needs a policy reset.
 
 Decision index (the `D<n>` references in code comments):
 
