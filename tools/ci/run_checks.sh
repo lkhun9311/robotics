@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=207
+GTEST_FLOOR=212
 PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
@@ -87,6 +87,39 @@ suites = [root] if root.tag == "testsuite" else root.iter("testsuite")
 print(sum(int(s.get("tests", 0)) - int(s.get("skipped", 0)) for s in suites))' "$1"
 }
 
+# Every production source of a package (its src/ directory) must be compiled with the sanitizer
+# flags: one sanitized test file must not stand in for an unsanitized library. Fails naming each
+# file without them, and fails when the database has no entry under the directory at all.
+require_sanitized() {
+  python3 - "$1" "$2" <<'EOF'
+import json, os, shlex, sys
+
+src_dir, db = os.path.realpath(sys.argv[1]), sys.argv[2]
+flag = "-fsanitize=address,undefined"
+try:
+    with open(db) as f:
+        entries = json.load(f)
+except (OSError, ValueError) as e:
+    sys.exit(f"FAIL: sanitizer flags: cannot read {db}: {e}")
+checked, missing = 0, []
+for entry in entries:
+    path = os.path.realpath(os.path.join(entry.get("directory", ""), entry["file"]))
+    if os.path.commonpath([path, src_dir]) != src_dir:
+        continue
+    checked += 1
+    args = entry["arguments"] if "arguments" in entry else shlex.split(entry["command"])
+    if flag not in args:
+        missing.append(path)
+for path in missing:
+    print(f"FAIL: ASan build compiles {path} without {flag}", file=sys.stderr)
+if checked == 0:
+    sys.exit(f"FAIL: sanitizer flags: {db} has no entry under {src_dir}")
+if missing:
+    sys.exit(1)
+print(f"sanitizer flags: {checked} sources under {sys.argv[1]}")
+EOF
+}
+
 # Runs the tests, prints per-test results, then fails. Printing first matters: under
 # `set -e` a failing `colcon test` would end the script before the failing test is named.
 run_tests() {
@@ -96,13 +129,55 @@ run_tests() {
     --return-code-on-test-failure || rc=$?
   colcon test-result --test-result-base "$base" --verbose | tee "$base/test-result.txt"
   [ "$rc" -eq 0 ] || return "$rc"
-  found=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' "$base/test-result.txt" | tail -1)
-  require_at_least "gtest ($base)" "${found:-0}" "$GTEST_FLOOR"
+  # "Summary: N tests, E errors, F failures, S skipped". A skipped test did not run: any skip is
+  # a failure, and the floor counts only the tests that ran.
+  local summary total skipped
+  summary=$(grep '^Summary: ' "$base/test-result.txt" | tail -1)
+  total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
+  skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
+  if ! [[ $total =~ ^[0-9]+$ && $skipped =~ ^[0-9]+$ ]]; then
+    echo "FAIL: gtest ($base): could not read the summary (got '$summary')" >&2
+    exit 1
+  fi
+  if [ "$skipped" -ne 0 ]; then
+    echo "FAIL: gtest ($base): $skipped tests skipped; a skipped test did not run" >&2
+    exit 1
+  fi
+  found=$((total - skipped))
+  require_at_least "gtest ($base)" "$found" "$GTEST_FLOOR"
 }
 
 echo "== build (release) =="
 colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+echo "== exported targets (an outside consumer at the compiler's default C++ standard) =="
+# The consumer sets no standard of its own: whatever its headers need must come from the
+# imported targets (INTERFACE_COMPILE_FEATURES). It includes every installed public header.
+consumer=build/release/export_consumer
+rm -rf "$consumer"
+mkdir -p "$consumer"
+cat > "$consumer/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.22)
+project(export_consumer LANGUAGES CXX)
+find_package(drive_core REQUIRED)
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE drive_core::drive_core)
+EOF
+{
+  for pkg in runtime_core canopen_codec drive_core; do
+    (cd "install/release/$pkg/include" && find . -name '*.hpp' | sort | sed 's|^\./\(.*\)|#include "\1"|')
+  done
+  echo 'int main() { return 0; }'
+} > "$consumer/main.cpp"
+(
+  set +u
+  # shellcheck disable=SC1091
+  source install/release/setup.bash
+  set -u
+  cmake -S "$consumer" -B "$consumer/build" -DCMAKE_BUILD_TYPE=Release > "$consumer/configure.log"
+  cmake --build "$consumer/build"
+)
+
 echo "== unit tests (release) =="
 run_tests build/release
 
@@ -149,10 +224,7 @@ sanitized=0
 for pkg_dir in src/*/; do
   pkg=$(basename "$pkg_dir")
   [ -d "${pkg_dir}src" ] || continue
-  if ! grep -q -e '-fsanitize=address,undefined' "build/asan/$pkg/compile_commands.json"; then
-    echo "FAIL: ASan build of $pkg has no -fsanitize=address,undefined on its compile line" >&2
-    exit 1
-  fi
+  require_sanitized "${pkg_dir}src" "build/asan/$pkg/compile_commands.json"
   sanitized=$((sanitized + 1))
 done
 require_all_packages "sanitizer flags" "$sanitized"

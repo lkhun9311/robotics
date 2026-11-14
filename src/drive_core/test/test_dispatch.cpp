@@ -41,7 +41,7 @@ cc::Frame controlword(std::uint16_t value) { return cc::pack_rpdo3(kNode, od::Rp
 // A drive after power-on, in Pre-operational.
 struct Fixture {
   Drive drive{kNode, kBootId, kBoot};
-  std::vector<cc::Frame> boot_frames = drive.power_on();
+  std::vector<cc::Frame> boot_frames = drive.power_on(kBoot);
 
   std::vector<cc::Frame> send(const cc::Frame& f, MonoTime now = kReady) {
     return drive.on_frame(f, now);
@@ -111,7 +111,7 @@ TEST(Dispatch, NoSelfStartAfterBootUp) {
   EXPECT_TRUE(drive.on_frame(nmt(cc::NmtCommand::kStart), kBoot).empty());
   EXPECT_EQ(drive.nmt().state(), cc::NmtState::kBootUp);
 
-  EXPECT_EQ(drive.power_on(), std::vector<cc::Frame>{boot_up()});
+  EXPECT_EQ(drive.power_on(kBoot), std::vector<cc::Frame>{boot_up()});
   EXPECT_EQ(drive.nmt().state(), cc::NmtState::kPreOperational);
   EXPECT_EQ(drive.cia402().state(), Cia402State::kSwitchOnDisabled);
 

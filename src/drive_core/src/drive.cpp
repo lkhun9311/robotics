@@ -97,7 +97,12 @@ cc::Frame Drive::boot_up_frame() const {
   return cc::encode_heartbeat({node_, cc::NmtState::kBootUp});
 }
 
-std::vector<cc::Frame> Drive::power_on() {
+std::vector<cc::Frame> Drive::power_on(runtime_core::MonoTime now) {
+  // D3: the boot quarantine counts from boot-up, not from constructing the Drive. Only the first
+  // power-on of this boot rearms it: a repeated call must not restart the tag allocator.
+  if (nmt_.state() == cc::NmtState::kBootUp) {
+    issuer_.boot(issuer_.boot_id(), now);
+  }
   cia402_.complete_initialisation();
   nmt_.boot_up();
   return {boot_up_frame()};
@@ -216,6 +221,19 @@ void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
     }
   } else if (const auto rpdo2 = cc::unpack_rpdo2(node_, frame)) {
     ++counts_.pdo;
+    // D5: a deadline that is not open when the fragment is received (expired, or farther ahead
+    // than the lease) drops the fragment here. Held in the window, a too-far deadline would come
+    // inside the lease by the next SYNC. The SYNC-time check stays. The tag is classified first
+    // (D8): a fragment of another (or no) tag is left to the assembler's other-tag drop.
+    const std::uint16_t tag = issuer_.current();
+    if (tag != 0 && rpdo2->exec_tag == tag &&
+        !validity_open(rpdo2->valid_until_us, to_wire_us(now), kLeaseUs)) {
+      DriveEvent e{DriveEventKind::kDropped, now};
+      e.drop = DropReason::kNotValid;
+      e.count = 1;
+      emit(e);
+      return;
+    }
     if (assembler_.offer(*rpdo2) == OfferResult::kIntegrityViolation) {
       note_integrity(now);
     }
@@ -272,6 +290,12 @@ void Drive::apply_inhibit() {
 }
 
 void Drive::start_stop_monitor(runtime_core::MonoTime now) {
+  if (drive_unavailable_) {
+    // D11: without drive authority nothing is a controlled stop. A stop that becomes due later
+    // (a pending integrity stop, a policy stop) starts no monitor: a slow coast must never be
+    // reported as a confirmed stop, and stop_unconfirmed stays.
+    return;
+  }
   stop_active_ = true;
   stop_started_ = now;
   quiet_ticks_ = 0;

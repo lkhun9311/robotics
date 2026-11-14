@@ -66,10 +66,12 @@ struct Wire {
   std::uint16_t tag{0};
   std::uint16_t seq{0};
 
-  explicit Wire(std::uint32_t boot_id = kBootId, Duration after_boot = milliseconds(100))
+  explicit Wire(std::uint32_t boot_id = kBootId, Duration after_boot = milliseconds(100),
+                Duration before_power_on = milliseconds(0))
       : drive(kNode, boot_id, kBoot) {
     drive.set_event_sink([this](const DriveEvent& e) { events.push_back(e); });
-    drive.power_on();
+    clock.advance(before_power_on);
+    drive.power_on(now());
     clock.advance(after_boot);
     nmt(cc::NmtCommand::kStart);
   }
@@ -389,6 +391,20 @@ TEST(Sdo, CommitInWrongStateAborts) {
     EXPECT_EQ(abort_of(w.write(od::addr::exec_commit, w.stage(r))), abort_code::kDeviceState);
     EXPECT_EQ(w.value(od::addr::exec_tag), 0U);
     w.clock.advance(milliseconds(50));
+    EXPECT_NE(w.adopt(r), 0);
+  }
+  {
+    // D3: the quarantine counts from boot-up (power_on), not from constructing the Drive.
+    SCOPED_TRACE("boot quarantine from power-on");
+    Wire w(kBootId, milliseconds(0), milliseconds(500));
+    w.cw(0x06);
+    w.cw(0x07);
+    ASSERT_EQ(w.state(), Cia402State::kSwitchedOn);
+    EXPECT_EQ(abort_of(w.write(od::addr::exec_commit, w.stage(r))), abort_code::kDeviceState);
+    EXPECT_EQ(w.value(od::addr::exec_tag), 0U);
+    w.clock.advance(milliseconds(99));
+    EXPECT_EQ(abort_of(w.write(od::addr::exec_commit, w.stage(r))), abort_code::kDeviceState);
+    w.clock.advance(milliseconds(1));
     EXPECT_NE(w.adopt(r), 0);
   }
   {

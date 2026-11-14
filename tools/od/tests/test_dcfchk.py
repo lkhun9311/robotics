@@ -2,9 +2,8 @@
 """Lely `dcfchk` (dcf-tools 2.3.5) as an independent lint of the drive EDS.
 
 Which tool checks what, as observed by running `dcfchk -n 1` on each broken copy in defects.py
-(dcfchk lints sections, keys, access types, value syntax and ranges, and sub-object counts; it
-resolves PDO mappings only far enough to look the mapped entries up, so it never judges a
-mapping's direction, mappability or length):
+(only these five defects are calibrated; dcfchk resolves PDO mappings only far enough to look
+the mapped entries up, so it never judges a mapping's direction, mappability or length):
 
   defect               dcfchk -n 1                                       od.validate
   map_72_bits          misses (exit 0)                                   catches

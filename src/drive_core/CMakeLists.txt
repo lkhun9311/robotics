@@ -10,6 +10,8 @@ file(GLOB DRIVE_CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*
 add_library(drive_core ${DRIVE_CORE_SOURCES})
 add_library(drive_core::drive_core ALIAS drive_core)
 robotics_apply_flags(drive_core)
+# The public headers need C++20; an outside consumer of the exported target gets it from here.
+target_compile_features(drive_core PUBLIC cxx_std_20)
 target_include_directories(drive_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)

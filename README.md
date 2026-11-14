@@ -102,14 +102,19 @@ What the contract fixes:
 - SYNC timeline: RPDOs received between SYNC k and k+1 are actuated at SYNC k+1; TPDOs are
   sampled at SYNC k. Loss of SYNC or of commands, an integrity violation or leaving NMT
   Operational starts a quick stop.
+- TPDO2 `applied_seq` (with TPDO3 `applied_tag`) reports the command the drive accepted for
+  actuation at that SYNC: drive verification, not plant motion. Position and velocity in the
+  same sample predate it; the joint first follows it at the next W tick. Plant application is
+  reported by `plantd` (E5).
 - Quick stop is an achieved deceleration ramp, not a switch of state. A stop not confirmed at
   rest within 0.112 s is reported unconfirmed (a fault reaction then ends in Fault). While the
   latest stop is unconfirmed, the drive refuses every entry into Operation Enabled, also after
   Fault Reset and a new commit; only observing the joint at rest (below 0.01 rad/s for 5 ticks)
   clears it.
-- A command pair dropped because the drive was not Operation Enabled binds its target to its
-  sequence number: the same sequence may be sent again with a new deadline, but another target
-  for it is an integrity violation.
+- A command pair dropped because the drive was not Operation Enabled, or a sequence number
+  evicted from the full eight-slot assembly window, binds its target to its sequence number:
+  another target for it is an integrity violation. A master re-sends the command under a new
+  sequence number (host obligation 8).
 - A policy stop sets a latch that survives reset node and reset communication and clears only
   through an explicit policy reset.
 - Fault layers separate controlled faults from torque loss; after torque loss the drive stays in
@@ -128,7 +133,7 @@ Which tool checks what:
 | Check | Tool | What it covers |
 |---|---|---|
 | Wire bytes | Python wire encoder (`tools/od/wire.py`), independent of the C++ codec and of the shared EDS loader | Golden vectors (`tools/od/make_golden.py`) that the C++ codec must reproduce byte for byte |
-| EDS syntax | Lely `dcfchk` 2.3.5 (`tools/od/tests/test_dcfchk.py`) | Catches sections, keys, access types, value syntax and ranges, sub-object counts. Misses PDO mappings that are 72 bits long, map an unmappable object, or map a read-only object into an RPDO |
+| EDS syntax | Lely `dcfchk` 2.3.5 (`tools/od/tests/test_dcfchk.py`) | Calibrated on five broken copies: catches a missing sub-object (0x1018:01) and the `0x80+$NODEID` default form it cannot parse; misses PDO mappings that are 72 bits long, map an unmappable object, or map a read-only object into an RPDO. No other defect class is calibrated |
 | EDS contract | project validator and `tools/od/tests/test_od.py` | The PDO mapping rules `dcfchk` misses, and every object, type, default and PDO layout of the contract, restated by hand in the test |
 | CiA 402 transitions | table written from the standard text, in the drive core tests | The transitions of the state machine |
 | Bandwidth | `tools/od/bandwidth.py` | Frame count and occupancy computed from the EDS |
@@ -139,12 +144,12 @@ is E3b and E3c and covers the standard part only.
 
 Measured and computed:
 
-- Total travel after a command stops being valid, with the validity deadline swept over 20
-  phases of one control tick W (`TotalTravelWithinBoundAcrossPhases` in
-  `src/drive_core/test/test_drive_loop.cpp`, which pins the value): maximum 0.097 rad (24 ticks
-  at v_max, 0.048 rad, plus the braking ramp from v_max, 0.049 rad) against an allowance of 0.100 rad
-  (lease 48 ms at v_max 1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not
-  industry values.
+- Total travel of the last command, measured from the moment it is sent (its deadline minus the
+  48 ms lease) to rest, with the validity deadline swept over 20 phases of one control tick W
+  (`TotalTravelWithinBoundAcrossPhases` in `src/drive_core/test/test_drive_loop.cpp`, which pins
+  the value): maximum 0.097 rad, the lease interval (24 ticks at v_max, 0.048 rad) plus the
+  braking ramp from v_max (0.049 rad), against an allowance of 0.100 rad (lease 48 ms at v_max
+  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values.
 - Bandwidth (`python3 tools/od/bandwidth.py config/od/vdrive_arm.eds`): per 10 ms bus cycle
   1 SYNC + 6 x (2 RPDO + 3 TPDO) = 31 frames; RPDO3 is event-driven and not counted. At the
   worst-case 135 bits per 8-byte frame (47 + 8n + floor((34 + 8n - 1)/4) with stuffing) the
@@ -181,7 +186,12 @@ Residual risks and deviations:
    sequence number to one target and treats a different target for a used sequence number as an
    integrity violation; but if a master re-sends a sequence number with a new target and that
    RPDO1 is lost while a delayed copy of the earlier RPDO1 arrives, the drive cannot tell it from
-   a legitimate re-send and would actuate the earlier target under the new deadline.
+   a legitimate re-send and would actuate the earlier target under the new deadline. A re-sent
+   sequence number must also be byte-identical in both RPDOs: a new deadline or a new target
+   takes a new sequence number. Otherwise a late fragment of the original that differs from the
+   re-send (an RPDO2 whose deadline is still open on arrival, or an RPDO1 with the earlier
+   target) is a second payload for that sequence number: an integrity violation that latches the
+   policy stop and needs a policy reset.
 
 Decision index (the `D<n>` references in code comments):
 

@@ -81,6 +81,11 @@ CommandAssembler::Slot* CommandAssembler::slot_for(std::uint16_t seq) {
       return nullptr;
     }
     free = oldest;
+    if (free->has_rpdo1) {
+      // D8 has no overflow exception: the evicted seq keeps its target bound, so another target
+      // for it later is still an integrity violation.
+      bind_dropped(free->seq, free->rpdo1.target_position);
+    }
   }
   *free = Slot{};
   free->used = true;
@@ -134,6 +139,8 @@ OfferResult CommandAssembler::offer(const Rpdo1& fragment) {
   }
   Slot* slot = slot_for(fragment.command_seq);
   if (slot == nullptr) {
+    // The arriving seq is the oldest of a full window: its target stays bound like an evicted one.
+    bind_dropped(fragment.command_seq, fragment.target_position);
     return OfferResult::kDroppedSuperseded;
   }
   if (slot->has_rpdo1) {
@@ -180,6 +187,10 @@ void CommandAssembler::mark_dropped(const Command& command) {
   if (command.exec_tag == 0 || command.exec_tag != issuer_.current()) {
     return;
   }
+  bind_dropped(command.command_seq, command.target_position);
+}
+
+void CommandAssembler::bind_dropped(std::uint16_t seq, std::int32_t target) {
   Dropped* free = nullptr;
   Dropped* oldest = &dropped_candidates_.front();
   for (Dropped& d : dropped_candidates_) {
@@ -187,7 +198,7 @@ void CommandAssembler::mark_dropped(const Command& command) {
       free = free != nullptr ? free : &d;
       continue;
     }
-    if (d.seq == command.command_seq) {
+    if (d.seq == seq) {
       return;  // Same seq again: its target already matched (offer checked it).
     }
     if (!oldest->used || runtime_core::seq16_newer(oldest->seq, d.seq)) {
@@ -202,7 +213,7 @@ void CommandAssembler::mark_dropped(const Command& command) {
     }
     free = oldest;
   }
-  *free = Dropped{true, command.command_seq, command.target_position};
+  *free = Dropped{true, seq, target};
 }
 
 AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {

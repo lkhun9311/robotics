@@ -26,6 +26,8 @@ add_library(canopen_codec ${CANOPEN_CODEC_SOURCES} ${CANOPEN_CODEC_OD_HEADER})
 add_library(canopen_codec::canopen_codec ALIAS canopen_codec)
 add_dependencies(canopen_codec canopen_codec_od_header)
 robotics_apply_flags(canopen_codec)
+# The public headers need C++20; an outside consumer of the exported target gets it from here.
+target_compile_features(canopen_codec PUBLIC cxx_std_20)
 target_include_directories(canopen_codec PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CANOPEN_CODEC_GEN_INCLUDE}>

@@ -56,7 +56,7 @@ struct Loop {
 
   Loop() {
     drive.set_event_sink([this](const DriveEvent& e) { events.push_back(e); });
-    drive.power_on();
+    drive.power_on(now());
     clock.advance(milliseconds(100));
     frame(cc::encode_nmt({cc::NmtCommand::kStart, kNode}));
   }
@@ -301,6 +301,34 @@ TEST(DriveGuard, NeverActuatedAtExpiry) {
   EXPECT_EQ(l.stop_reason(), QuickStopReason::kExpiry);
   EXPECT_FALSE(l.drive.actuated().has_value());
   EXPECT_EQ(l.drive.joint().velocity_nrad_s, kVMax - kDvPerTick);  // Braked, not tracked.
+}
+
+// D5: an RPDO2 whose deadline is beyond the lease when it is received is dropped then; waiting in
+// the window for the next SYNC must not bring it inside the lease.
+TEST(DriveGuard, TooFarAheadAtIngestionIsDropped) {
+  Loop l;
+  l.enable();
+  l.sync();
+  l.command(kFar, milliseconds(58));  // 10 ms beyond the lease when received.
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 1U);
+  l.ticks(5);
+  l.sync();  // The deadline is now exactly 48 ms ahead.
+  EXPECT_FALSE(l.drive.actuated().has_value());
+  EXPECT_EQ(l.count(DriveEventKind::kActuated), 0U);
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 1U);
+}
+
+// D8 before D5: a fragment of another tag is an other-tag drop whatever its deadline.
+TEST(DriveGuard, OtherTagRpdo2WithExpiredDeadlineIsAnOtherTagDrop) {
+  Loop l;
+  l.enable();
+  l.sync();
+  const auto old_tag = static_cast<std::uint16_t>(l.tag - 1);
+  l.frame(cc::pack_rpdo2(kNode, od::Rpdo2{to_wire_us(l.now()), 1, old_tag}));  // Expired.
+  l.ticks(5);
+  l.sync();
+  EXPECT_EQ(l.dropped(DropReason::kOtherTag), 1U);
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 0U);
 }
 
 TEST(DriveGuard, ExpiredDetectedWithinW) {
@@ -940,6 +968,28 @@ TEST(Fault, TorqueLossIsNotAControlledStop) {
   EXPECT_EQ(l.count(DriveEventKind::kQuickStop), 0U);
   EXPECT_EQ(l.count(DriveEventKind::kStopConfirmed), 0U);
   EXPECT_FALSE(l.drive.stop_confirmed());
+}
+
+// D11: a stop that becomes due after the torque loss (here a pending integrity stop) must not
+// start a monitor that then reads a slow coast as a confirmed stop.
+TEST(Fault, TorqueLossWithPendingIntegrityNeverConfirmsStop) {
+  Loop l;
+  l.enable();
+  l.sync();
+  l.command(8);  // 8 µrad: one tick of tracking leaves 0.004 rad/s, below the quiet threshold.
+  l.ticks(5);
+  l.sync();
+  ASSERT_EQ(l.count(DriveEventKind::kActuated), 1U);
+  l.tick();
+  ASSERT_EQ(l.drive.joint().velocity_nrad_s, 4'000'000);
+  l.rpdo1(l.seq, 9);  // A second payload for the actuated seq.
+  ASSERT_EQ(l.count(DriveEventKind::kIntegrity), 1U);
+  l.drive.inject_torque_loss(l.now());
+  l.ticks(200);
+  EXPECT_EQ(l.count(DriveEventKind::kStopConfirmed), 0U);
+  EXPECT_FALSE(l.drive.stop_confirmed());
+  EXPECT_TRUE(l.drive.stop_unconfirmed());
+  EXPECT_EQ(l.drive.joint().velocity_nrad_s, 4'000'000);  // Still coasting.
 }
 
 TEST(Fault, TorqueLossHoldsFaultAcrossResetAndResetNode) {

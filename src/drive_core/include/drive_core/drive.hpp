@@ -65,7 +65,7 @@ inline constexpr std::uint16_t kErrorTorqueLoss = 0xFF01;
 enum class DropReason : std::uint8_t {
   kOtherTag,       // Fragment of another (or no) tag.
   kStaleSeq,       // Fragment seq not newer than the last actuated.
-  kNotValid,       // Pair expired or beyond the lease at actuation.
+  kNotValid,       // Deadline expired or beyond the lease (RPDO2 at receipt, pair at actuation).
   kMissingHalf,    // A lone half at SYNC: an ordinary gap.
   kBlocked,        // Current-tag fragment after an integrity violation.
   kSuperseded,     // Complete pair older than the newest at the same SYNC.
@@ -127,9 +127,9 @@ class Drive {
   Drive(const Drive&) = delete;
   Drive& operator=(const Drive&) = delete;
 
-  // Power on: CiA 402 initialisation, NMT boot-up. Returns the boot-up message. The node stays
-  // in Pre-operational until an NMT Start.
-  std::vector<canopen_codec::Frame> power_on();
+  // Power on at `now`: CiA 402 initialisation, NMT boot-up. Returns the boot-up message. The
+  // node stays in Pre-operational until an NMT Start. The boot quarantine (D3) counts from here.
+  std::vector<canopen_codec::Frame> power_on(runtime_core::MonoTime now);
 
   // Handles one received frame and returns the frames to send in reply (TPDO1-3 after an
   // accepted SYNC in Operational, D7/D13). Never throws for any frame content; the only throw is
