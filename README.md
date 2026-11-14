@@ -184,9 +184,10 @@ Residual risks and deviations:
    RPDO1 is lost while a delayed copy of the earlier RPDO1 arrives, the drive cannot tell it from
    a legitimate re-send and would actuate the earlier target under the new deadline. A re-sent
    sequence number must also be byte-identical in both RPDOs: a new deadline or a new target
-   takes a new sequence number. Otherwise a late fragment of the original, arriving while its
-   deadline is still open, is a second payload for that sequence number: an integrity violation
-   that latches the policy stop and needs a policy reset.
+   takes a new sequence number. Otherwise a late fragment of the original that differs from the
+   re-send (an RPDO2 whose deadline is still open on arrival, or an RPDO1 with the earlier
+   target) is a second payload for that sequence number: an integrity violation that latches the
+   policy stop and needs a policy reset.
 
 Decision index (the `D<n>` references in code comments):
 
