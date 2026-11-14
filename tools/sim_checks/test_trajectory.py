@@ -86,7 +86,8 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     received = [t for t, _ in mujoco]
     receive_gap = max(b - a for a, b in zip(received, received[1:]))
     # Captured by pytest: shown only with -rP or when the test fails.
-    print(f"largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s")
+    print(f"first stamp {stamps[0] - sent:+.4f} s after send, last {stamps[-1] - result:+.4f} s after "
+          f"result, largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s")
     assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_STAMP_GAP_S, (
         f"samples do not span the interval in simulation time: first stamp {stamps[0] - sent:+.3f} s "
         f"after send, last {stamps[-1] - result:+.3f} s after result, largest stamp gap {gap:.3f} s "

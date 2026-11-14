@@ -106,7 +106,6 @@ class Sim:
         self._latest = collections.defaultdict(lambda: (0, None))
         # topic -> [(monotonic receive time, message value)] while a recording is open
         self._recording = None
-        self._recording_subscribed = False
 
     # --- lifecycle ---
 
@@ -236,18 +235,7 @@ class Sim:
     def start_recording(self):
         """Keep every /mujoco_actuators_states and controller_state message from now on, with
         its monotonic receive time, until `stop_recording()`. The recording has its own deep
-        subscriptions, created on first use and kept until the node stops."""
-        if not self._recording_subscribed:
-            from control_msgs.msg import JointTrajectoryControllerState
-            from sensor_msgs.msg import JointState
-
-            self._node.create_subscription(
-                JointState, MUJOCO_STATES,
-                lambda m: self._record(MUJOCO_STATES, _sample_of(m)), RECORD_QUEUE_DEPTH)
-            self._node.create_subscription(
-                JointTrajectoryControllerState, CONTROLLER_STATE,
-                lambda m: self._record(CONTROLLER_STATE, _controller_state_of(m)), RECORD_QUEUE_DEPTH)
-            self._recording_subscribed = True
+        subscriptions, created with the node."""
         with self._cond:
             self._recording = collections.defaultdict(list)
 
@@ -310,11 +298,19 @@ class Sim:
         self._ctx = rclpy.Context()
         rclpy.init(context=self._ctx)
         self._node = rclpy.create_node("sim_checks", context=self._ctx)
-        self._recording_subscribed = False
         for topic in ("/joint_states", "/mujoco_actuators_states"):
             self._node.create_subscription(JointState, topic, lambda m, t=topic: self._on_state(t, m), 10)
         self._node.create_subscription(JointTrajectoryControllerState, CONTROLLER_STATE,
                                        self._on_controller_state, 10)
+        # Recording subscriptions are created here, not in start_recording(): discovery and
+        # matching then happen while start() waits for the controllers, and a reader matched
+        # late would miss the start of the recorded interval (volatile durability).
+        self._node.create_subscription(
+            JointState, MUJOCO_STATES, lambda m: self._record(MUJOCO_STATES, m, _sample_of),
+            RECORD_QUEUE_DEPTH)
+        self._node.create_subscription(
+            JointTrajectoryControllerState, CONTROLLER_STATE,
+            lambda m: self._record(CONTROLLER_STATE, m, _controller_state_of), RECORD_QUEUE_DEPTH)
         if self._on_frame is not None:
             from sensor_msgs.msg import Image
 
@@ -356,12 +352,15 @@ class Sim:
             self._latest[topic] = (self._latest[topic][0] + 1, value)
             self._cond.notify_all()
 
-    def _record(self, topic, value):
+    def _record(self, topic, msg, convert):
         received = time.monotonic()
         with self._cond:
-            if self._recording is not None:
-                self._recording[topic].append((received, value))
-                self._cond.notify_all()
+            # Outside a recording, drop the message before converting it: these subscriptions
+            # exist for the whole run, and converting every 500 Hz message would cost for nothing.
+            if self._recording is None:
+                return
+            self._recording[topic].append((received, convert(msg)))
+            self._cond.notify_all()
 
 
 def _sample_of(msg):
