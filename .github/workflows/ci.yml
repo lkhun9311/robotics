@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 name: ci
 on:
+  # Feature branches run through their pull request only; a push trigger as well would run
+  # every commit twice.
   push:
-    branches: [main, dev, "feat/**"]
+    branches: [main, dev]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
