@@ -76,18 +76,36 @@ struct IoSnapshot {
   std::uint64_t trace_overflow;
 };
 
+// Failures of the inject socket (B6) itself, not of a command: never silent.
+struct InjectCounts {
+  std::uint64_t recv_errors{};  // recvfrom failures other than EAGAIN/EWOULDBLOCK/EINTR.
+  std::uint64_t send_errors{};  // Replies that could not be sent.
+  std::uint64_t truncated{};    // Datagrams longer than the command buffer: rejected, not applied.
+};
+
+// One inject socket failure, with the totals after it.
+struct InjectIo {
+  enum class Kind : std::uint8_t { kRecvError, kSendError, kTruncated };
+  runtime_core::MonoTime at;
+  Kind kind;
+  std::int64_t value;  // errno for the errors; the datagram's length for kTruncated.
+  InjectCounts totals;
+};
+
 // Normal end of the process: the last record of a complete trace.
 struct Exit {
   runtime_core::MonoTime at;
   std::uint64_t trace_overflow;
   int signal;  // The signal that ended the process; 0 if none.
+  InjectCounts inject;
 };
 
 }  // namespace trace
 
 // A tagged union: the variant index is the tag.
-using TraceRecord = std::variant<BankRecord, trace::Start, trace::Overload, trace::LoopSnapshot,
-                                 trace::DispatchSnapshot, trace::IoSnapshot, trace::Exit>;
+using TraceRecord =
+    std::variant<BankRecord, trace::Start, trace::Overload, trace::LoopSnapshot,
+                 trace::DispatchSnapshot, trace::IoSnapshot, trace::InjectIo, trace::Exit>;
 static_assert(std::is_trivially_copyable_v<TraceRecord>);
 static_assert(sizeof(TraceRecord) <= 128);
 

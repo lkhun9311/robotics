@@ -212,3 +212,39 @@ def test_killed_bank_is_judged_without_an_exit_record(start_bank):
     assert not bank.trace.of("exit"), "a killed process cannot have written an exit record"
     assert bank.trace.of("start"), "records up to the kill are kept"
     # Teardown (the traced fixture) must accept this process without an exit record.
+
+
+def test_inject_socket_applies_and_answers(start_bank, capture, inject_client):
+    cap = capture(DEVICE_IF)
+    bank = start_bank(inject=True)
+    client = inject_client(bank)
+    assert client.ask(b"fault 2 1234") == b"ok"
+    emcy = wait_frames(cap, lambda f: f[1] == 0x082 and f[2][:2] == b"\x34\x12", 1, 1.0)
+    assert emcy, "no EMCY 0x082 with error code 0x1234 on the wire"
+    bank.trace.wait_for(lambda r: r.get("event") == "inject" and r["text"] == "ok fault 2 1234",
+                        1, "inject record")
+    reply = client.ask(b"bogus")
+    assert reply.startswith(b"err "), reply
+    bank.trace.wait_for(lambda r: r.get("event") == "inject" and r["text"].startswith("err "),
+                        1, "rejected inject record")
+    exit_record = bank.stop()
+    assert exit_record["inject"] == {"recv_errors": 0, "send_errors": 0, "truncated": 0}
+    assert not bank.inject_path.exists(), "the inject socket file outlived the process"
+
+
+def test_inject_truncated_datagram_is_rejected(start_bank, capture, inject_client):
+    """A datagram longer than the command buffer is rejected and counted, never applied cut."""
+    cap = capture(DEVICE_IF)
+    bank = start_bank(inject=True)
+    client = inject_client(bank)
+    # Cut to 128 bytes and stripped of its newlines, this would be a valid command.
+    command = b"fault 3 4321" + b"\n" * 288
+    reply = client.ask(command)
+    assert reply.startswith(b"err ") and b"truncated" in reply, reply
+    time.sleep(0.2)
+    assert not [f for f in cap.frames if f[1] == 0x083], "the cut command was applied"
+    record = bank.trace.wait_for(lambda r: r.get("event") == "inject_io", 1, "inject_io record")
+    assert record["kind"] == "truncated" and record["value"] == len(command), record
+    exit_record = bank.stop()
+    assert exit_record["inject"]["truncated"] == 1, exit_record
+    assert not bank.trace.of("inject"), "a truncated datagram must not reach the bank"

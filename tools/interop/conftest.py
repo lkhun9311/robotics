@@ -432,9 +432,11 @@ def start_bank(vcan, traced, tmp_path):
         n = len(traced)
         trace = tmp_path / f"bank{n}.jsonl"
         argv = [VDRIVE_BANK_BIN, "--if", DEVICE_IF, "--trace", trace]
+        inject_path = tmp_path / f"bank{n}.sock" if inject else None
         if inject:
-            argv += ["--inject", tmp_path / f"bank{n}.sock"]
+            argv += ["--inject", inject_path]
         p = TracedProc("vdrive_bank", argv, trace)
+        p.inject_path = inject_path
         traced.append(p)
         return p.ready()
     return start
@@ -497,3 +499,37 @@ def peer(vcan):
     yield open_peer
     for p in peers:
         p.close()
+
+
+class InjectClient:
+    """A B6 client: one bound UNIX datagram socket, so the bank can answer."""
+
+    def __init__(self, server, path):
+        self.server = str(server)
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self._sock.bind(str(path))
+        self._sock.settimeout(1.0)
+
+    def ask(self, command):
+        self._sock.sendto(command, self.server)
+        try:
+            return self._sock.recv(256)
+        except socket.timeout:
+            inconclusive(f"no reply to {command[:40]!r} within 1 s")
+
+    def close(self):
+        self._sock.close()
+
+
+@pytest.fixture
+def inject_client(tmp_path):
+    clients = []
+
+    def open_client(bank):
+        assert bank.inject_path is not None, "the bank was started without --inject"
+        c = InjectClient(bank.inject_path, tmp_path / f"client{len(clients)}.sock")
+        clients.append(c)
+        return c
+    yield open_client
+    for c in clients:
+        c.close()

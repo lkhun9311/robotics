@@ -50,6 +50,9 @@ class BankLoop {
   // The loop, dispatch (per node) and I/O snapshot records at `at`.
   std::vector<TraceRecord> snapshot(runtime_core::MonoTime at) const;
   TraceRecord exit_record(runtime_core::MonoTime at, int signal) const;
+  // A failure of the inject socket (the process's I/O around inject()): counted and traced.
+  void note_inject_io(trace::InjectIo::Kind kind, std::int64_t value);
+  const trace::InjectCounts& inject_counts() const { return inject_counts_; }
 
   void set_time_observer(TimeObserver observer) { observer_ = std::move(observer); }
 
@@ -67,6 +70,7 @@ class BankLoop {
   std::uint64_t next_k_{1};  // Index of the next release.
   runtime_core::MonoTime next_snapshot_;
   LoopCounts counts_;
+  trace::InjectCounts inject_counts_;
   TimeObserver observer_;
 };
 

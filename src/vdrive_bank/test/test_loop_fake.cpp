@@ -198,6 +198,32 @@ TEST(BankLoop, SlowDispatchSkipsAndThreeSkipsOverload) {
   EXPECT_EQ(overloads, 1);
 }
 
+TEST(BankLoop, InjectSocketFailuresAreCountedAndTraced) {
+  Rig rig;
+  rig.drain_ring();
+  using Kind = vdrive_bank::trace::InjectIo::Kind;
+  rig.loop.note_inject_io(Kind::kTruncated, 300);
+  rig.loop.note_inject_io(Kind::kRecvError, 104);
+  rig.loop.note_inject_io(Kind::kSendError, 111);
+  rig.loop.note_inject_io(Kind::kTruncated, 129);
+  const vdrive_bank::trace::InjectCounts& c = rig.loop.inject_counts();
+  EXPECT_EQ(c.truncated, 2U);
+  EXPECT_EQ(c.recv_errors, 1U);
+  EXPECT_EQ(c.send_errors, 1U);
+  std::vector<vdrive_bank::trace::InjectIo> traced;
+  for (const TraceRecord& r : rig.drain_ring()) {
+    if (const auto* io = std::get_if<vdrive_bank::trace::InjectIo>(&r)) {
+      traced.push_back(*io);
+    }
+  }
+  ASSERT_EQ(traced.size(), 4U);
+  EXPECT_EQ(traced[0].value, 300);
+  EXPECT_EQ(traced[3].totals.truncated, 2U);
+  const auto exit = std::get<vdrive_bank::trace::Exit>(rig.loop.exit_record(rig.sim.now, 15));
+  EXPECT_EQ(exit.inject.truncated, 2U);
+  EXPECT_EQ(exit.inject.send_errors, 1U);
+}
+
 TEST(BankLoop, TimeNeverDecreases) {
   Rig rig;
   // Irregular dispatch times including zero (the budget path) and long stalls.

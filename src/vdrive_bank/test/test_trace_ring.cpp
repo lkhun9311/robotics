@@ -19,7 +19,7 @@ using vdrive_bank::TraceWriter;
 namespace trace = vdrive_bank::trace;
 
 TraceRecord numbered(std::uint64_t n) {
-  return trace::Exit{MonoTime{static_cast<std::int64_t>(n)}, 0, 0};
+  return trace::Exit{MonoTime{static_cast<std::int64_t>(n)}, 0, 0, {}};
 }
 
 void expect_has(const std::string& json, const std::string& part) {
@@ -126,8 +126,13 @@ TEST(TraceRecord, EveryKindSerializes) {
     expect_has(j, R"("rx_reject_budget_hits":0)");
     expect_has(j, R"("tx_enobufs":1)");
   }
-  expect_has(vdrive_bank::to_json(trace::Exit{MonoTime{11}, 0, 15}),
-             R"({"event":"exit","t_ns":11,"trace_overflow":0,"signal":15})");
+  expect_has(vdrive_bank::to_json(trace::Exit{MonoTime{11}, 0, 15, {1, 2, 3}}),
+             R"({"event":"exit","t_ns":11,"trace_overflow":0,"signal":15,)"
+             R"("inject":{"recv_errors":1,"send_errors":2,"truncated":3}})");
+  expect_has(vdrive_bank::to_json(
+                 trace::InjectIo{MonoTime{12}, trace::InjectIo::Kind::kTruncated, 300, {0, 0, 1}}),
+             R"({"event":"inject_io","t_ns":12,"kind":"truncated","value":300,)"
+             R"("inject":{"recv_errors":0,"send_errors":0,"truncated":1}})");
 }
 
 TEST(TraceRing, FullRingCountsOverflowAndNeverBlocks) {

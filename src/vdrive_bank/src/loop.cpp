@@ -128,7 +128,22 @@ std::vector<TraceRecord> BankLoop::snapshot(MonoTime at) const {
 }
 
 TraceRecord BankLoop::exit_record(MonoTime at, int signal) const {
-  return trace::Exit{at, ring_.overflow(), signal};
+  return trace::Exit{at, ring_.overflow(), signal, inject_counts_};
+}
+
+void BankLoop::note_inject_io(trace::InjectIo::Kind kind, std::int64_t value) {
+  switch (kind) {
+    case trace::InjectIo::Kind::kRecvError:
+      ++inject_counts_.recv_errors;
+      break;
+    case trace::InjectIo::Kind::kSendError:
+      ++inject_counts_.send_errors;
+      break;
+    case trace::InjectIo::Kind::kTruncated:
+      ++inject_counts_.truncated;
+      break;
+  }
+  ring_.push(trace::InjectIo{now_(), kind, value, inject_counts_});
 }
 
 }  // namespace vdrive_bank

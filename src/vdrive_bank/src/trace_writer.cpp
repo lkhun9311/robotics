@@ -229,11 +229,29 @@ struct ToJson {
         .num("trace_overflow", s.trace_overflow)
         .done();
   }
+  std::string operator()(const trace::InjectIo& r) const {
+    const char* kind = "recv_error";
+    if (r.kind == trace::InjectIo::Kind::kSendError) {
+      kind = "send_error";
+    } else if (r.kind == trace::InjectIo::Kind::kTruncated) {
+      kind = "truncated";
+    }
+    return Json("inject_io", r.at)
+        .str("kind", kind)
+        .num("value", r.value)
+        .raw("inject", inject_json(r.totals))
+        .done();
+  }
   std::string operator()(const trace::Exit& e) const {
     return Json("exit", e.at)
         .num("trace_overflow", e.trace_overflow)
         .num("signal", e.signal)
+        .raw("inject", inject_json(e.inject))
         .done();
+  }
+  static std::string inject_json(const trace::InjectCounts& c) {
+    return object(P{"recv_errors", c.recv_errors}, P{"send_errors", c.send_errors},
+                  P{"truncated", c.truncated});
   }
 };
 
