@@ -139,12 +139,12 @@ is E3b and E3c and covers the standard part only.
 
 Measured and computed:
 
-- Total travel after a command stops being valid, with the validity deadline swept over 20
-  phases of one control tick W (`TotalTravelWithinBoundAcrossPhases` in
-  `src/drive_core/test/test_drive_loop.cpp`, which pins the value): maximum 0.097 rad (24 ticks
-  at v_max, 0.048 rad, plus the braking ramp from v_max, 0.049 rad) against an allowance of 0.100 rad
-  (lease 48 ms at v_max 1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not
-  industry values.
+- Total travel of the last command, measured from the moment it is sent (its deadline minus the
+  48 ms lease) to rest, with the validity deadline swept over 20 phases of one control tick W
+  (`TotalTravelWithinBoundAcrossPhases` in `src/drive_core/test/test_drive_loop.cpp`, which pins
+  the value): maximum 0.097 rad, the lease interval (24 ticks at v_max, 0.048 rad) plus the
+  braking ramp from v_max (0.049 rad), against an allowance of 0.100 rad (lease 48 ms at v_max
+  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values.
 - Bandwidth (`python3 tools/od/bandwidth.py config/od/vdrive_arm.eds`): per 10 ms bus cycle
   1 SYNC + 6 x (2 RPDO + 3 TPDO) = 31 frames; RPDO3 is event-driven and not counted. At the
   worst-case 135 bits per 8-byte frame (47 + 8n + floor((34 + 8n - 1)/4) with stuffing) the
