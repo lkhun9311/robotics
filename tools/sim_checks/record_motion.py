@@ -118,7 +118,7 @@ def main(argv=None):
     failure = None
     try:
         elapsed = _record(sim, rec)
-    except Exception as e:
+    except BaseException as e:  # BaseException: Ctrl-C must still stop the sim and ffmpeg
         failure = e
     if failure is None and rec.error:
         failure = SimError(rec.error)
@@ -150,3 +150,6 @@ if __name__ == "__main__":
         for note in getattr(e, "__notes__", []):
             print(f"record_motion: {note}", file=sys.stderr)
         sys.exit(1)
+    except KeyboardInterrupt:
+        print("record_motion: interrupted", file=sys.stderr)
+        sys.exit(130)
