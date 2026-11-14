@@ -23,7 +23,7 @@ RUN gpg --dearmor < /tmp/ros-snapshots.asc > /usr/share/keyrings/ros-snapshots.g
       'Suites: noble' 'Components: main' \
       'Signed-By: /usr/share/keyrings/ros-snapshots.gpg' > /etc/apt/sources.list.d/ros2.sources
 RUN apt-get update \
- && if grep -rqs 'packages\.ros\.org' /etc/apt/sources.list /etc/apt/sources.list.d; then \
+ && if grep -Rqs 'packages\.ros\.org' /etc/apt/sources.list /etc/apt/sources.list.d; then \
       echo 'an apt source still points at packages.ros.org' >&2; exit 1; fi \
  && apt-get install -y --no-install-recommends \
       build-essential cmake git python3-colcon-common-extensions \
