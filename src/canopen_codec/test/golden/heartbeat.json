@@ -1,0 +1,11 @@
+[
+ {"name": "heartbeat_boot_up_node1", "node": 1, "cob_id": 1793, "dlc": 1, "data": [0], "fields": {"state": 0}},
+ {"name": "heartbeat_boot_up_node6", "node": 6, "cob_id": 1798, "dlc": 1, "data": [0], "fields": {"state": 0}},
+ {"name": "heartbeat_stopped_node1", "node": 1, "cob_id": 1793, "dlc": 1, "data": [4], "fields": {"state": 4}},
+ {"name": "heartbeat_stopped_node6", "node": 6, "cob_id": 1798, "dlc": 1, "data": [4], "fields": {"state": 4}},
+ {"name": "heartbeat_operational_node1", "node": 1, "cob_id": 1793, "dlc": 1, "data": [5], "fields": {"state": 5}},
+ {"name": "heartbeat_operational_node6", "node": 6, "cob_id": 1798, "dlc": 1, "data": [5], "fields": {"state": 5}},
+ {"name": "heartbeat_pre_operational_node1", "node": 1, "cob_id": 1793, "dlc": 1, "data": [127], "fields": {"state": 127}},
+ {"name": "heartbeat_pre_operational_node6", "node": 6, "cob_id": 1798, "dlc": 1, "data": [127], "fields": {"state": 127}},
+ {"name": "heartbeat_operational_node127", "node": 127, "cob_id": 1919, "dlc": 1, "data": [5], "fields": {"state": 5}}
+]

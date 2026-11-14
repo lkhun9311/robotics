@@ -1,0 +1,14 @@
+[
+ {"name": "nmt_start_node1", "node": 1, "cob_id": 0, "dlc": 2, "data": [1, 1], "fields": {"command": 1, "target_node": 1}},
+ {"name": "nmt_start_node6", "node": 6, "cob_id": 0, "dlc": 2, "data": [1, 6], "fields": {"command": 1, "target_node": 6}},
+ {"name": "nmt_stop_node1", "node": 1, "cob_id": 0, "dlc": 2, "data": [2, 1], "fields": {"command": 2, "target_node": 1}},
+ {"name": "nmt_stop_node6", "node": 6, "cob_id": 0, "dlc": 2, "data": [2, 6], "fields": {"command": 2, "target_node": 6}},
+ {"name": "nmt_pre_operational_node1", "node": 1, "cob_id": 0, "dlc": 2, "data": [128, 1], "fields": {"command": 128, "target_node": 1}},
+ {"name": "nmt_pre_operational_node6", "node": 6, "cob_id": 0, "dlc": 2, "data": [128, 6], "fields": {"command": 128, "target_node": 6}},
+ {"name": "nmt_reset_node_node1", "node": 1, "cob_id": 0, "dlc": 2, "data": [129, 1], "fields": {"command": 129, "target_node": 1}},
+ {"name": "nmt_reset_node_node6", "node": 6, "cob_id": 0, "dlc": 2, "data": [129, 6], "fields": {"command": 129, "target_node": 6}},
+ {"name": "nmt_reset_communication_node1", "node": 1, "cob_id": 0, "dlc": 2, "data": [130, 1], "fields": {"command": 130, "target_node": 1}},
+ {"name": "nmt_reset_communication_node6", "node": 6, "cob_id": 0, "dlc": 2, "data": [130, 6], "fields": {"command": 130, "target_node": 6}},
+ {"name": "nmt_start_node127", "node": 127, "cob_id": 0, "dlc": 2, "data": [1, 127], "fields": {"command": 1, "target_node": 127}},
+ {"name": "nmt_reset_node_node0", "node": 0, "cob_id": 0, "dlc": 2, "data": [129, 0], "fields": {"command": 129, "target_node": 0}}
+]

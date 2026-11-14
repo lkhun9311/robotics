@@ -1,0 +1,9 @@
+[
+ {"name": "emcy_0000_node1", "node": 1, "cob_id": 129, "dlc": 8, "data": [0, 0, 0, 0, 0, 0, 0, 0], "fields": {"error_code": 0, "error_register": 0, "manufacturer": 0}},
+ {"name": "emcy_8130_node1", "node": 1, "cob_id": 129, "dlc": 8, "data": [48, 129, 17, 1, 2, 3, 4, 5], "fields": {"error_code": 33072, "error_register": 17, "manufacturer": 21542142465}},
+ {"name": "emcy_ffff_node1", "node": 1, "cob_id": 129, "dlc": 8, "data": [255, 255, 255, 255, 255, 255, 255, 255], "fields": {"error_code": 65535, "error_register": 255, "manufacturer": 1099511627775}},
+ {"name": "emcy_0000_node6", "node": 6, "cob_id": 134, "dlc": 8, "data": [0, 0, 0, 0, 0, 0, 0, 0], "fields": {"error_code": 0, "error_register": 0, "manufacturer": 0}},
+ {"name": "emcy_8130_node6", "node": 6, "cob_id": 134, "dlc": 8, "data": [48, 129, 17, 1, 2, 3, 4, 5], "fields": {"error_code": 33072, "error_register": 17, "manufacturer": 21542142465}},
+ {"name": "emcy_ffff_node6", "node": 6, "cob_id": 134, "dlc": 8, "data": [255, 255, 255, 255, 255, 255, 255, 255], "fields": {"error_code": 65535, "error_register": 255, "manufacturer": 1099511627775}},
+ {"name": "emcy_8130_node127", "node": 127, "cob_id": 255, "dlc": 8, "data": [48, 129, 17, 1, 2, 3, 4, 5], "fields": {"error_code": 33072, "error_register": 17, "manufacturer": 21542142465}}
+]
