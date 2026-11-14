@@ -42,11 +42,11 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=283
+GTEST_FLOOR=284
 PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
-VCAN_FLOOR=16
+VCAN_FLOOR=23
 TSAN_FLOOR=29
 
 require_at_least() {

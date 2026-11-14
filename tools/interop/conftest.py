@@ -241,12 +241,16 @@ def start_probe(vcan, procs, probe_eds):
 
 @pytest.fixture
 def start_peer(vcan, procs, dcf_dir):
-    def start(scenario="idle", duration_ms=None):
+    def start(scenario="idle", duration_ms=None, node=None, count=None):
         assert LELY_PEER_BIN.exists(), f"NOT_RUN: {LELY_PEER_BIN} not built"
         argv = [LELY_PEER_BIN, "--if", vcan, "--dcf", dcf_dir / "master.dcf",
                 "--scenario", scenario]
         if duration_ms is not None:
             argv += ["--duration-ms", duration_ms]
+        if node is not None:
+            argv += ["--node", node]
+        if count is not None:
+            argv += ["--count", count]
         # cwd = the DCF directory: a concise DCF (UploadFile=<name>.bin, relative) would be found
         # and downloaded, so a configuration write cannot hide behind a missing file.
         p = Proc("lely_peer", argv, cwd=dcf_dir)

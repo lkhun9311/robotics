@@ -3,6 +3,7 @@
 // helpers are unit-tested without a bus.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -44,5 +45,14 @@ Number parse_number(std::string_view text, std::uint64_t low, std::uint64_t high
 
 // Escapes a string for a JSON string literal (quotes not included).
 std::string json_escape(std::string_view text);
+
+// CRC-32/ISO-HDLC (reflected polynomial 0x04C11DB7, init and final XOR 0xFFFFFFFF), written here
+// from the algorithm's parameters so the peer does not share the drive's implementation.
+std::uint32_t crc32_iso_hdlc(const std::uint8_t* data, std::size_t size);
+
+// The drive extension's commit value (0x2011): the CRC over the little-endian bytes of
+// attempt_id, generation_lo, generation_hi and session_lo, in that order.
+std::uint32_t commit_crc(std::uint32_t attempt_id, std::uint32_t generation_lo,
+                         std::uint32_t generation_hi, std::uint32_t session_lo);
 
 }  // namespace lely_peer

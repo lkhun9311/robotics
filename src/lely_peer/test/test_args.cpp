@@ -64,4 +64,18 @@ TEST(JsonEscape, EscapesQuotesBackslashAndControls) {
   EXPECT_EQ(json_escape(std::string_view("\x01", 1)), "\\u0001");
 }
 
+TEST(Crc, IsoHdlcCheckValueAndCommitLayout) {
+  // The catalogue check value of CRC-32/ISO-HDLC: the CRC of the ASCII bytes "123456789".
+  const std::string_view check = "123456789";
+  std::vector<std::uint8_t> bytes(check.begin(), check.end());
+  EXPECT_EQ(lely_peer::crc32_iso_hdlc(bytes.data(), bytes.size()), 0xCBF4'3926U);
+  // The commit value is the same CRC over the four words, each little-endian.
+  const std::vector<std::uint8_t> words{0x01, 0x00, 0x00, 0x00, 0xEF, 0xCD, 0xAB, 0x89,
+                                        0x67, 0x45, 0x23, 0x01, 0xEF, 0xBE, 0xAD, 0xDE};
+  EXPECT_EQ(lely_peer::commit_crc(1, 0x89AB'CDEF, 0x0123'4567, 0xDEAD'BEEF),
+            lely_peer::crc32_iso_hdlc(words.data(), words.size()));
+  EXPECT_NE(lely_peer::commit_crc(1, 0x89AB'CDEF, 0x0123'4567, 0xDEAD'BEEF),
+            lely_peer::commit_crc(2, 0x89AB'CDEF, 0x0123'4567, 0xDEAD'BEEF));
+}
+
 }  // namespace
