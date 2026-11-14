@@ -87,6 +87,39 @@ suites = [root] if root.tag == "testsuite" else root.iter("testsuite")
 print(sum(int(s.get("tests", 0)) - int(s.get("skipped", 0)) for s in suites))' "$1"
 }
 
+# Every production source of a package (its src/ directory) must be compiled with the sanitizer
+# flags: one sanitized test file must not stand in for an unsanitized library. Fails naming each
+# file without them, and fails when the database has no entry under the directory at all.
+require_sanitized() {
+  python3 - "$1" "$2" <<'EOF'
+import json, os, shlex, sys
+
+src_dir, db = os.path.realpath(sys.argv[1]), sys.argv[2]
+flag = "-fsanitize=address,undefined"
+try:
+    with open(db) as f:
+        entries = json.load(f)
+except (OSError, ValueError) as e:
+    sys.exit(f"FAIL: sanitizer flags: cannot read {db}: {e}")
+checked, missing = 0, []
+for entry in entries:
+    path = os.path.realpath(os.path.join(entry.get("directory", ""), entry["file"]))
+    if os.path.commonpath([path, src_dir]) != src_dir:
+        continue
+    checked += 1
+    args = entry["arguments"] if "arguments" in entry else shlex.split(entry["command"])
+    if flag not in args:
+        missing.append(path)
+for path in missing:
+    print(f"FAIL: ASan build compiles {path} without {flag}", file=sys.stderr)
+if checked == 0:
+    sys.exit(f"FAIL: sanitizer flags: {db} has no entry under {src_dir}")
+if missing:
+    sys.exit(1)
+print(f"sanitizer flags: {checked} sources under {sys.argv[1]}")
+EOF
+}
+
 # Runs the tests, prints per-test results, then fails. Printing first matters: under
 # `set -e` a failing `colcon test` would end the script before the failing test is named.
 run_tests() {
@@ -163,10 +196,7 @@ sanitized=0
 for pkg_dir in src/*/; do
   pkg=$(basename "$pkg_dir")
   [ -d "${pkg_dir}src" ] || continue
-  if ! grep -q -e '-fsanitize=address,undefined' "build/asan/$pkg/compile_commands.json"; then
-    echo "FAIL: ASan build of $pkg has no -fsanitize=address,undefined on its compile line" >&2
-    exit 1
-  fi
+  require_sanitized "${pkg_dir}src" "build/asan/$pkg/compile_commands.json"
   sanitized=$((sanitized + 1))
 done
 require_all_packages "sanitizer flags" "$sanitized"
