@@ -45,7 +45,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 GTEST_FLOOR=69
 PYTEST_FLOOR=99
 INTEGRATION_FLOOR=11
-SIM_FLOOR=23
+SIM_FLOOR=26
 
 require_at_least() {
   local label=$1 found=$2 floor=$3
