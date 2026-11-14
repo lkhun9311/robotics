@@ -101,18 +101,35 @@ echo "== simulation checks (release install, headless) =="
 )
 require_at_least "simulation checks" "$(junit_count artifacts/pytest-sim.xml)" "$SIM_FLOOR"
 
-echo "== clang-tidy (src and harness; tests excluded, see plan) =="
-find src/runtime_core/src -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
-  clang-tidy -p build/release/runtime_core --quiet
-if [ -d src/runtime_core/harness ]; then
-  find src/runtime_core/harness -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
-    clang-tidy -p build/release/runtime_core --quiet
-fi
+echo "== clang-tidy (every package's src and harness; tests excluded, see plan) =="
+# A package with sources but no compile database cannot be checked, which is a failure, not a skip.
+for pkg_dir in src/*/; do
+  pkg=$(basename "$pkg_dir")
+  for sub in src harness; do
+    [ -d "$pkg_dir$sub" ] || continue
+    if [ ! -f "build/release/$pkg/compile_commands.json" ]; then
+      echo "FAIL: clang-tidy: no compile_commands.json for $pkg in build/release/$pkg" >&2
+      exit 1
+    fi
+    find "$pkg_dir$sub" -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
+      clang-tidy -p "build/release/$pkg" --quiet
+  done
+done
 
 echo "== sanitizers (ASan + UBSan, with coverage) =="
 colcon build --base-paths src "${ASAN[@]}" \
-  --cmake-args -DCMAKE_BUILD_TYPE=Debug "-DRUNTIME_CORE_SANITIZE=address,undefined" \
-  -DRUNTIME_CORE_COVERAGE=ON
+  --cmake-args -DCMAKE_BUILD_TYPE=Debug "-DROBOTICS_SANITIZE=address,undefined" \
+  -DROBOTICS_COVERAGE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# The ASan build is only worth running if the flags reached the compile line of every package
+# that has sources; a misspelt option would otherwise build clean, unsanitized, and pass.
+for pkg_dir in src/*/; do
+  pkg=$(basename "$pkg_dir")
+  [ -d "${pkg_dir}src" ] || continue
+  if ! grep -q -e '-fsanitize=address,undefined' "build/asan/$pkg/compile_commands.json"; then
+    echo "FAIL: ASan build of $pkg has no -fsanitize=address,undefined on its compile line" >&2
+    exit 1
+  fi
+done
 # Counters from an earlier run no longer match a rebuilt object (gcov "stamp mismatch"),
 # and logic_sim only runs after the report, so nothing would refresh its counters.
 find build/asan -name '*.gcda' -delete
