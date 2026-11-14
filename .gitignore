@@ -9,7 +9,4 @@ __pycache__/
 # editor / tooling
 .vscode/
 .idea/
-CLAUDE.md
-AGENTS.md
-.claude/
 artifacts/
