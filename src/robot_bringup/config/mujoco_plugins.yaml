@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+/**:
+  ros__parameters:
+    mujoco_plugins:
+      mujoco_camera_plugin:
+        type: "mujoco_ros2_control_plugins/CameraPlugin"
+        camera_publish_rate: 15.0
+        overview:
+          frame_name: overview_optical_frame
+          info_topic: /overview/camera_info
+          image_topic: /overview/image_raw
+          depth_topic: /overview/depth

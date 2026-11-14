@@ -1,0 +1,13 @@
+Third-party material used by this repository
+
+MuJoCo Menagerie, universal_robots_ur5e
+  License: BSD-3-Clause
+  Source: https://github.com/google-deepmind/mujoco_menagerie, commit 370c43965323c0944b433b202aac5058b5f907a9
+  License text: models/universal_robots_ur5e/LICENSE
+  The upstream model files are not stored in this repository: they are fetched at image build,
+  checksum-verified, and installed into the image.
+  Derived file (BSD-3-Clause): src/ur5e_description/mjcf/scene_baseline.xml, from scene.xml.
+
+ROS packages used at run time and not redistributed
+  mujoco_ros2_control   Apache-2.0
+  MuJoCo (via mujoco_vendor)   Apache-2.0

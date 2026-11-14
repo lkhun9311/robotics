@@ -1,0 +1,4 @@
+Upstream: https://github.com/google-deepmind/mujoco_menagerie (folder universal_robots_ur5e)
+Commit: 370c43965323c0944b433b202aac5058b5f907a9 (2026-11-10)
+License: BSD-3-Clause, see LICENSE in this folder. Files are fetched at image build time and
+verified against SHA256SUMS; they are not stored in this repository.

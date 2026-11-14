@@ -14,20 +14,25 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build dev image
         run: |
           set -a; . ./.env; set +a
           docker build --target dev --build-arg ROS_IMAGE="$ROS_IMAGE" \
-            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" -t robotics-dev:ci -f docker/Dockerfile .
+            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
+            --build-arg ROS_SNAPSHOT="$ROS_SNAPSHOT" \
+            --build-arg MENAGERIE_COMMIT="$MENAGERIE_COMMIT" -t robotics-dev:ci -f docker/Dockerfile .
       - name: Run checks
-        run: docker run --rm -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
+        run: docker run --rm --init -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
       - name: Build and smoke-run the runtime image
         run: |
           set -a; . ./.env; set +a
           docker build --target runtime --build-arg ROS_IMAGE="$ROS_IMAGE" \
-            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" -t robotics-runtime:ci -f docker/Dockerfile .
+            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
+            --build-arg ROS_SNAPSHOT="$ROS_SNAPSHOT" \
+            --build-arg MENAGERIE_COMMIT="$MENAGERIE_COMMIT" -t robotics-runtime:ci -f docker/Dockerfile .
           docker run --rm robotics-runtime:ci --scenario normal --defect none --out /tmp/t.jsonl
           rc=0; docker run --rm robotics-runtime:ci --scenario nope --defect none --out /tmp/t.jsonl || rc=$?
           test "$rc" -eq 2

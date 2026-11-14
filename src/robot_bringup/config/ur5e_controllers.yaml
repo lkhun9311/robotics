@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+controller_manager:
+  ros__parameters:
+    update_rate: 500
+joint_state_broadcaster:
+  ros__parameters:
+    type: joint_state_broadcaster/JointStateBroadcaster
+arm_controller:
+  ros__parameters:
+    type: joint_trajectory_controller/JointTrajectoryController
+    joints: [shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    allow_nonzero_velocity_at_trajectory_end: false
+    constraints:
+      goal_time: 1.0
+      stopped_velocity_tolerance: 0.05
+      shoulder_pan_joint: {goal: 0.05}
+      shoulder_lift_joint: {goal: 0.05}
+      elbow_joint: {goal: 0.05}
+      wrist_1_joint: {goal: 0.05}
+      wrist_2_joint: {goal: 0.05}
+      wrist_3_joint: {goal: 0.05}

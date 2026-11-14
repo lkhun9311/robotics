@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  UR5e kinematics for robot_state_publisher, mirroring the Menagerie MJCF that MuJoCo simulates:
+  each joint origin is the child body's pos/quat (quat 1 0 1 0 = +90 deg about y), each axis the
+  resolved MJCF joint axis, each limit the MJCF joint range. No geometry: the MJCF owns physics.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur5e">
+  <xacro:arg name="headless" default="true"/>
+  <xacro:arg name="mujoco_model" default="$(find ur5e_description)/mjcf/scene_baseline.xml"/>
+
+  <!-- effort from the MJCF actuator forcerange; velocity is the UR5e datasheet 180 deg/s. -->
+  <xacro:macro name="arm_joint" params="name parent child xyz rpy axis lower upper effort">
+    <joint name="${name}" type="revolute">
+      <parent link="${parent}"/>
+      <child link="${child}"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <axis xyz="${axis}"/>
+      <limit lower="${lower}" upper="${upper}" effort="${effort}" velocity="3.14159"/>
+    </joint>
+  </xacro:macro>
+
+  <link name="base_link"/>
+  <link name="base"/>
+  <link name="shoulder_link"/>
+  <link name="upper_arm_link"/>
+  <link name="forearm_link"/>
+  <link name="wrist_1_link"/>
+  <link name="wrist_2_link"/>
+  <link name="wrist_3_link"/>
+
+  <joint name="base_fixed" type="fixed">
+    <parent link="base_link"/>
+    <child link="base"/>
+    <origin xyz="0 0 0" rpy="0 0 3.14159265"/>
+  </joint>
+  <xacro:arm_joint name="shoulder_pan_joint" parent="base" child="shoulder_link"
+    xyz="0 0 0.163" rpy="0 0 0" axis="0 0 1" lower="-6.28319" upper="6.28319" effort="150"/>
+  <xacro:arm_joint name="shoulder_lift_joint" parent="shoulder_link" child="upper_arm_link"
+    xyz="0 0.138 0" rpy="0 1.57079633 0" axis="0 1 0" lower="-6.28319" upper="6.28319" effort="150"/>
+  <xacro:arm_joint name="elbow_joint" parent="upper_arm_link" child="forearm_link"
+    xyz="0 -0.131 0.425" rpy="0 0 0" axis="0 1 0" lower="-3.1415" upper="3.1415" effort="150"/>
+  <xacro:arm_joint name="wrist_1_joint" parent="forearm_link" child="wrist_1_link"
+    xyz="0 0 0.392" rpy="0 1.57079633 0" axis="0 1 0" lower="-6.28319" upper="6.28319" effort="28"/>
+  <xacro:arm_joint name="wrist_2_joint" parent="wrist_1_link" child="wrist_2_link"
+    xyz="0 0.127 0" rpy="0 0 0" axis="0 0 1" lower="-6.28319" upper="6.28319" effort="28"/>
+  <xacro:arm_joint name="wrist_3_joint" parent="wrist_2_link" child="wrist_3_link"
+    xyz="0 0 0.1" rpy="0 0 0" axis="0 1 0" lower="-6.28319" upper="6.28319" effort="28"/>
+
+  <xacro:macro name="position_joint" params="name">
+    <joint name="${name}">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <ros2_control name="MujocoSystem" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <param name="mujoco_model">$(arg mujoco_model)</param>
+      <param name="headless">$(arg headless)</param>
+      <param name="initial_keyframe">home</param>
+      <!-- Plugin 0.1.2 otherwise starts a renderer for every MJCF camera; the camera check
+           loads the camera plugin explicitly. -->
+      <param name="auto_register_cameras">false</param>
+    </hardware>
+    <xacro:position_joint name="shoulder_pan_joint"/>
+    <xacro:position_joint name="shoulder_lift_joint"/>
+    <xacro:position_joint name="elbow_joint"/>
+    <xacro:position_joint name="wrist_1_joint"/>
+    <xacro:position_joint name="wrist_2_joint"/>
+    <xacro:position_joint name="wrist_3_joint"/>
+  </ros2_control>
+</robot>
