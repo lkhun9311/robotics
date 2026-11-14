@@ -71,12 +71,12 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     goal = list(HOME)
     goal[JOINTS.index(joint)] = OUT_OF_RANGE_GOAL
     sim.start_recording()
-    # Send and result moments in simulation time: the latest /mujoco_actuators_states stamp
-    # received at that wall-time moment (depth-10 query subscription, so at most 10 messages
-    # behind what has arrived; it can still lag the simulator by the executor's own delay).
-    sent = sim.latest_stamp()
+    # Send and result moments in simulation time: the stamp of a /mujoco_actuators_states
+    # message published after that wall-time moment, so a backlog in this process's queue
+    # cannot move them earlier.
+    sent = sim.stamp_now()
     r = sim.follow([(3.0, goal)])
-    result = sim.latest_stamp()
+    result = sim.stamp_now()
     rec = sim.stop_recording(until_stamp=result + AFTER_RESULT_S)
     mujoco = rec.get(MUJOCO_STATES, [])
     state = rec.get(CONTROLLER_STATE, [])
@@ -87,11 +87,13 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     receive_gap = max(b - a for a, b in zip(received, received[1:]))
     # Captured by pytest: shown only with -rP or when the test fails.
     print(f"first stamp {stamps[0] - sent:+.4f} s after send, last {stamps[-1] - result:+.4f} s after "
-          f"result, largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s")
+          f"result, largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s, "
+          f"largest executor lag {sim.recording_lag_s:.4f} s")
     assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_STAMP_GAP_S, (
         f"samples do not span the interval in simulation time: first stamp {stamps[0] - sent:+.3f} s "
         f"after send, last {stamps[-1] - result:+.3f} s after result, largest stamp gap {gap:.3f} s "
-        f"(diagnostic: largest receive gap {receive_gap:.3f} s wall time, {len(stamps)} samples)")
+        f"(diagnostic: largest receive gap {receive_gap:.3f} s wall time, largest executor lag "
+        f"{sim.recording_lag_s:.3f} s, {len(stamps)} samples)")
     positions = [s.position[joint] for _, s in mujoco]
     upper = RANGE[joint][1]
     # An accepted goal that never executes must not pass: the joint has to reach the boundary.
