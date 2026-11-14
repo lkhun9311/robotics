@@ -39,15 +39,46 @@ find src -name '*.hpp' -o -name '*.cpp' | xargs --no-run-if-empty clang-format -
 REL=(--build-base build/release --install-base install/release)
 ASAN=(--build-base build/asan --install-base install/asan)
 
+# Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
+# missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
+# Raise these when adding tests.
+GTEST_FLOOR=66
+PYTEST_FLOOR=82
+INTEGRATION_FLOOR=11
+
+require_at_least() {
+  local label=$1 found=$2 floor=$3
+  if ! [[ $found =~ ^[0-9]+$ ]]; then
+    echo "FAIL: $label: could not read a test count (got '$found')" >&2
+    exit 1
+  fi
+  if [ "$found" -lt "$floor" ]; then
+    echo "FAIL: $label ran $found tests, floor is $floor" >&2
+    exit 1
+  fi
+  echo "$label: $found tests (floor $floor)"
+}
+
+# Tests that ran and were not skipped, from a pytest JUnit XML file.
+junit_count() {
+  python3 -c '
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+suites = [root] if root.tag == "testsuite" else root.iter("testsuite")
+print(sum(int(s.get("tests", 0)) - int(s.get("skipped", 0)) for s in suites))' "$1"
+}
+
 # Runs the tests, prints per-test results, then fails. Printing first matters: under
 # `set -e` a failing `colcon test` would end the script before the failing test is named.
 run_tests() {
   local base=$1
-  local rc=0
+  local rc=0 found
   colcon test --base-paths src --build-base "$base" --install-base "install/${base#build/}" \
     --return-code-on-test-failure || rc=$?
-  colcon test-result --test-result-base "$base" --verbose
-  return "$rc"
+  colcon test-result --test-result-base "$base" --verbose | tee "$base/test-result.txt"
+  [ "$rc" -eq 0 ] || return "$rc"
+  found=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' "$base/test-result.txt" | tail -1)
+  require_at_least "gtest ($base)" "${found:-0}" "$GTEST_FLOOR"
 }
 
 echo "== build (release) =="
@@ -82,11 +113,13 @@ echo "== python tests (release harness; traces kept in artifacts/traces/release)
 LOGIC_SIM_BIN="$PWD/install/release/runtime_core/lib/runtime_core/logic_sim" \
 ORACLE_TRACE_DIR="$PWD/artifacts/traces/release" \
   python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest.xml tools
+require_at_least "pytest (tools)" "$(junit_count artifacts/pytest.xml)" "$PYTEST_FLOOR"
 
 echo "== oracle x harness (ASan + UBSan harness; traces in artifacts/traces/asan) =="
 LOGIC_SIM_BIN="$PWD/install/asan/runtime_core/lib/runtime_core/logic_sim" \
 ORACLE_TRACE_DIR="$PWD/artifacts/traces/asan" \
   python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest-asan.xml \
   tools/oracle/tests/test_logic_sim_integration.py
+require_at_least "oracle x harness" "$(junit_count artifacts/pytest-asan.xml)" "$INTEGRATION_FLOOR"
 
 echo "== all checks passed =="
