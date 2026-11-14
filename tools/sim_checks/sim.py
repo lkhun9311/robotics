@@ -34,6 +34,8 @@ MUJOCO_STATES = "/mujoco_actuators_states"
 # the queue.
 RECORD_QUEUE_DEPTH = 5000
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
+# Time from SIGINT to SIGKILL for the launch process group in `stop()`.
+STOP_GRACE_S = 10.0
 
 
 class SimError(Exception):
@@ -145,20 +147,27 @@ class Sim:
         raise SimError(f"controllers not active within {timeout_s} s: {states}")
 
     def stop(self):
-        self._stop_node()
+        """Ends the launch process group, then tears down the test node. The group goes first
+        and in any case: a teardown error must not leave a simulator running."""
+        try:
+            self._stop_launch()
+        finally:
+            self._stop_node()
+
+    def _stop_launch(self):
         if self._proc is None:
             return
         pgid = self._proc.pid  # start_new_session: the launch process leads its own group
+        # One 10 s budget from SIGINT to SIGKILL, shared by the launch process and its children.
+        deadline = time.monotonic() + STOP_GRACE_S
         try:
             os.killpg(pgid, signal.SIGINT)
         except ProcessLookupError:
             pass
         try:
-            self._proc.wait(timeout=10)
+            self._proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             pass
-        # Children may outlive the launch process; give them the rest of the 10 s, then kill.
-        deadline = time.monotonic() + 10.0
         while _group_alive(pgid) and time.monotonic() < deadline:
             time.sleep(0.1)
         if _group_alive(pgid):
