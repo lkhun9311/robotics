@@ -7,9 +7,11 @@
 // datagram socket for B6 commands; each is answered with "ok" or "err <reason>". SIGTERM or
 // SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
 // Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
-// is on stderr). Exit 1: a failure while running. --hb-muted NODES (comma-separated node IDs,
-// e.g. "2" or "2,5") applies B6 `hb_mute <node> 1` before power-on (B3): a peer started first
-// sees the boot-up and then no periodic heartbeat. The mutes are traced as inject records.
+// is on stderr). Exit 1: a failure while running; once the trace is open it still ends with the
+// final snapshots and an `exit` record, and the inject socket file is removed on every exit.
+// --hb-muted NODES (comma-separated node IDs, e.g. "2" or "2,5") applies B6 `hb_mute <node> 1`
+// before power-on (B3): a peer started first sees the boot-up and then no periodic heartbeat.
+// The mutes are traced as inject records.
 #include <poll.h>
 #include <pthread.h>
 #include <sys/signalfd.h>
@@ -26,6 +28,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -201,6 +204,26 @@ void serve_inject(int fd, vdrive_bank::BankLoop& loop) {
   }
 }
 
+// The bound inject socket: closed and its file removed on every way out of run(), exceptions
+// included.
+struct InjectSocket {
+  int fd{-1};
+  std::string path;
+  InjectSocket() = default;
+  InjectSocket(const InjectSocket&) = delete;
+  InjectSocket& operator=(const InjectSocket&) = delete;
+  ~InjectSocket() {
+    if (fd >= 0) {
+      ::close(fd);
+      ::unlink(path.c_str());
+    }
+  }
+};
+
+struct CloseFile {
+  void operator()(std::FILE* f) const { std::fclose(f); }
+};
+
 int run(const Args& args) {
   std::string error;
   std::optional<socketcan_io::CanSocket> sock = socketcan_io::CanSocket::open(args.ifname, &error);
@@ -208,21 +231,9 @@ int run(const Args& args) {
     std::fprintf(stderr, "vdrive_bank: --if %s: %s\n", args.ifname.c_str(), error.c_str());
     return 2;
   }
-  std::FILE* trace = std::fopen(args.trace.c_str(), "w");
-  if (trace == nullptr) {
-    std::fprintf(stderr, "vdrive_bank: --trace %s: %s\n", args.trace.c_str(), std::strerror(errno));
-    return 2;
-  }
-  int inject_fd = -1;
-  if (!args.inject.empty()) {
-    inject_fd = bind_inject(args.inject, &error);
-    if (inject_fd < 0) {
-      std::fprintf(stderr, "vdrive_bank: --inject %s: %s\n", args.inject.c_str(), error.c_str());
-      std::fclose(trace);
-      return 2;
-    }
-  }
-  // Blocked before the writer thread starts, so only the signalfd ever sees them.
+  // Blocked before the writer thread starts, so only the signalfd ever sees them. The signalfd
+  // and the timerfd are made before the trace and the inject socket exist, so a failure here
+  // leaves nothing behind.
   sigset_t signals;
   sigemptyset(&signals);
   sigaddset(&signals, SIGTERM);
@@ -234,6 +245,23 @@ int run(const Args& args) {
     std::fprintf(stderr, "vdrive_bank: signalfd/timerfd: %s\n", std::strerror(errno));
     return 1;
   }
+  // Declared before the writer, so the writer has stopped before the file is closed.
+  const std::unique_ptr<std::FILE, CloseFile> trace_file(std::fopen(args.trace.c_str(), "w"));
+  std::FILE* const trace = trace_file.get();
+  if (trace == nullptr) {
+    std::fprintf(stderr, "vdrive_bank: --trace %s: %s\n", args.trace.c_str(), std::strerror(errno));
+    return 2;
+  }
+  InjectSocket inject;
+  if (!args.inject.empty()) {
+    inject.fd = bind_inject(args.inject, &error);
+    if (inject.fd < 0) {
+      std::fprintf(stderr, "vdrive_bank: --inject %s: %s\n", args.inject.c_str(), error.c_str());
+      return 2;
+    }
+    inject.path = args.inject;
+  }
+  const int inject_fd = inject.fd;
 
   vdrive_bank::GetrandomEntropy entropy;
   const std::array<std::uint32_t, vdrive_bank::kNodeCount> boot_ids =
@@ -249,29 +277,31 @@ int run(const Args& args) {
   };
   vdrive_bank::TraceWriter writer(ring, write_record, [trace] { std::fflush(trace); });
   writer.start();
+  // From here on a failure ends the run through the normal shutdown below (rc 1): the trace
+  // still gets the final snapshots and its `exit` record.
+  int rc = 0;
   for (const std::uint8_t node : args.hb_muted) {
     const std::string command = "hb_mute " + std::to_string(node) + " 1";
     if (!loop.inject(command).ok) {
       std::fprintf(stderr, "vdrive_bank: %s was refused\n", command.c_str());
-      writer.stop();
-      std::fclose(trace);
-      return 1;
+      rc = 1;
+      break;
     }
   }
-  loop.start(boot_ids);
-
-  // Release k at t0 + k W: absolute, so the timer keeps the phase whatever the loop does.
-  itimerspec spec{};
-  spec.it_value = to_timespec(loop.next_release());
-  spec.it_interval = to_timespec(MonoTime{vdrive_bank::kReleasePeriod.ns});
-  if (::timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &spec, nullptr) < 0) {
-    std::fprintf(stderr, "vdrive_bank: timerfd_settime: %s\n", std::strerror(errno));
-    return 1;
+  if (rc == 0) {
+    loop.start(boot_ids);
+    // Release k at t0 + k W: absolute, so the timer keeps the phase whatever the loop does.
+    itimerspec spec{};
+    spec.it_value = to_timespec(loop.next_release());
+    spec.it_interval = to_timespec(MonoTime{vdrive_bank::kReleasePeriod.ns});
+    if (::timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &spec, nullptr) < 0) {
+      std::fprintf(stderr, "vdrive_bank: timerfd_settime: %s\n", std::strerror(errno));
+      rc = 1;
+    }
   }
 
   int signo = 0;
-  int rc = 0;
-  while (signo == 0) {
+  while (rc == 0 && signo == 0) {
     std::array<pollfd, 4> fds{{{timer_fd, POLLIN, 0},
                                {sock->fd(), POLLIN, 0},
                                {signal_fd, POLLIN, 0},
@@ -312,11 +342,6 @@ int run(const Args& args) {
   if (std::fflush(trace) != 0 || std::ferror(trace) != 0) {
     std::fprintf(stderr, "vdrive_bank: writing %s failed\n", args.trace.c_str());
     rc = 1;
-  }
-  std::fclose(trace);
-  if (inject_fd >= 0) {
-    ::close(inject_fd);
-    ::unlink(args.inject.c_str());
   }
   return rc;
 }

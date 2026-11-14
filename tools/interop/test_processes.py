@@ -14,7 +14,10 @@ import subprocess
 import sys
 import time
 
-from conftest import (BUS_FAULT_PROXY_BIN, DEVICE_IF, HOST_IF, NODES, ROOT, VCAN_UP, inconclusive)
+import pytest
+
+from conftest import (BUS_FAULT_PROXY_BIN, DEVICE_IF, HOST_IF, NODES, ROOT, VCAN_UP,
+                      VDRIVE_BANK_BIN, inconclusive)
 
 BOOT_UP = 0x00
 PRE_OPERATIONAL = 0x7F
@@ -273,3 +276,47 @@ def test_inject_truncated_datagram_is_rejected(start_bank, capture, inject_clien
     exit_record = bank.stop()
     assert exit_record["inject"]["truncated"] == 1, exit_record
     assert not bank.trace.of("inject"), "a truncated datagram must not reach the bank"
+
+
+# A libc call that fails on request, interposed with LD_PRELOAD: the only way to reach the bank's
+# startup failure paths from outside the process.
+FAILING_CALLS = {
+    "signalfd": "#include <errno.h>\n#include <sys/signalfd.h>\n"
+                "int signalfd(int fd, const sigset_t* m, int f) { (void)fd; (void)m; (void)f; "
+                "errno = EMFILE; return -1; }\n",
+    "timerfd_settime": "#include <errno.h>\n#include <sys/timerfd.h>\n"
+                       "int timerfd_settime(int fd, int f, const struct itimerspec* n, "
+                       "struct itimerspec* o) { (void)fd; (void)f; (void)n; (void)o; "
+                       "errno = EINVAL; return -1; }\n",
+}
+
+
+@pytest.mark.parametrize("call", sorted(FAILING_CALLS))
+def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path, call):
+    """A failing signalfd leaves no trace file and no inject socket; a failing timerfd_settime
+    (after both exist) ends with exit 1, the final snapshots, an `exit` record and the inject
+    socket file removed."""
+    assert VDRIVE_BANK_BIN.exists(), f"NOT_RUN: {VDRIVE_BANK_BIN} not built"
+    cc = shutil.which("cc")
+    assert cc is not None, "NOT_RUN: no C compiler for the LD_PRELOAD shim"
+    source = tmp_path / "fail.c"
+    source.write_text(FAILING_CALLS[call])
+    shim = tmp_path / "fail.so"
+    build = subprocess.run([cc, "-shared", "-fPIC", "-o", str(shim), str(source)],
+                           capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr
+    trace, sock = tmp_path / "bank.jsonl", tmp_path / "bank.sock"
+    env = dict(os.environ, LD_PRELOAD=str(shim))
+    result = subprocess.run([str(VDRIVE_BANK_BIN), "--if", DEVICE_IF, "--trace", str(trace),
+                             "--inject", str(sock)], env=env, capture_output=True, text=True,
+                            timeout=5)
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    assert call.split("_")[0] in result.stderr, result.stderr
+    assert not sock.exists(), "the inject socket file outlived the process"
+    if call == "signalfd":
+        assert not trace.exists(), "a trace was opened before the failure"
+        return
+    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert records and records[-1]["event"] == "exit", records[-3:]
+    assert records[-1]["trace_overflow"] == 0, records[-1]
+    assert any(r["event"] == "start" for r in records), "no start record"
