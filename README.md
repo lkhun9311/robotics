@@ -514,11 +514,11 @@ image's, the check asks for a regeneration instead of comparing bytes.
 - `src/socketcan_io` raw CAN socket with receive classification; `src/vdrive_bank` six drives as one process on vcan; `src/bus_fault_proxy` the forwarding and fault-rule proxy; `src/lely_peer` the Lely master test peer
 - `config/interop` Lely bus description and the fault rule files; `tools/bus` vcan links and the compose topology smoke
 - `tools/interop` vcan tests: processes, the Lely matrix, proxy faults, judges and recorded observations
-- `tools/evidence` scripts that make the E3b images, frame trace and tables in `docs/media` from committed inputs
+- `tools/evidence` scripts that make the E2, E3a and E3b images, the replay render, the frame trace and the tables from committed inputs
 - `src/ur5e_description` UR5e model, scene and ros2_control description
 - `src/robot_bringup` launch file and controller and plugin configuration
 - `models/` checksums of the pinned Menagerie model; `tools/models` fetch and verify
-- `tools/sim_checks` simulation checks and the motion recorder
+- `tools/sim_checks` simulation checks, MuJoCo forward kinematics for them, and the motion recorder
 - `tools/env`, `tools/bench` environment manifest, cyclictest baseline and the proxy cost summary
 - `docker`, `compose.yaml`, `.github/workflows` toolchain, images and CI
 
