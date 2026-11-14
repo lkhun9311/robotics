@@ -203,6 +203,20 @@ TEST(Assembly, LostSyncPairsAreNotAViolationAndNewestWins) {
   ASSERT_TRUE(result.command.has_value());
   EXPECT_EQ(result.command->command_seq, 10);
   EXPECT_EQ(result.dropped.missing_half, 1U);
+  // No fallback to an older pair: the newest complete pair has a closed deadline, the older one
+  // an open deadline, and nothing is actuated.
+  {
+    Drive f;
+    f.assembler.offer(r1(f.tag, 5, 500));
+    f.assembler.offer(r2(f.tag, 5, kNow + 10'000));
+    f.assembler.offer(r1(f.tag, 6, 600));
+    f.assembler.offer(r2(f.tag, 6, kNow));  // Expired at exact equality.
+    const auto closed = f.assembler.on_sync(kNow);
+    EXPECT_FALSE(closed.command.has_value());
+    EXPECT_FALSE(closed.integrity_violation);
+    EXPECT_EQ(closed.dropped.not_valid, 1U);
+    EXPECT_EQ(closed.dropped.superseded, 1U);
+  }
   // The window is bounded: a ninth seq evicts the oldest, and an arriving seq older than every
   // held one is itself the one dropped.
   static_assert(CommandAssembler::kWindowSlots == 8);
@@ -262,6 +276,36 @@ TEST(Assembly, ViolationDetectedAtIngestionWithoutSync) {
   d.issuer.revoke();
   EXPECT_FALSE(d.assembler.on_sync(kNow + 20'000).integrity_violation);
   EXPECT_FALSE(d.assembler.integrity_violation());
+}
+
+TEST(Assembly, ViolationStaysPendingAcrossTagChangeUntilReported) {
+  // The tag changes (revoke, or lifetime expiry at the W tick) between detection and the next
+  // SYNC. The violation must still be reported, exactly once.
+  for (const bool by_expiry : {false, true}) {
+    SCOPED_TRACE(by_expiry ? "lifetime expiry" : "revoke");
+    Drive d;
+    EXPECT_EQ(d.assembler.offer(r2(d.tag, 5, kNow + 10'000)), OfferResult::kAccepted);
+    EXPECT_EQ(d.assembler.offer(r2(d.tag, 5, kNow + 10'500)), OfferResult::kIntegrityViolation);
+    if (by_expiry) {
+      d.issuer.tick(kReady + drive_core::kTagLifetime);
+    } else {
+      d.issuer.revoke();
+    }
+    ASSERT_EQ(d.issuer.current(), 0);
+    EXPECT_TRUE(d.assembler.integrity_violation()) << "erased before it was reported";
+    // An offer that follows the tag change must not erase it either.
+    EXPECT_EQ(d.assembler.offer(r1(d.tag, 6, 1)), OfferResult::kDroppedOtherTag);
+    EXPECT_TRUE(d.assembler.integrity_violation());
+    EXPECT_TRUE(d.assembler.on_sync(kNow).integrity_violation);
+    // Reported once; after that the new tag starts clean.
+    EXPECT_FALSE(d.assembler.integrity_violation());
+    EXPECT_FALSE(d.assembler.on_sync(kNow + 10'000).integrity_violation);
+    d.tag = d.issuer.commit(1, 1, kReady + drive_core::kTagLifetime + milliseconds(1)).value_or(0);
+    ASSERT_NE(d.tag, 0);
+    const auto result = d.send(1, 1, kNow + 20'000);
+    EXPECT_FALSE(result.integrity_violation);
+    EXPECT_TRUE(result.command.has_value());
+  }
 }
 
 TEST(Assembly, MissingHalfIsAnOrdinaryGap) {

@@ -42,6 +42,7 @@ void CommandAssembler::reset() {
 
 OfferResult CommandAssembler::violate() {
   violated_ = true;
+  violation_pending_ = true;
   clear_window();
   return OfferResult::kIntegrityViolation;
 }
@@ -151,7 +152,8 @@ OfferResult CommandAssembler::offer(const Rpdo2& fragment) {
 AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {
   follow_issuer();
   AssemblyResult result;
-  result.integrity_violation = violated_;
+  result.integrity_violation = violated_ || violation_pending_;
+  violation_pending_ = false;
   if (!violated_) {
     // A slot holds one tag (the current one) and one seq, so a complete slot is a pair.
     const Slot* newest = nullptr;

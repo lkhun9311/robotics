@@ -65,6 +65,10 @@ struct AssemblyResult {
 //   the oldest seq (the new one included) is dropped and counted as superseded.
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
+// - Separately, every violation stays pending until an on_sync reports it, even when the tag
+//   changes or reset() runs in between (a revoke or a lifetime expiry at the W tick must not
+//   erase a violation the drive has not acted on yet). It is reported in every on_sync while
+//   latched, and in exactly one more after the latch is cleared.
 // - At SYNC (on_sync) the newest complete pair (seq16_newer) is actuated if validity_open(until,
 //   now, lease), otherwise dropped as not_valid; older complete pairs are dropped as superseded.
 //   A lone half is an ordinary gap. The window then clears.
@@ -81,9 +85,10 @@ class CommandAssembler {
   OfferResult offer(const canopen_codec::od::Rpdo2& fragment);
   AssemblyResult on_sync(std::uint32_t now_us);
 
-  // True while an integrity violation is latched for the current tag.
-  bool integrity_violation() const { return violated_; }
-  // NMT reset communication (D12): clears the window, last actuated seq and the latch.
+  // True while a violation is latched for the current tag or not yet reported by on_sync.
+  bool integrity_violation() const { return violated_ || violation_pending_; }
+  // NMT reset communication (D12): clears the window, last actuated seq and the latch; an
+  // unreported violation stays pending.
   void reset();
 
  private:
@@ -109,6 +114,7 @@ class CommandAssembler {
   std::array<Slot, kWindowSlots> window_{};
   std::optional<Command> last_actuated_;
   bool violated_{false};
+  bool violation_pending_{false};  // Survives tag changes and reset(); cleared by on_sync.
   Counters dropped_;
 };
 
