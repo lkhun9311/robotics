@@ -163,22 +163,62 @@ TEST(Assembly, OlderSeqIsDropped) {
   EXPECT_EQ(result.dropped.stale_seq, 4U);
 }
 
-TEST(Assembly, DifferentSeqsForCurrentTagIsIntegrityViolation) {
+TEST(Assembly, LostSyncPairsAreNotAViolationAndNewestWins) {
   Drive d;
-  EXPECT_EQ(d.assembler.offer(r1(d.tag, 5, 1)), OfferResult::kAccepted);
-  EXPECT_EQ(d.assembler.offer(r2(d.tag, 6, kNow + 10'000)), OfferResult::kIntegrityViolation);
+  // A SYNC was lost: commands k and k+1 both arrive in one window, interleaved.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 5, 500)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 6, 600)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 5, kNow + 10'000)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 6, kNow + 20'000)), OfferResult::kAccepted);
+  EXPECT_FALSE(d.assembler.integrity_violation());
   auto result = d.assembler.on_sync(kNow);
-  EXPECT_TRUE(result.integrity_violation);
+  EXPECT_FALSE(result.integrity_violation);
+  ASSERT_TRUE(result.command.has_value());
+  EXPECT_EQ(*result.command, (Command{600, kNow + 20'000, 6, d.tag}));
+  EXPECT_EQ(result.dropped.superseded, 1U);
+  // Newest wins across the seq wrap too.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 0xFFFF, 1)), OfferResult::kDroppedStaleSeq);
+  Drive w;
+  w.assembler.offer(r1(w.tag, 0x0000, 2));
+  w.assembler.offer(r2(w.tag, 0x0000, kNow + 20'000));
+  w.assembler.offer(r1(w.tag, 0xFFFF, 1));
+  w.assembler.offer(r2(w.tag, 0xFFFF, kNow + 10'000));
+  result = w.assembler.on_sync(kNow);
+  ASSERT_TRUE(result.command.has_value());
+  EXPECT_EQ(result.command->command_seq, 0x0000);
+  EXPECT_EQ(result.dropped.superseded, 1U);
+  // Halves of different seqs never pair, and are not a violation: two ordinary gaps.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 7, 700)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 8, kNow + 30'000)), OfferResult::kAccepted);
+  result = d.assembler.on_sync(kNow + 10'000);
   EXPECT_FALSE(result.command.has_value());
-  // RPDO2 first, then an RPDO1 of another seq.
-  d.assembler.reset();
-  EXPECT_EQ(d.assembler.offer(r2(d.tag, 8, kNow + 10'000)), OfferResult::kAccepted);
-  EXPECT_EQ(d.assembler.offer(r1(d.tag, 7, 1)), OfferResult::kIntegrityViolation);
-  EXPECT_TRUE(d.assembler.on_sync(kNow).integrity_violation);
-  // Two RPDO1 of different seqs in one window: the window no longer names one command.
-  d.assembler.reset();
-  EXPECT_EQ(d.assembler.offer(r1(d.tag, 20, 1)), OfferResult::kAccepted);
-  EXPECT_EQ(d.assembler.offer(r1(d.tag, 21, 1)), OfferResult::kIntegrityViolation);
+  EXPECT_FALSE(result.integrity_violation);
+  EXPECT_EQ(result.dropped.missing_half, 2U);
+  // Two RPDO1 of different seqs in one window are not a violation either.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 9, 900)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 10, 1'000)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 10, kNow + 40'000)), OfferResult::kAccepted);
+  result = d.assembler.on_sync(kNow + 20'000);
+  EXPECT_FALSE(result.integrity_violation);
+  ASSERT_TRUE(result.command.has_value());
+  EXPECT_EQ(result.command->command_seq, 10);
+  EXPECT_EQ(result.dropped.missing_half, 1U);
+  // The window is bounded: a ninth seq evicts the oldest, and an arriving seq older than every
+  // held one is itself the one dropped.
+  static_assert(CommandAssembler::kWindowSlots == 8);
+  for (std::uint16_t seq = 20; seq <= 28; ++seq) {
+    ASSERT_EQ(d.assembler.offer(r1(d.tag, seq, seq)), OfferResult::kAccepted) << seq;
+  }
+  // Seq 20 was evicted by seq 28; its late RPDO2 is older than every held seq.
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 20, kNow + 40'000)), OfferResult::kDroppedSuperseded);
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 19, 19)), OfferResult::kDroppedSuperseded);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 28, kNow + 40'000)), OfferResult::kAccepted);
+  result = d.assembler.on_sync(kNow + 30'000);
+  EXPECT_FALSE(result.integrity_violation);
+  ASSERT_TRUE(result.command.has_value());
+  EXPECT_EQ(result.command->command_seq, 28);
+  EXPECT_EQ(result.dropped.superseded, 3U);  // Seq 20 evicted, its late RPDO2, seq 19.
+  EXPECT_EQ(result.dropped.missing_half, 7U);
 }
 
 TEST(Assembly, SameSeqDifferentPayloadIsIntegrityViolation) {
@@ -203,8 +243,8 @@ TEST(Assembly, SameSeqDifferentPayloadIsIntegrityViolation) {
 TEST(Assembly, ViolationDetectedAtIngestionWithoutSync) {
   Drive d;
   EXPECT_FALSE(d.assembler.integrity_violation());
-  d.assembler.offer(r1(d.tag, 5, 1));
-  EXPECT_EQ(d.assembler.offer(r2(d.tag, 6, kNow + 10'000)), OfferResult::kIntegrityViolation);
+  d.assembler.offer(r2(d.tag, 5, kNow + 10'000));
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 5, kNow + 10'500)), OfferResult::kIntegrityViolation);
   EXPECT_TRUE(d.assembler.integrity_violation()) << "known before any SYNC";
   // Normal actuation is blocked at once: a complete, valid pair after the violation is refused.
   EXPECT_EQ(d.assembler.offer(r1(d.tag, 7, 1)), OfferResult::kBlocked);

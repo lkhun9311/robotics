@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -30,6 +32,7 @@ struct Counters {
   std::uint32_t not_valid{};     // Pair whose valid_until_us is expired or beyond the lease.
   std::uint32_t missing_half{};  // A half without its partner at SYNC (an ordinary gap).
   std::uint32_t blocked{};       // Current-tag fragment after an integrity violation.
+  std::uint32_t superseded{};    // Complete pair older than the newest complete pair at SYNC.
 
   friend bool operator==(const Counters&, const Counters&) = default;
 };
@@ -39,6 +42,7 @@ enum class OfferResult : std::uint8_t {
   kDuplicate,  // Identical to a fragment already held; harmless, nothing changes.
   kDroppedOtherTag,
   kDroppedStaleSeq,
+  kDroppedSuperseded,  // The window is full and this seq is the oldest in it.
   kBlocked,
   kIntegrityViolation,  // Detected now, at ingestion (D8).
 };
@@ -54,17 +58,23 @@ struct AssemblyResult {
 // - A fragment whose seq is not newer than the last actuated seq is dropped (seq16_newer), except
 //   that a fragment with the last actuated seq and a payload different from the actuated one is
 //   an integrity violation (two payloads with the same seq), while an identical one is stale.
-// - Within one SYNC window every current-tag fragment must carry one seq; a second seq (in
-//   either half) is an integrity violation. Two different payloads of the same half and seq in
-//   one window are an integrity violation too.
+// - Fragments pair only on equal tag and seq. A window may hold halves of several seqs (after a
+//   lost SYNC, D7); that is not a violation. Two different payloads of the same half and seq in
+//   one window are an integrity violation.
+// - The window holds at most kWindowSlots seqs. When a new seq arrives and every slot is used,
+//   the oldest seq (the new one included) is dropped and counted as superseded.
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
-// - At SYNC (on_sync) a complete pair whose seq is newer is actuated if validity_open(until,
-//   now, lease); otherwise it is dropped. A lone half is an ordinary gap. The window then clears.
+// - At SYNC (on_sync) the newest complete pair (seq16_newer) is actuated if validity_open(until,
+//   now, lease), otherwise dropped as not_valid; older complete pairs are dropped as superseded.
+//   A lone half is an ordinary gap. The window then clears.
 // Any change of the issuer's epoch (commit, revoke, expiry, reset communication, boot) clears
 // the window and the last actuated seq. The issuer must outlive the assembler.
 class CommandAssembler {
  public:
+  // Three lost SYNC periods (D7's watchdog bound) hold about three commands; the rest is margin.
+  static constexpr std::size_t kWindowSlots = 8;
+
   explicit CommandAssembler(const ExecTagIssuer& issuer, std::uint32_t lease_us = kLeaseUs);
 
   OfferResult offer(const canopen_codec::od::Rpdo1& fragment);
@@ -80,12 +90,23 @@ class CommandAssembler {
   void follow_issuer();
   OfferResult admit(std::uint16_t seq, bool matches_actuated);
   OfferResult violate();
+  // One seq of the window; a half is present when its has_* flag is set.
+  struct Slot {
+    bool used{false};
+    bool has_rpdo1{false};
+    bool has_rpdo2{false};
+    std::uint16_t seq{};
+    canopen_codec::od::Rpdo1 rpdo1{};
+    canopen_codec::od::Rpdo2 rpdo2{};
+  };
+  // The window slot for `seq`, making one if needed; nullptr when `seq` was dropped as the oldest.
+  Slot* slot_for(std::uint16_t seq);
+  void clear_window();
 
   const ExecTagIssuer& issuer_;
   std::uint32_t lease_us_;
   std::uint64_t epoch_;
-  std::optional<canopen_codec::od::Rpdo1> rpdo1_;
-  std::optional<canopen_codec::od::Rpdo2> rpdo2_;
+  std::array<Slot, kWindowSlots> window_{};
   std::optional<Command> last_actuated_;
   bool violated_{false};
   Counters dropped_;

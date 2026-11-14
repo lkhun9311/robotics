@@ -31,19 +31,50 @@ void CommandAssembler::follow_issuer() {
   }
 }
 
+void CommandAssembler::clear_window() { window_.fill(Slot{}); }
+
 void CommandAssembler::reset() {
   epoch_ = issuer_.epoch();
-  rpdo1_.reset();
-  rpdo2_.reset();
+  clear_window();
   last_actuated_.reset();
   violated_ = false;
 }
 
 OfferResult CommandAssembler::violate() {
   violated_ = true;
-  rpdo1_.reset();
-  rpdo2_.reset();
+  clear_window();
   return OfferResult::kIntegrityViolation;
+}
+
+CommandAssembler::Slot* CommandAssembler::slot_for(std::uint16_t seq) {
+  Slot* free = nullptr;
+  Slot* oldest = &window_.front();
+  for (Slot& slot : window_) {
+    if (!slot.used) {
+      if (free == nullptr) {
+        free = &slot;
+      }
+      continue;
+    }
+    if (slot.seq == seq) {
+      return &slot;
+    }
+    if (!oldest->used || runtime_core::seq16_newer(oldest->seq, slot.seq)) {
+      oldest = &slot;
+    }
+  }
+  if (free == nullptr) {
+    // Full (so `oldest` is a used slot): the oldest seq gives way, possibly the arriving one.
+    ++dropped_.superseded;
+    if (!runtime_core::seq16_newer(seq, oldest->seq)) {
+      return nullptr;
+    }
+    free = oldest;
+  }
+  *free = Slot{};
+  free->used = true;
+  free->seq = seq;
+  return free;
 }
 
 // Checks shared by both halves, after the tag matched. kAccepted means "go on with the
@@ -66,15 +97,6 @@ OfferResult CommandAssembler::admit(std::uint16_t seq, bool matches_actuated) {
       return OfferResult::kDroppedStaleSeq;
     }
   }
-  std::optional<std::uint16_t> held;
-  if (rpdo1_) {
-    held = rpdo1_->command_seq;
-  } else if (rpdo2_) {
-    held = rpdo2_->command_seq;
-  }
-  if (held && *held != seq) {
-    return violate();  // The window would name two commands.
-  }
   return OfferResult::kAccepted;
 }
 
@@ -90,10 +112,15 @@ OfferResult CommandAssembler::offer(const Rpdo1& fragment) {
   if (const auto r = admit(fragment.command_seq, matches_actuated); r != OfferResult::kAccepted) {
     return r;
   }
-  if (rpdo1_) {
-    return same(*rpdo1_, fragment) ? OfferResult::kDuplicate : violate();
+  Slot* slot = slot_for(fragment.command_seq);
+  if (slot == nullptr) {
+    return OfferResult::kDroppedSuperseded;
   }
-  rpdo1_ = fragment;
+  if (slot->has_rpdo1) {
+    return same(slot->rpdo1, fragment) ? OfferResult::kDuplicate : violate();
+  }
+  slot->has_rpdo1 = true;
+  slot->rpdo1 = fragment;
   return OfferResult::kAccepted;
 }
 
@@ -109,10 +136,15 @@ OfferResult CommandAssembler::offer(const Rpdo2& fragment) {
   if (const auto r = admit(fragment.command_seq, matches_actuated); r != OfferResult::kAccepted) {
     return r;
   }
-  if (rpdo2_) {
-    return same(*rpdo2_, fragment) ? OfferResult::kDuplicate : violate();
+  Slot* slot = slot_for(fragment.command_seq);
+  if (slot == nullptr) {
+    return OfferResult::kDroppedSuperseded;
   }
-  rpdo2_ = fragment;
+  if (slot->has_rpdo2) {
+    return same(slot->rpdo2, fragment) ? OfferResult::kDuplicate : violate();
+  }
+  slot->has_rpdo2 = true;
+  slot->rpdo2 = fragment;
   return OfferResult::kAccepted;
 }
 
@@ -121,21 +153,35 @@ AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {
   AssemblyResult result;
   result.integrity_violation = violated_;
   if (!violated_) {
-    // Both halves held means same tag (the current one) and same seq (admit enforces it).
-    if (rpdo1_ && rpdo2_) {
-      if (validity_open(rpdo2_->valid_until_us, now_us, lease_us_)) {
-        result.command = Command{rpdo1_->target_position, rpdo2_->valid_until_us,
-                                 rpdo2_->command_seq, rpdo2_->exec_tag};
+    // A slot holds one tag (the current one) and one seq, so a complete slot is a pair.
+    const Slot* newest = nullptr;
+    for (const Slot& slot : window_) {
+      if (!slot.used) {
+        continue;
+      }
+      if (!slot.has_rpdo1 || !slot.has_rpdo2) {
+        ++dropped_.missing_half;
+        continue;
+      }
+      if (newest != nullptr) {
+        ++dropped_.superseded;  // One of the two complete pairs is not the newest.
+        if (!runtime_core::seq16_newer(slot.seq, newest->seq)) {
+          continue;
+        }
+      }
+      newest = &slot;
+    }
+    if (newest != nullptr) {
+      if (validity_open(newest->rpdo2.valid_until_us, now_us, lease_us_)) {
+        result.command = Command{newest->rpdo1.target_position, newest->rpdo2.valid_until_us,
+                                 newest->seq, newest->rpdo2.exec_tag};
         last_actuated_ = result.command;
       } else {
         ++dropped_.not_valid;
       }
-    } else if (rpdo1_ || rpdo2_) {
-      ++dropped_.missing_half;
     }
   }
-  rpdo1_.reset();
-  rpdo2_.reset();
+  clear_window();
   result.dropped = dropped_;
   dropped_ = Counters{};
   return result;
