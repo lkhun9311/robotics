@@ -348,6 +348,29 @@ class TracedProc:
             time.sleep(0.01)
         return self
 
+    @property
+    def harness_path(self):
+        """The harness's own records about this process (B7 `killed`), next to its trace."""
+        return self.trace.path.with_suffix(".harness.jsonl")
+
+    def kill(self):
+        """SIGKILL (B7): no exit record is expected from the process. The harness writes a
+        `killed` record (CLOCK_MONOTONIC time.monotonic(), signal, exit status); the trace is judged
+        on readiness and the records up to the kill. Returns the killed record."""
+        if self.proc.poll() is not None:
+            inconclusive(f"{self.name} had already exited ({self.proc.returncode}) before the kill")
+        t = time.monotonic()
+        self.proc.send_signal(signal.SIGKILL)
+        rc = self.proc.wait(timeout=5)
+        self._err.join(timeout=2)
+        self.trace.poll()
+        record = {"event": "killed", "t_mono": t, "signal": int(signal.SIGKILL),
+                  "exit_status": rc}
+        with open(self.harness_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        self.exit = record
+        return record
+
     def wait_exit(self, timeout):
         """Exit status of a process that ends by itself (an error exit); its trace is not judged
         here and teardown does not stop it again. Fails INCONCLUSIVE if it is still running."""

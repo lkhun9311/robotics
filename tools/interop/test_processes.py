@@ -5,6 +5,7 @@ Every test first asserts its preconditions (process ready, the declared traffic 
 complete trace); a missing one fails with INCONCLUSIVE. These assert protocol facts, ordering and
 liveness; interval distributions are printed as measurements, not gated (shared runners).
 """
+import json
 import os
 import re
 import shutil
@@ -195,3 +196,19 @@ def test_proxy_reports_a_dead_interface_without_spinning(proxy):
     assert len(snapshots) <= 3, f"{len(snapshots)} snapshots in {elapsed:.2f} s"
     assert snapshots and snapshots[-1]["device"]["rx_error"] >= 1, snapshots[-1:]
     print(f"proxy ended {elapsed * 1000:.0f} ms after the link went down: {errors[-1]}")
+
+
+def test_killed_bank_is_judged_without_an_exit_record(start_bank):
+    """B7: a process the harness kills with SIGKILL writes no exit record; the harness writes its
+    own `killed` record and the trace is judged on readiness and the records up to the kill."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "start record")
+    killed = bank.kill()
+    assert killed["event"] == "killed" and killed["signal"] == 9, killed
+    assert killed["exit_status"] == -9, killed
+    assert killed["t_mono"] <= time.monotonic()
+    harness = [json.loads(line) for line in bank.harness_path.read_text().splitlines()]
+    assert harness == [killed], harness
+    assert not bank.trace.of("exit"), "a killed process cannot have written an exit record"
+    assert bank.trace.of("start"), "records up to the kill are kept"
+    # Teardown (the traced fixture) must accept this process without an exit record.
