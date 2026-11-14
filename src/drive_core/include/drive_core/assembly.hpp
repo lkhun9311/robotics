@@ -62,7 +62,8 @@ struct AssemblyResult {
 //   lost SYNC, D7); that is not a violation. Two different payloads of the same half and seq in
 //   one window are an integrity violation.
 // - The window holds at most kWindowSlots seqs. When a new seq arrives and every slot is used,
-//   the oldest seq (the new one included) is dropped and counted as superseded.
+//   the oldest seq (the new one included) is dropped and counted as superseded. An evicted
+//   seq's RPDO1 target stays bound to it like a dropped candidate's (below).
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
 // - Separately, every violation stays pending until an on_sync reports it or the owner
@@ -128,6 +129,8 @@ class CommandAssembler {
   };
   // The window slot for `seq`, making one if needed; nullptr when `seq` was dropped as the oldest.
   Slot* slot_for(std::uint16_t seq);
+  // Binds `target` to `seq` as a dropped candidate (mark_dropped, window eviction).
+  void bind_dropped(std::uint16_t seq, std::int32_t target);
   void clear_window();
 
   const ExecTagIssuer& issuer_;
@@ -135,7 +138,8 @@ class CommandAssembler {
   std::uint64_t epoch_;
   std::array<Slot, kWindowSlots> window_{};
   std::optional<Command> last_actuated_;
-  // Targets of candidates the owner dropped (mark_dropped), by seq; and the newest evicted seq.
+  // Targets of dropped candidates (mark_dropped) and of seqs evicted from the full window, by
+  // seq; and the newest seq evicted from this list.
   struct Dropped {
     bool used{false};
     std::uint16_t seq{};

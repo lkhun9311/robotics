@@ -451,4 +451,21 @@ TEST(Assembly, DroppedTargetsStayBoundAndEvictedSeqsTurnStale) {
   EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 11)), OfferResult::kAccepted);
 }
 
+// D8 has no overflow exception: a seq evicted from the full window keeps its RPDO1 target bound,
+// so a later different target for it is still two payloads for one seq.
+TEST(Assembly, EvictedSeqKeepsItsTargetBound) {
+  Drive d;
+  static_assert(CommandAssembler::kWindowSlots == 8);
+  for (std::uint16_t seq = 1; seq <= 9; ++seq) {
+    ASSERT_EQ(d.assembler.offer(r1(d.tag, seq, 10 * seq)), OfferResult::kAccepted) << seq;
+  }
+  // Seq 9 evicted seq 1 (target 10). Another target for seq 1 is a violation, not a silent drop.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 99)), OfferResult::kIntegrityViolation);
+  EXPECT_TRUE(d.assembler.integrity_violation());
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 9, kNow + 20'000)), OfferResult::kBlocked);
+  const auto result = actuate(d.assembler, kNow);
+  EXPECT_TRUE(result.integrity_violation);
+  EXPECT_FALSE(result.command.has_value());
+}
+
 }  // namespace
