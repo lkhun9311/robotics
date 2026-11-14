@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=231
+GTEST_FLOOR=253
 PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
@@ -161,11 +161,13 @@ cmake_minimum_required(VERSION 3.22)
 project(export_consumer LANGUAGES CXX)
 find_package(drive_core REQUIRED)
 find_package(socketcan_io REQUIRED)
+find_package(vdrive_bank REQUIRED)
 add_executable(consumer main.cpp)
-target_link_libraries(consumer PRIVATE drive_core::drive_core socketcan_io::socketcan_io)
+target_link_libraries(consumer PRIVATE drive_core::drive_core socketcan_io::socketcan_io
+  vdrive_bank::vdrive_bank)
 EOF
 {
-  for pkg in runtime_core canopen_codec drive_core socketcan_io; do
+  for pkg in runtime_core canopen_codec drive_core socketcan_io vdrive_bank; do
     (cd "install/release/$pkg/include" && find . -name '*.hpp' | sort | sed 's|^\./\(.*\)|#include "\1"|')
   done
   echo 'int main() { return 0; }'
