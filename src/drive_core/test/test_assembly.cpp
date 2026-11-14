@@ -468,4 +468,15 @@ TEST(Assembly, EvictedSeqKeepsItsTargetBound) {
   EXPECT_FALSE(result.command.has_value());
 }
 
+// The same binding holds for an arriving RPDO1 that is itself the oldest seq of a full window.
+TEST(Assembly, SupersededArrivingSeqKeepsItsTargetBound) {
+  Drive d;
+  for (std::uint16_t seq = 2; seq <= 9; ++seq) {
+    ASSERT_EQ(d.assembler.offer(r1(d.tag, seq, 10 * seq)), OfferResult::kAccepted) << seq;
+  }
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 10)), OfferResult::kDroppedSuperseded);
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 99)), OfferResult::kIntegrityViolation);
+  EXPECT_TRUE(d.assembler.integrity_violation());
+}
+
 }  // namespace

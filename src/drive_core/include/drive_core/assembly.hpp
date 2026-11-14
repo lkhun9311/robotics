@@ -62,8 +62,9 @@ struct AssemblyResult {
 //   lost SYNC, D7); that is not a violation. Two different payloads of the same half and seq in
 //   one window are an integrity violation.
 // - The window holds at most kWindowSlots seqs. When a new seq arrives and every slot is used,
-//   the oldest seq (the new one included) is dropped and counted as superseded. An evicted
-//   seq's RPDO1 target stays bound to it like a dropped candidate's (below).
+//   the oldest seq (the new one included) is dropped and counted as superseded. The RPDO1 target
+//   of a seq dropped this way (evicted or arriving) stays bound to it like a dropped candidate's
+//   (below).
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
 // - Separately, every violation stays pending until an on_sync reports it or the owner

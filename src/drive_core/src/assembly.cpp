@@ -139,6 +139,8 @@ OfferResult CommandAssembler::offer(const Rpdo1& fragment) {
   }
   Slot* slot = slot_for(fragment.command_seq);
   if (slot == nullptr) {
+    // The arriving seq is the oldest of a full window: its target stays bound like an evicted one.
+    bind_dropped(fragment.command_seq, fragment.target_position);
     return OfferResult::kDroppedSuperseded;
   }
   if (slot->has_rpdo1) {
