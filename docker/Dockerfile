@@ -17,11 +17,14 @@ RUN gpg --dearmor < /tmp/ros-snapshots.asc > /usr/share/keyrings/ros-snapshots.g
  || { echo "ros snapshot key fingerprint mismatch: ${fpr:-none}" >&2; exit 1; } \
  && rm /tmp/ros-snapshots.asc \
  && : "${ROS_SNAPSHOT:?set ROS_SNAPSHOT}" \
+ && rm -f /etc/apt/sources.list.d/ros2.sources \
  && printf '%s\n' 'Types: deb' \
       "URIs: http://snapshots.ros.org/jazzy/${ROS_SNAPSHOT}/ubuntu" \
       'Suites: noble' 'Components: main' \
       'Signed-By: /usr/share/keyrings/ros-snapshots.gpg' > /etc/apt/sources.list.d/ros2.sources
 RUN apt-get update \
+ && if grep -rqs 'packages\.ros\.org' /etc/apt/sources.list /etc/apt/sources.list.d; then \
+      echo 'an apt source still points at packages.ros.org' >&2; exit 1; fi \
  && apt-get install -y --no-install-recommends \
       build-essential cmake git python3-colcon-common-extensions \
  && rm -rf /var/lib/apt/lists/*
