@@ -138,13 +138,14 @@ class Capture:
 class Proc:
     """A child process whose stdout is JSON lines, read on a thread."""
 
-    def __init__(self, name, argv, cwd=None):
+    def __init__(self, name, argv, cwd=None, stdin=False):
         self.name = name
         self.argv = [str(a) for a in argv]
         self.events = []
         self.stderr = ""
         self.proc = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True, cwd=cwd)
+                                     stdin=subprocess.PIPE if stdin else None, text=True, cwd=cwd)
+        self.lines_sent = 0
         self._cond = threading.Condition()
         self._out = threading.Thread(target=self._read, daemon=True)
         self._out.start()
@@ -179,6 +180,22 @@ class Proc:
                 self._cond.wait(min(left, 0.05))
         inconclusive(f"{self.name}: no {what} within {timeout} s (exit {self.proc.poll()}); "
                      f"stderr: {self.stderr[-500:]!r}; events: {self.events[-10:]}")
+
+    def send(self, line):
+        """One console line (stdin); returns its number n, as in the peer's cmd/cmd_done."""
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
+        self.lines_sent += 1
+        return self.lines_sent
+
+    def command(self, line, timeout=5):
+        """Sends a console line and waits until the peer reports it done; returns cmd_done."""
+        n = self.send(line)
+        done = self.wait_for(lambda e: e.get("event") == "cmd_done" and e.get("n") == n, timeout,
+                             f"cmd_done for {line!r}")
+        if not done["ok"]:
+            inconclusive(f"{self.name}: console line {line!r} was not carried out")
+        return done
 
     def of(self, kind, **fields):
         with self._cond:
@@ -242,6 +259,7 @@ def start_probe(vcan, procs, probe_eds):
 @pytest.fixture
 def start_peer(vcan, procs, dcf_dir):
     def start(scenario="idle", duration_ms=None, node=None, count=None):
+        """console: stdin is a pipe (Proc.send, Proc.command)."""
         assert LELY_PEER_BIN.exists(), f"NOT_RUN: {LELY_PEER_BIN} not built"
         argv = [LELY_PEER_BIN, "--if", vcan, "--dcf", dcf_dir / "master.dcf",
                 "--scenario", scenario]
@@ -253,7 +271,7 @@ def start_peer(vcan, procs, dcf_dir):
             argv += ["--count", count]
         # cwd = the DCF directory: a concise DCF (UploadFile=<name>.bin, relative) would be found
         # and downloaded, so a configuration write cannot hide behind a missing file.
-        p = Proc("lely_peer", argv, cwd=dcf_dir)
+        p = Proc("lely_peer", argv, cwd=dcf_dir, stdin=scenario == "console")
         procs.append(p)
         p.wait_for(lambda e: e.get("event") == "start", 2, "start line")
         return p
@@ -431,11 +449,13 @@ def traced(tmp_path):
 @pytest.fixture
 def start_bank(vcan, traced, tmp_path):
     """vdrive_bank on vcan_device, ready; stopped cleanly at teardown."""
-    def start(inject=False):
+    def start(inject=False, hb_muted=None):
         assert VDRIVE_BANK_BIN.exists(), f"NOT_RUN: {VDRIVE_BANK_BIN} not built"
         n = len(traced)
         trace = tmp_path / f"bank{n}.jsonl"
         argv = [VDRIVE_BANK_BIN, "--if", DEVICE_IF, "--trace", trace]
+        if hb_muted is not None:
+            argv += ["--hb-muted", hb_muted]
         inject_path = tmp_path / f"bank{n}.sock" if inject else None
         if inject:
             argv += ["--inject", inject_path]
