@@ -2,12 +2,13 @@
 """Checks of the `Sim` instrument itself. Nothing here starts the simulator: a stand-in process
 group or hand-fed messages take its place, so each check isolates one property of `Sim`."""
 import subprocess
+import threading
 import time
 
 import pytest
 
 import sim as sim_module
-from sim import Sim
+from sim import Sim, SimError
 
 
 def _stand_in(sim, command):
@@ -46,3 +47,34 @@ def test_stop_waits_ten_seconds_in_total_before_sigkill(monkeypatch, tmp_path):
     elapsed = time.monotonic() - t0
     assert not sim_module._group_alive(pgid)
     assert 9.5 <= elapsed <= 11.5, f"stop() took {elapsed:.1f} s; SIGKILL is due 10 s after SIGINT"
+
+
+def _feed(s, topic, stamp_s):
+    s._on_message(topic, lambda m: m, sim_module.Sample(stamp_s, {}, {}), {"source_timestamp": time.time_ns()})
+
+
+def test_paired_positions_timeout_is_an_overall_bound():
+    s = Sim("fixture-unpaired")
+    stop = threading.Event()
+
+    def publish():
+        # Pairs that never match for 0.9 s, then /mujoco_actuators_states falls silent.
+        t0 = time.monotonic()
+        while not stop.is_set():
+            now = time.monotonic() - t0
+            _feed(s, "/joint_states", 100.0 + now)
+            if now < 0.9:
+                _feed(s, sim_module.MUJOCO_STATES, 200.0 + now)
+            time.sleep(0.01)
+
+    feeder = threading.Thread(target=publish, daemon=True)
+    feeder.start()
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(SimError):
+            s.paired_positions(within_s=0.02, timeout_s=1.0)
+        elapsed = time.monotonic() - t0
+    finally:
+        stop.set()
+        feeder.join()
+    assert elapsed <= 1.2, f"paired_positions(timeout_s=1.0) gave up after {elapsed:.2f} s"

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trajectory goals through the stock JointTrajectoryController, judged on MuJoCo's joints."""
+import time
+
+import pytest
 
 from expected import GOAL_TOLERANCE, HOME, JOINTS, RANGE, TARGET
-from sim import CONTROLLER_STATE, MUJOCO_STATES
+from sim import CONTROLLER_STATE, MUJOCO_STATES, SimError
 
 STEP = 0.2  # rad, single-joint move in the mapping check
 
@@ -113,3 +116,18 @@ def test_controller_joint_order_does_not_change_named_motion(sim):
     errors = _errors(after, TARGET)
     assert all(e <= GOAL_TOLERANCE for e in errors.values()), errors
     assert all(abs(after[j] - before[j]) > 2 * GOAL_TOLERANCE for j in JOINTS), (before, after)
+
+
+def test_follow_timeout_cancels_the_goal(sim):
+    _go_home(sim)
+    duration_s = 4.0
+    sent = time.monotonic()
+    with pytest.raises(SimError, match="no answer"):
+        sim.follow([(duration_s, TARGET)], timeout_s=1.0)
+    # Past the end of the trajectory: an uncancelled goal has reached TARGET by now.
+    time.sleep(max(0.0, sent + duration_s + 0.5 - time.monotonic()))
+    at = sim.mujoco_positions()
+    # Cancelled about a quarter of the way in time, the arm holds a pose nearer HOME than TARGET.
+    nearer_target = [j for j, h, t in zip(JOINTS, HOME, TARGET) if abs(at[j] - t) <= abs(at[j] - h)]
+    assert not nearer_target, f"the timed-out goal kept running: {nearer_target} reached toward TARGET: {at}"
+    _go_home(sim)

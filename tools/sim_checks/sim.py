@@ -36,6 +36,8 @@ RECORD_QUEUE_DEPTH = 5000
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
 # Time from SIGINT to SIGKILL for the launch process group in `stop()`.
 STOP_GRACE_S = 10.0
+# How long `follow()` waits for the controller to accept the cancel of a timed-out goal.
+CANCEL_TIMEOUT_S = 5.0
 
 
 class SimError(Exception):
@@ -225,12 +227,13 @@ class Sim:
 
     def paired_positions(self, within_s=0.02, timeout_s=5.0):
         """Fresh /joint_states and /mujoco_actuators_states positions whose stamps differ by at
-        most `within_s`, retried until `timeout_s`. Returns (ros, mujoco, stamp gap in s)."""
+        most `within_s`, retried until `timeout_s`, which bounds the whole call. Returns (ros,
+        mujoco, stamp gap in s)."""
         deadline = time.monotonic() + timeout_s
         gap = None
-        while time.monotonic() < deadline:
-            ros = self.sample("/joint_states", timeout_s)
-            mujoco = self.sample("/mujoco_actuators_states", timeout_s)
+        while (left := deadline - time.monotonic()) > 0:
+            ros = self.sample("/joint_states", left)
+            mujoco = self.sample("/mujoco_actuators_states", max(0.0, deadline - time.monotonic()))
             # Unstamped messages would pair with a gap of 0 and make the comparison vacuous.
             if ros.stamp_s == 0.0 or mujoco.stamp_s == 0.0:
                 raise SimError(f"unstamped message: /joint_states {ros.stamp_s}, "
@@ -303,7 +306,17 @@ class Sim:
         handle = _wait(self._follow.send_goal_async(goal), timeout_s, "send_goal")
         if not handle.accepted:
             return FollowResult(False, None, "", None)
-        response = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result")
+        try:
+            response = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result")
+        except SimError as e:
+            # Dropping the result future alone would leave the goal running in the controller.
+            try:
+                cancel = _wait(handle.cancel_goal_async(), CANCEL_TIMEOUT_S, "cancel_goal")
+            except SimError as c:
+                raise SimError(f"{e}; the goal could not be cancelled: {c}") from e
+            if cancel.return_code != cancel.ERROR_NONE:
+                raise SimError(f"{e}; cancel_goal answered return code {cancel.return_code}") from e
+            raise SimError(f"{e}; the goal was cancelled") from e
         return FollowResult(True, response.result.error_code, response.result.error_string, response.status)
 
     # --- ROS node ---
