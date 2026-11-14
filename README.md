@@ -107,7 +107,14 @@ What the contract fixes:
   through an explicit policy reset.
 - Fault layers separate controlled faults from torque loss; after torque loss the drive stays in
   Fault until the process restarts.
-- Commands reach the drive by PDO only; SDO writes to command objects are refused.
+- Commands reach the drive by PDO only. 0x6040, 0x607A, 0x2020 and 0x2021 are `rww` in the EDS
+  so that RPDOs can map them, but an SDO write to them is refused with abort 0x06010000.
+  Parameters the drive never changes at run time (0x1005, 0x1017, the PDO COB-IDs and
+  transmission types, 0x605A, 0x605E, 0x6085) are `const`, so a write is refused as read-only.
+- The SDO server serves expedited transfers only. A segmented or block request, or any other
+  client command specifier it does not serve, is answered with abort 0x05040001. An expedited
+  download with the size indicator clear (command byte 0x22) is accepted: the object's own size
+  applies, and data bytes beyond it must be zero.
 
 Which tool checks what:
 
@@ -120,15 +127,15 @@ Which tool checks what:
 | Bandwidth | `tools/od/bandwidth.py` | Frame count and occupancy computed from the EDS |
 
 No independent CiA 402 implementation was available, so the CiA 402 state machine is checked
-only against the project's table from the standard text; the gate's fake slave did not run a
-state machine. Interop with Lely and with CANopenNode is E3b and E3c and covers the standard
-part only.
+only against the project's table from the standard text. Interop with Lely and with CANopenNode
+is E3b and E3c and covers the standard part only.
 
 Measured and computed:
 
 - Total travel after a command stops being valid, with the validity deadline swept over 20
   phases of one control tick W (`TotalTravelWithinBoundAcrossPhases` in
-  `src/drive_core/test/test_drive_loop.cpp`): maximum 0.097 rad against an allowance of 0.100 rad
+  `src/drive_core/test/test_drive_loop.cpp`, which pins the value): maximum 0.097 rad (24 ticks
+  at v_max, 0.048 rad, plus the braking ramp from v_max, 0.049 rad) against an allowance of 0.100 rad
   (lease 48 ms at v_max 1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not
   industry values.
 - Bandwidth (`python3 tools/od/bandwidth.py config/od/vdrive_arm.eds`): per 10 ms bus cycle
@@ -145,14 +152,46 @@ Residual risks and deviations:
    boot within a process, about 2^-16). If its sequence also matches and the fresh RPDO1 of
    that sequence is lost, an old target could pair with a fresh RPDO2. In the project harness
    the bus proxy bounds delay so this cannot occur there.
-2. The uniform tag start leaves few tags for about 0.15 % of boots, which forces a reset node
-   (availability, not safety).
+2. The tag start of a boot is spread uniformly over 1..65535 (`exec_tag_start`), and a boot can
+   issue the tags from its start up to 65535, that is 65536 - start tags. Fewer than 100 tags
+   are left exactly when the start is above 65436: 99 of 65535 values, about 0.151 % of boots.
+   Such a boot runs out of tags sooner and then needs a reset node (availability, not safety).
 3. With the policy latch set, Enable Operation in Ready to Switch On is ignored instead of
    taking only transition 3. This is intended and conservative.
 4. Quick-stop option 6 with transition 16 disabled while latched is a documented project
    restriction.
 5. SDO writes to command objects are refused; commands travel by PDO only.
-6. A tag lives at most 5 minutes, so trajectories longer than 5 minutes are out of scope.
+6. A tag lives at most 5 minutes of drive time, even while commands stream, so trajectories
+   longer than 5 minutes are out of scope. When the tag expires mid-stream, every later fragment
+   is of a dead tag, nothing actuates, and the command timeout starts a policy stop
+   (`Lifetime.StreamPastTagLifetimeEndsInTimeoutStop`). A commit is refused in Operation Enabled
+   while a command is active, so renewing the tag takes Disable Operation, a new commit and
+   Enable Operation.
+7. drive_core produces no heartbeat and no EMCY. 0x1017 states the 100 ms heartbeat period that
+   the process hosting the drive is to produce (E3b).
+
+Decision index (the `D<n>` references in code comments):
+
+| # | Decision |
+|---|---|
+| D1 | The EDS is the single source of the object dictionary; Lely `dcfchk` lints it, a generator writes the C++ header |
+| D2 | Units: int32 µrad for positions, int32 µrad/s for velocity |
+| D3 | The drive issues a 16-bit exec_tag per commit from a per-boot counter; a tag lives at most 5 min; commits are refused for 100 ms after boot |
+| D4 | RPDO1 (target, seq, tag) and RPDO2 (valid_until_us, seq, tag) are 8 bytes; RPDO3 is the controlword alone, 2 bytes; a frame whose DLC differs from its mapping is rejected |
+| D5 | valid_until_us is host monotonic µs mod 2^32; accepted only if 0 < (until - now) mod 2^32 <= 48 000 |
+| D6 | Replay safety comes from D3 and D5; RPDO1 actuates only paired with an open RPDO2 of the same tag and seq |
+| D7 | RPDOs received between SYNC k and k+1 actuate at SYNC k+1; TPDOs are sampled at SYNC k; no SYNC for 3 T_bus stops; a SYNC sooner than T_bus/2 is ignored |
+| D8 | Fragments pair on equal tag and seq; the newest complete pair actuates; two payloads for one seq are an integrity violation, detected at ingestion, stopping at the next W tick |
+| D9 | Validity is checked at actuation and every W tick; no actuated command for 30 ms in Operation Enabled stops |
+| D10 | Quick stop: option 6, a_stop 10 rad/s^2 achieved exactly; stop confirmed after 5 quiet ticks, unconfirmed after 0.112 s |
+| D11 | Policy stops latch until an explicit policy reset after a confirmed stop; normal disable needs no reset; torque loss is Fault without a ramp |
+| D12 | NMT service matrix; reset communication keeps boot_id and the tag allocator; leaving Operational while Operation Enabled is a policy stop |
+| D13 | TPDO1-3 carry statusword, position, velocity, sample time and the applied seq and tag, joined by sample_seq |
+| D14 | Manufacturer objects 0x2010-0x2030 hold every wire field |
+| D15 | Bandwidth: 31 frames per 10 ms bus cycle |
+| D16 | One CMake include sets warnings, sanitizers and coverage for every pure C++ package |
+| D17 | Commit transaction: attempt_id, staged values, then a CRC-32 commit; idempotent repeat; 0x2016 confirms which attempt holds the tag |
+| D18 | SYNC on 0x80, EMCY on 0x80 + node-ID, read from the EDS |
 
 ## Run everything
 
