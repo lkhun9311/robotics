@@ -4,7 +4,9 @@ import time
 
 import pytest
 
-from expected import GOAL_TOLERANCE, HOME, JOINTS, RANGE, TARGET
+import pick_place
+from expected import GOAL_TOLERANCE, HOME, JOINTS, OBJECT_HANG, RANGE, TABLE_Z, TARGET
+from kinematics import Kinematics
 from sim import CONTROLLER_STATE, MUJOCO_STATES, SimError
 
 STEP = 0.2  # rad, single-joint move in the mapping check
@@ -148,4 +150,45 @@ def test_follow_timeout_cancels_the_goal(sim):
     # Cancelled about a quarter of the way in time, the arm holds a pose nearer HOME than TARGET.
     nearer_target = [j for j, h, t in zip(JOINTS, HOME, TARGET) if abs(at[j] - t) <= abs(at[j] - h)]
     assert not nearer_target, f"the timed-out goal kept running: {nearer_target} reached toward TARGET: {at}"
+    _go_home(sim)
+
+
+def test_pick_place_trajectory_reaches_each_waypoint(sim):
+    """One goal through the five pick-and-place waypoints. Every waypoint is reached within
+    GOAL_TOLERANCE during its dwell, and the attachment_site height, from MuJoCo's own forward
+    kinematics of the recorded MuJoCo joint positions, keeps the hanging object out of the table
+    between PICK and PLACE and above CARRY_MIN_Z while it is carried."""
+    for name, goal in pick_place.WAYPOINTS.items():
+        outside = [j for j, v in zip(JOINTS, goal) if not RANGE[j][0] < v < RANGE[j][1]]
+        assert not outside, f"{name} outside the joint range: {outside}"
+    kin = Kinematics()
+    _go_home(sim)
+    sim.start_recording()
+    sent = sim.stamp_now()
+    r = sim.follow(pick_place.points())
+    result = sim.stamp_now()
+    rec = sim.stop_recording(until_stamp=result + AFTER_RESULT_S)
+    mujoco = rec.get(MUJOCO_STATES, [])
+    assert mujoco, "no /mujoco_actuators_states samples"
+    _require_coverage(MUJOCO_STATES, mujoco, sent, result, sim.recording_lag_s)
+    assert r.succeeded, f"goal did not succeed: {r}"
+    reaches, heights = pick_place.judge([(s.stamp_s, s.position) for _, s in mujoco], sent,
+                                        lambda p: kin.site(p)[0][2])
+    for x in reaches:
+        print(f"{x.name}: {x.samples} samples in the dwell, best largest-joint error {x.best_error:.4f} rad, "
+              f"reached at {x.reached_s} s, lowest site z {x.lowest_z} m at {x.lowest_s} s")
+    print(f"lowest site z: PICK to PLACE {heights.get('pick_to_place')} m, carry {heights.get('carry')} m")
+    missed = {x.name: round(x.best_error, 4) for x in reaches if x.reached_s is None}
+    assert not missed, f"waypoints not reached within {GOAL_TOLERANCE} rad during their dwell: {missed}"
+    by = {x.name: x for x in reaches}
+    for name in ("PICK", "PLACE"):
+        assert by[name].lowest_z <= pick_place.GRASP_MAX_Z, (
+            f"during {name} the site stays at or above z {by[name].lowest_z:.4f} m, above "
+            f"{pick_place.GRASP_MAX_Z} m: the object would not come down to the table")
+    lowest = heights["pick_to_place"] - OBJECT_HANG
+    assert lowest >= TABLE_Z - pick_place.CONTACT_ALLOWANCE, (
+        f"between PICK and PLACE the object's lowest point reaches z {lowest:.4f} m, more than "
+        f"{pick_place.CONTACT_ALLOWANCE} m into the table")
+    assert heights["carry"] >= pick_place.CARRY_MIN_Z, (
+        f"the carried object dips to site z {heights['carry']:.4f} m, below {pick_place.CARRY_MIN_Z} m")
     _go_home(sim)
