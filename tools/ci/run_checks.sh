@@ -150,6 +150,34 @@ run_tests() {
 echo "== build (release) =="
 colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+echo "== exported targets (an outside consumer at the compiler's default C++ standard) =="
+# The consumer sets no standard of its own: whatever its headers need must come from the
+# imported targets (INTERFACE_COMPILE_FEATURES). It includes every installed public header.
+consumer=build/release/export_consumer
+rm -rf "$consumer"
+mkdir -p "$consumer"
+cat > "$consumer/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.22)
+project(export_consumer LANGUAGES CXX)
+find_package(drive_core REQUIRED)
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE drive_core::drive_core)
+EOF
+{
+  for pkg in runtime_core canopen_codec drive_core; do
+    (cd "install/release/$pkg/include" && find . -name '*.hpp' | sort | sed 's|^\./\(.*\)|#include "\1"|')
+  done
+  echo 'int main() { return 0; }'
+} > "$consumer/main.cpp"
+(
+  set +u
+  # shellcheck disable=SC1091
+  source install/release/setup.bash
+  set -u
+  cmake -S "$consumer" -B "$consumer/build" -DCMAKE_BUILD_TYPE=Release > "$consumer/configure.log"
+  cmake --build "$consumer/build"
+)
+
 echo "== unit tests (release) =="
 run_tests build/release
 

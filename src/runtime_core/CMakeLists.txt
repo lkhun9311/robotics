@@ -8,6 +8,8 @@ file(GLOB RUNTIME_CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src
 add_library(runtime_core ${RUNTIME_CORE_SOURCES})
 add_library(runtime_core::runtime_core ALIAS runtime_core)
 robotics_apply_flags(runtime_core)
+# The public headers need C++20; an outside consumer of the exported target gets it from here.
+target_compile_features(runtime_core PUBLIC cxx_std_20)
 target_include_directories(runtime_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
