@@ -1,0 +1,882 @@
+; SPDX-License-Identifier: Apache-2.0
+; Object dictionary of the virtual arm drive (CiA 306 EDS). Single source for the drive's
+; objects and PDO layouts; tools/od/gen_header.py generates the C++ header from this file.
+
+[FileInfo]
+FileName=vdrive_arm.eds
+FileVersion=1
+FileRevision=0
+EDSVersion=4.0
+Description=Virtual arm joint drive, CiA 402 cyclic synchronous position
+CreationTime=12:00PM
+CreationDate=11-14-2026
+CreatedBy=robotics
+ModificationTime=12:00PM
+ModificationDate=11-14-2026
+ModifiedBy=robotics
+
+[DeviceInfo]
+VendorName=robotics
+VendorNumber=0x00000000
+ProductName=vdrive_arm
+ProductNumber=0x00000000
+RevisionNumber=0x00000000
+OrderCode=vdrive_arm
+BaudRate_10=0
+BaudRate_20=0
+BaudRate_50=0
+BaudRate_125=0
+BaudRate_250=0
+BaudRate_500=0
+BaudRate_800=0
+BaudRate_1000=1
+SimpleBootUpMaster=0
+SimpleBootUpSlave=1
+Granularity=0
+DynamicChannelsSupported=0
+GroupMessaging=0
+NrOfRxPDO=3
+NrOfTxPDO=3
+LSS_Supported=0
+CompactPDO=0
+
+[MandatoryObjects]
+SupportedObjects=3
+1=0x1000
+2=0x1001
+3=0x1018
+
+; CiA 402 drive, servo (0x0002 additional information, profile 0x0192 = 402).
+[1000]
+ParameterName=Device type
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00020192
+PDOMapping=0
+
+[1001]
+ParameterName=Error register
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+; No CiA vendor-ID is assigned to this virtual drive, so the identity values stay 0.
+[1018]
+ParameterName=Identity object
+ObjectType=0x9
+SubNumber=5
+
+[1018sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=4
+PDOMapping=0
+
+[1018sub1]
+ParameterName=Vendor-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1018sub2]
+ParameterName=Product code
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1018sub3]
+ParameterName=Revision number
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1018sub4]
+ParameterName=Serial number
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[OptionalObjects]
+SupportedObjects=25
+1=0x1005
+2=0x1014
+3=0x1017
+4=0x1400
+5=0x1401
+6=0x1402
+7=0x1600
+8=0x1601
+9=0x1602
+10=0x1800
+11=0x1801
+12=0x1802
+13=0x1A00
+14=0x1A01
+15=0x1A02
+16=0x6040
+17=0x6041
+18=0x605A
+19=0x605E
+20=0x6060
+21=0x6061
+22=0x6064
+23=0x606C
+24=0x607A
+25=0x6085
+
+; D18: SYNC consumer (bit 30 clear) on 0x80. const: this drive does not reconfigure it at run time.
+[1005]
+ParameterName=COB-ID SYNC
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=0x00000080
+PDOMapping=0
+
+; D18: EMCY on 0x80 + node-ID. Node-relative values are written $NODEID+0x..., the form Lely dcf-tools parse.
+[1014]
+ParameterName=COB-ID EMCY
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=$NODEID+0x80
+PDOMapping=0
+
+; The heartbeat period this drive's host produces (E3b); drive_core itself produces none. const.
+[1017]
+ParameterName=Producer heartbeat time
+ObjectType=0x7
+DataType=0x0006
+AccessType=const
+DefaultValue=100
+PDOMapping=0
+
+; D4/D7: RPDO1 and RPDO2 are synchronous (type 1), actuated at the next SYNC; RPDO3 is event-driven (type 255).
+; COB-IDs and transmission types are const: the PDO set is fixed (no PDO reconfiguration).
+[1400]
+ParameterName=RPDO1 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1400sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1400sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x200
+PDOMapping=0
+
+[1400sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=1
+PDOMapping=0
+
+[1401]
+ParameterName=RPDO2 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1401sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1401sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x300
+PDOMapping=0
+
+[1401sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=1
+PDOMapping=0
+
+[1402]
+ParameterName=RPDO3 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1402sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1402sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x400
+PDOMapping=0
+
+[1402sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=255
+PDOMapping=0
+
+; D4: static mappings (ro). RPDO1 = target position i32, command_seq u16, exec_tag u16 (64 bits).
+[1600]
+ParameterName=RPDO1 mapping parameter
+ObjectType=0x9
+SubNumber=4
+
+[1600sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[1600sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x607A0020
+PDOMapping=0
+
+[1600sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20200110
+PDOMapping=0
+
+[1600sub3]
+ParameterName=Mapped object 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20200210
+PDOMapping=0
+
+; D4: RPDO2 = valid_until_us u32, command_seq u16, exec_tag u16 (64 bits).
+[1601]
+ParameterName=RPDO2 mapping parameter
+ObjectType=0x9
+SubNumber=4
+
+[1601sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[1601sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20210120
+PDOMapping=0
+
+[1601sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20210210
+PDOMapping=0
+
+[1601sub3]
+ParameterName=Mapped object 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20210310
+PDOMapping=0
+
+; D4: RPDO3 = controlword u16 only (16 bits, DLC 2).
+[1602]
+ParameterName=RPDO3 mapping parameter
+ObjectType=0x9
+SubNumber=2
+
+[1602sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=1
+PDOMapping=0
+
+[1602sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x60400010
+PDOMapping=0
+
+; D7/D13: TPDO1-3 are synchronous (type 1), sampled at SYNC. COB-IDs and transmission types are const.
+[1800]
+ParameterName=TPDO1 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1800sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1800sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x180
+PDOMapping=0
+
+[1800sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=1
+PDOMapping=0
+
+[1801]
+ParameterName=TPDO2 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1801sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1801sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x280
+PDOMapping=0
+
+[1801sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=1
+PDOMapping=0
+
+[1802]
+ParameterName=TPDO3 communication parameter
+ObjectType=0x9
+SubNumber=3
+
+[1802sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1802sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=$NODEID+0x380
+PDOMapping=0
+
+[1802sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=const
+DefaultValue=1
+PDOMapping=0
+
+; D13: TPDO1 = statusword u16, position i32, sample_seq u16.
+[1A00]
+ParameterName=TPDO1 mapping parameter
+ObjectType=0x9
+SubNumber=4
+
+[1A00sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[1A00sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x60410010
+PDOMapping=0
+
+[1A00sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x60640020
+PDOMapping=0
+
+[1A00sub3]
+ParameterName=Mapped object 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300110
+PDOMapping=0
+
+; D13: TPDO2 = velocity i32, sample_seq u16, applied_seq u16.
+[1A01]
+ParameterName=TPDO2 mapping parameter
+ObjectType=0x9
+SubNumber=4
+
+[1A01sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[1A01sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x606C0020
+PDOMapping=0
+
+[1A01sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300110
+PDOMapping=0
+
+[1A01sub3]
+ParameterName=Mapped object 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300210
+PDOMapping=0
+
+; D13: TPDO3 = sample_time_us u32, sample_seq u16, applied_tag u16.
+[1A02]
+ParameterName=TPDO3 mapping parameter
+ObjectType=0x9
+SubNumber=4
+
+[1A02sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[1A02sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300320
+PDOMapping=0
+
+[1A02sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300110
+PDOMapping=0
+
+[1A02sub3]
+ParameterName=Mapped object 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x20300410
+PDOMapping=0
+
+; CiA 402 objects. Units (D2): position in urad, velocity in urad/s.
+; rww for RPDO mapping; an SDO write is refused (0x06010000): commands enter by PDO only (D4).
+[6040]
+ParameterName=Controlword
+ObjectType=0x7
+DataType=0x0006
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+[6041]
+ParameterName=Statusword
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+; D10: 6 = decelerate on the quick-stop ramp and stay in Quick Stop Active. const: the only option implemented.
+[605A]
+ParameterName=Quick stop option code
+ObjectType=0x7
+DataType=0x0003
+AccessType=const
+DefaultValue=6
+PDOMapping=0
+
+; D11: 2 = quick-stop ramp on a recoverable fault. const: the only option implemented.
+[605E]
+ParameterName=Fault reaction option code
+ObjectType=0x7
+DataType=0x0003
+AccessType=const
+DefaultValue=2
+PDOMapping=0
+
+; Cyclic synchronous position (8) is the only mode this drive supports.
+[6060]
+ParameterName=Modes of operation
+ObjectType=0x7
+DataType=0x0002
+AccessType=rw
+DefaultValue=8
+PDOMapping=0
+LowLimit=8
+HighLimit=8
+
+[6061]
+ParameterName=Modes of operation display
+ObjectType=0x7
+DataType=0x0002
+AccessType=ro
+DefaultValue=8
+PDOMapping=0
+
+[6064]
+ParameterName=Position actual value
+ObjectType=0x7
+DataType=0x0004
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[606C]
+ParameterName=Velocity actual value
+ObjectType=0x7
+DataType=0x0004
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+; rww for RPDO mapping; an SDO write is refused (0x06010000): commands enter by PDO only (D4).
+[607A]
+ParameterName=Target position
+ObjectType=0x7
+DataType=0x0004
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+; D10: 10 rad/s^2 in urad/s^2. const: the ramp the stop bound (e_allow) is computed for.
+[6085]
+ParameterName=Quick stop deceleration
+ObjectType=0x7
+DataType=0x0007
+AccessType=const
+DefaultValue=10000000
+PDOMapping=0
+
+[ManufacturerObjects]
+SupportedObjects=10
+1=0x2010
+2=0x2011
+3=0x2012
+4=0x2013
+5=0x2014
+6=0x2015
+7=0x2016
+8=0x2020
+9=0x2021
+10=0x2030
+
+; D14/D17: commit staging. Writing 04 attempt_id first opens a 1 s staging window; 01-03 follow.
+[2010]
+ParameterName=exec_request
+ObjectType=0x9
+SubNumber=5
+
+[2010sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=4
+PDOMapping=0
+
+[2010sub1]
+ParameterName=generation_lo
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[2010sub2]
+ParameterName=generation_hi
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[2010sub3]
+ParameterName=session_lo
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[2010sub4]
+ParameterName=attempt_id
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+; D17: CRC-32/ISO-HDLC over little-endian attempt_id, generation_lo, generation_hi, session_lo.
+[2011]
+ParameterName=exec_commit
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+; D3: drive-issued execution tag, never 0 once committed.
+[2012]
+ParameterName=exec_tag
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+; D3: new each boot.
+[2013]
+ParameterName=boot_id
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+; D9: 3 x T_bus.
+[2014]
+ParameterName=command_timeout_ms
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=30
+PDOMapping=0
+
+; D11: writing 1 after stop_confirmed clears the policy latch.
+[2015]
+ParameterName=policy_reset
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+LowLimit=0
+HighLimit=1
+
+; D17: attempt_id of the last successful commit.
+[2016]
+ParameterName=committed_attempt
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+; D4/D14: RPDO-mappable command fragment fields. rww for RPDO mapping; an SDO write to 0x2020 or
+; 0x2021 is refused (0x06010000): commands enter by PDO only.
+[2020]
+ParameterName=rpdo1_ext
+ObjectType=0x9
+SubNumber=3
+
+[2020sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[2020sub1]
+ParameterName=command_seq
+ObjectType=0x7
+DataType=0x0006
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+[2020sub2]
+ParameterName=exec_tag
+ObjectType=0x7
+DataType=0x0006
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+[2021]
+ParameterName=rpdo2_ext
+ObjectType=0x9
+SubNumber=4
+
+[2021sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[2021sub1]
+ParameterName=valid_until_us
+ObjectType=0x7
+DataType=0x0007
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+[2021sub2]
+ParameterName=command_seq
+ObjectType=0x7
+DataType=0x0006
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+[2021sub3]
+ParameterName=exec_tag
+ObjectType=0x7
+DataType=0x0006
+AccessType=rww
+DefaultValue=0
+PDOMapping=1
+
+; D13/D14: feedback fields; 05 drive_flags is SDO-only. drive_flags bits: 0x0001 policy latch set (D11),
+; 0x0002 drive unavailable (torque loss), 0x0004 integrity violation not yet reset (D8), 0x0008 latest stop
+; unconfirmed (D10); other bits 0.
+[2030]
+ParameterName=feedback_ext
+ObjectType=0x9
+SubNumber=6
+
+[2030sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=5
+PDOMapping=0
+
+[2030sub1]
+ParameterName=sample_seq
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[2030sub2]
+ParameterName=applied_seq
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[2030sub3]
+ParameterName=sample_time_us
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[2030sub4]
+ParameterName=applied_tag
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[2030sub5]
+ParameterName=drive_flags
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+PDOMapping=0

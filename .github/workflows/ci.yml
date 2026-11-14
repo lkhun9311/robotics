@@ -50,8 +50,8 @@ jobs:
           name: checks-artifacts
           path: |
             artifacts/
-            build/release/runtime_core/Testing/
-            build/asan/runtime_core/Testing/
+            build/release/*/Testing/
+            build/asan/*/Testing/
           if-no-files-found: warn
 
   probe-vcan:

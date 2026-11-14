@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>canopen_codec</name>
+  <version>0.1.0</version>
+  <description>ROS-free CANopen frame codec for the virtual arm drive, with its object dictionary header generated from the EDS.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <buildtool_depend>python3</buildtool_depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
