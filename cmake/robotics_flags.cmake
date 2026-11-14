@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Build flags shared by every pure C++ package (runtime_core, canopen_codec, drive_core).
+# Build flags shared by every pure C++ package (runtime_core, canopen_codec, drive_core, lely_peer).
 # Include it, then call robotics_apply_flags(<target>) for each library or executable.
 include_guard(GLOBAL)
 

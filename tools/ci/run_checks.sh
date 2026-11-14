@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=212
+GTEST_FLOOR=218
 PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
@@ -250,13 +250,14 @@ for pkg in "${CPP_PACKAGES[@]}"; do
 done
 
 echo "== python tests (release harness; traces kept in artifacts/traces/release) =="
+# tools/interop needs vcan and NET_ADMIN; it is not collected here (B13).
 # launch_testing's pytest plugin answers pytest_ignore_collect with False ahead of pytest's own
 # hook, which silently defeats --ignore (seen 2026-11-14). No test here is a launch test, and
 # launch_ros (launch_testing_ros) only registers hooks that launch_testing declares, so both go.
 LOGIC_SIM_BIN="$PWD/install/release/runtime_core/lib/runtime_core/logic_sim" \
 ORACLE_TRACE_DIR="$PWD/artifacts/traces/release" \
   python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q \
-  --junitxml=artifacts/pytest.xml --ignore=tools/sim_checks tools
+  --junitxml=artifacts/pytest.xml --ignore=tools/sim_checks --ignore=tools/interop tools
 require_at_least "pytest (tools)" "$(junit_count artifacts/pytest.xml)" "$PYTEST_FLOOR"
 
 echo "== oracle x harness (ASan + UBSan harness; traces in artifacts/traces/asan) =="

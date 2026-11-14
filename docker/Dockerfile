@@ -61,9 +61,10 @@ WORKDIR /ws
 
 FROM ${BUILD_FROM} AS build
 COPY . /ws
+# lely_peer is a test peer linked against the dev image's Lely libraries; it does not ship.
 RUN source /opt/ros/jazzy/setup.bash \
  && colcon build --base-paths src --build-base build/release --install-base install/release \
-      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+      --packages-skip lely_peer --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
 # Runtime: the pinned ros-core image (no compilers, no colcon) plus the installed artifacts.
 FROM ${RUNTIME_IMAGE} AS runtime
