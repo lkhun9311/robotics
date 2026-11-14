@@ -46,6 +46,8 @@ GTEST_FLOOR=282
 PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
+VCAN_FLOOR=12
+TSAN_FLOOR=28
 
 require_at_least() {
   local label=$1 found=$2 floor=$3
@@ -90,12 +92,13 @@ print(sum(int(s.get("tests", 0)) - int(s.get("skipped", 0)) for s in suites))' "
 # Every production source of a package (its src/ directory) must be compiled with the sanitizer
 # flags: one sanitized test file must not stand in for an unsanitized library. Fails naming each
 # file without them, and fails when the database has no entry under the directory at all.
+# Third argument: the flag (default the ASan + UBSan one).
 require_sanitized() {
-  python3 - "$1" "$2" <<'EOF'
+  python3 - "$1" "$2" "${3:--fsanitize=address,undefined}" <<'EOF'
 import json, os, shlex, sys
 
 src_dir, db = os.path.realpath(sys.argv[1]), sys.argv[2]
-flag = "-fsanitize=address,undefined"
+flag = sys.argv[3]
 try:
     with open(db) as f:
         entries = json.load(f)
@@ -270,5 +273,55 @@ ORACLE_TRACE_DIR="$PWD/artifacts/traces/asan" \
   python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest-asan.xml \
   tools/oracle/tests/test_logic_sim_integration.py
 require_at_least "oracle x harness" "$(junit_count artifacts/pytest-asan.xml)" "$INTEGRATION_FLOOR"
+
+echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) =="
+# Needs NET_ADMIN (and the vcan module on the host). The status file is written by a trap that
+# covers the whole stage: OK, NOT_RUN: <reason> (the stage could not run, which fails the check;
+# never a skip), or FAIL: <what>. The subshell keeps the trap to this stage.
+(
+  verdict="FAIL: the vcan stage ended before a verdict"
+  trap 'echo "$verdict" > artifacts/vcan-status.txt; echo "vcan status: $verdict"' EXIT
+  rc=0
+  out=$(tools/bus/vcan_up.sh) || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    verdict=$out
+    exit 1
+  elif [ "$rc" -ne 0 ]; then
+    verdict="FAIL: vcan_up.sh exited $rc: $out"
+    exit 1
+  fi
+  verdict="FAIL: interop tests"
+  set +u
+  # shellcheck disable=SC1091
+  source install/release/setup.bash
+  set -u
+  python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q -rP \
+    --junitxml=artifacts/pytest-vcan.xml tools/interop
+  verdict="FAIL: interop test count"
+  require_at_least "vcan integration" "$(junit_count artifacts/pytest-vcan.xml)" "$VCAN_FLOOR"
+  verdict="OK"
+)
+
+echo "== thread sanitizer (vdrive_bank: control thread, trace ring and writer thread) =="
+TSAN=(--build-base build/tsan --install-base install/tsan)
+colcon build --base-paths src "${TSAN[@]}" --packages-up-to vdrive_bank \
+  --cmake-args -DCMAKE_BUILD_TYPE=Debug -DROBOTICS_SANITIZE=thread -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+require_sanitized src/vdrive_bank/src build/tsan/vdrive_bank/compile_commands.json -fsanitize=thread
+(
+  export TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+  rc=0
+  colcon test --base-paths src "${TSAN[@]}" --packages-select vdrive_bank \
+    --return-code-on-test-failure || rc=$?
+  colcon test-result --test-result-base build/tsan/vdrive_bank --verbose | tee build/tsan/test-result.txt
+  [ "$rc" -eq 0 ] || exit "$rc"
+  summary=$(grep '^Summary: ' build/tsan/test-result.txt | tail -1)
+  total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
+  skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
+  if [ "${skipped:-x}" != 0 ]; then
+    echo "FAIL: tsan: skipped tests or unreadable summary ('$summary')" >&2
+    exit 1
+  fi
+  require_at_least "tsan (vdrive_bank)" "$total" "$TSAN_FLOOR"
+)
 
 echo "== all checks passed =="

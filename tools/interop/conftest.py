@@ -30,8 +30,15 @@ VCAN_UP = ROOT / "tools" / "bus" / "vcan_up.sh"
 INSTALL = ROOT / "install" / "release" / "lely_peer" / "lib" / "lely_peer"
 LELY_PEER_BIN = pathlib.Path(os.environ.get("LELY_PEER_BIN", INSTALL / "lely_peer"))
 PROBE_SLAVE_BIN = pathlib.Path(os.environ.get("PROBE_SLAVE_BIN", INSTALL / "probe_slave"))
+RELEASE = ROOT / "install" / "release"
+VDRIVE_BANK_BIN = pathlib.Path(os.environ.get(
+    "VDRIVE_BANK_BIN", RELEASE / "vdrive_bank" / "lib" / "vdrive_bank" / "vdrive_bank"))
+BUS_FAULT_PROXY_BIN = pathlib.Path(os.environ.get(
+    "BUS_FAULT_PROXY_BIN", RELEASE / "bus_fault_proxy" / "lib" / "bus_fault_proxy" / "bus_fault_proxy"))
 
 HOST_IF = "vcan_host"
+DEVICE_IF = "vcan_device"
+READY_S = 2.0  # A process is ready when its first trace record is written within this.
 NODES = (1, 2, 3, 4, 5, 6)
 
 _CAN_FRAME = struct.Struct("=IB3x8s")
@@ -268,3 +275,190 @@ def capture(vcan):
 @pytest.fixture(scope="session")
 def eds():
     return wire.Eds(EDS)
+
+
+class TraceFile:
+    """The JSON lines a process writes to its --trace file, read as they arrive."""
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+        self.records = []
+        self._offset = 0
+        self._partial = ""
+
+    def poll(self):
+        if not self.path.exists():
+            return self.records
+        with open(self.path, encoding="utf-8") as f:
+            f.seek(self._offset)
+            text = f.read()
+            self._offset = f.tell()
+        lines = (self._partial + text).split("\n")
+        self._partial = lines.pop()
+        for line in lines:
+            try:
+                self.records.append(json.loads(line))
+            except ValueError:
+                inconclusive(f"{self.path}: unparsable trace line {line!r}")
+        return self.records
+
+    def of(self, event):
+        return [r for r in self.poll() if r.get("event") == event]
+
+    def wait_for(self, predicate, timeout, what):
+        deadline = time.monotonic() + timeout
+        while True:
+            for r in self.poll():
+                if predicate(r):
+                    return r
+            if time.monotonic() >= deadline:
+                inconclusive(f"{self.path.name}: no {what} within {timeout} s; "
+                             f"last records: {self.records[-5:]}")
+            time.sleep(0.01)
+
+
+class TracedProc:
+    """A process that writes its trace to a file (vdrive_bank, bus_fault_proxy).
+
+    Ready: its first trace record within READY_S. Stopped (SIGTERM): exit 0 and a final `exit`
+    record with trace_overflow == 0, so a test never judges an incomplete trace."""
+
+    def __init__(self, name, argv, trace_path):
+        self.name = name
+        self.trace = TraceFile(trace_path)
+        self.stderr = ""
+        self.exit = None
+        self.proc = subprocess.Popen([str(a) for a in argv], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, text=True)
+        self._err = threading.Thread(target=self._read_err, daemon=True)
+        self._err.start()
+
+    def _read_err(self):
+        self.stderr = self.proc.stderr.read()
+
+    def ready(self):
+        deadline = time.monotonic() + READY_S
+        while not self.trace.poll():
+            if self.proc.poll() is not None:
+                self._err.join(timeout=2)
+                inconclusive(f"{self.name} exited {self.proc.returncode} before its first "
+                             f"trace record; stderr: {self.stderr[-500:]!r}")
+            if time.monotonic() >= deadline:
+                inconclusive(f"{self.name}: no trace record within {READY_S} s")
+            time.sleep(0.01)
+        return self
+
+    def stop(self, timeout=5):
+        """SIGTERM, then the completeness contract (B7). Returns the exit record."""
+        if self.exit is not None:
+            return self.exit
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+        try:
+            rc = self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+            inconclusive(f"{self.name} did not exit within {timeout} s of SIGTERM")
+        self._err.join(timeout=2)
+        assert rc == 0, f"{self.name} exited {rc}; stderr: {self.stderr[-500:]!r}"
+        records = self.trace.poll()
+        if not records or records[-1].get("event") != "exit":
+            inconclusive(f"{self.name}: trace has no final exit record: {records[-3:]}")
+        self.exit = records[-1]
+        if self.exit.get("trace_overflow") != 0:
+            inconclusive(f"{self.name}: trace incomplete, trace_overflow = "
+                         f"{self.exit.get('trace_overflow')}")
+        return self.exit
+
+
+@pytest.fixture
+def traced(tmp_path):
+    started = []
+    yield started
+    errors = []
+    for p in started:
+        try:
+            p.stop()
+        except BaseException as e:  # noqa: BLE001 - every process is stopped, then reported.
+            if p.proc.poll() is None:
+                p.proc.kill()
+                p.proc.wait()
+            errors.append(f"{p.name}: {e}")
+    if errors:
+        pytest.fail("; ".join(errors), pytrace=False)
+
+
+@pytest.fixture
+def start_bank(vcan, traced, tmp_path):
+    """vdrive_bank on vcan_device, ready; stopped cleanly at teardown."""
+    def start(inject=False):
+        assert VDRIVE_BANK_BIN.exists(), f"NOT_RUN: {VDRIVE_BANK_BIN} not built"
+        n = len(traced)
+        trace = tmp_path / f"bank{n}.jsonl"
+        argv = [VDRIVE_BANK_BIN, "--if", DEVICE_IF, "--trace", trace]
+        if inject:
+            argv += ["--inject", tmp_path / f"bank{n}.sock"]
+        p = TracedProc("vdrive_bank", argv, trace)
+        traced.append(p)
+        return p.ready()
+    return start
+
+
+@pytest.fixture
+def bank(start_bank):
+    return start_bank()
+
+
+@pytest.fixture
+def start_proxy(vcan, traced, tmp_path):
+    """bus_fault_proxy between vcan_host and vcan_device, ready; stopped cleanly at teardown."""
+    def start(rules=None):
+        assert BUS_FAULT_PROXY_BIN.exists(), f"NOT_RUN: {BUS_FAULT_PROXY_BIN} not built"
+        n = len(traced)
+        trace = tmp_path / f"proxy{n}.jsonl"
+        argv = [BUS_FAULT_PROXY_BIN, "--host", HOST_IF, "--device", DEVICE_IF, "--trace", trace]
+        if rules is not None:
+            path = tmp_path / f"proxy{n}.rules"
+            path.write_text(rules)
+            argv += ["--rules", path]
+        p = TracedProc("bus_fault_proxy", argv, trace)
+        traced.append(p)
+        return p.ready()
+    return start
+
+
+@pytest.fixture
+def proxy(start_proxy):
+    return start_proxy()
+
+
+class RawPeer:
+    """Sends raw classic frames on one interface; returns the CLOCK_MONOTONIC send time."""
+
+    def __init__(self, ifname):
+        self.ifname = ifname
+        self._sock = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+        self._sock.bind((ifname,))
+
+    def send(self, cob_id, data=b"", flags=0):
+        raw = _CAN_FRAME.pack(cob_id | flags, len(data), bytes(data).ljust(8, b"\0"))
+        t = time.monotonic()
+        self._sock.send(raw)
+        return t
+
+    def close(self):
+        self._sock.close()
+
+
+@pytest.fixture
+def peer(vcan):
+    peers = []
+
+    def open_peer(ifname):
+        p = RawPeer(ifname)
+        peers.append(p)
+        return p
+    yield open_peer
+    for p in peers:
+        p.close()
