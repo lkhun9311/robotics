@@ -176,6 +176,12 @@ Residual risks and deviations:
    Enable Operation.
 7. drive_core produces no heartbeat and no EMCY. 0x1017 states the 100 ms heartbeat period that
    the process hosting the drive is to produce (E3b).
+8. Host obligation: a master must never reuse a command sequence number for a different target
+   within one tag: a new target always takes a new sequence number. The drive binds each
+   sequence number to one target and treats a different target for a used sequence number as an
+   integrity violation; but if a master re-sends a sequence number with a new target and that
+   RPDO1 is lost while a delayed copy of the earlier RPDO1 arrives, the drive cannot tell it from
+   a legitimate re-send and would actuate the earlier target under the new deadline.
 
 Decision index (the `D<n>` references in code comments):
 
