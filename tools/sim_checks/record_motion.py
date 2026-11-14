@@ -125,7 +125,7 @@ def main(argv=None):
     for cleanup in (sim.stop, lambda: _finish_ffmpeg(ffmpeg)):
         try:
             cleanup()
-        except Exception as e:
+        except BaseException as e:  # a second Ctrl-C must not skip the remaining cleanup
             if failure is None:
                 failure = e
             else:
