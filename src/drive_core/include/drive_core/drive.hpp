@@ -65,7 +65,7 @@ inline constexpr std::uint16_t kErrorTorqueLoss = 0xFF01;
 enum class DropReason : std::uint8_t {
   kOtherTag,       // Fragment of another (or no) tag.
   kStaleSeq,       // Fragment seq not newer than the last actuated.
-  kNotValid,       // Pair expired or beyond the lease at actuation.
+  kNotValid,       // Deadline expired or beyond the lease (RPDO2 at receipt, pair at actuation).
   kMissingHalf,    // A lone half at SYNC: an ordinary gap.
   kBlocked,        // Current-tag fragment after an integrity violation.
   kSuperseded,     // Complete pair older than the newest at the same SYNC.

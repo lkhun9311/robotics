@@ -303,6 +303,21 @@ TEST(DriveGuard, NeverActuatedAtExpiry) {
   EXPECT_EQ(l.drive.joint().velocity_nrad_s, kVMax - kDvPerTick);  // Braked, not tracked.
 }
 
+// D5: an RPDO2 whose deadline is beyond the lease when it is received is dropped then; waiting in
+// the window for the next SYNC must not bring it inside the lease.
+TEST(DriveGuard, TooFarAheadAtIngestionIsDropped) {
+  Loop l;
+  l.enable();
+  l.sync();
+  l.command(kFar, milliseconds(58));  // 10 ms beyond the lease when received.
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 1U);
+  l.ticks(5);
+  l.sync();  // The deadline is now exactly 48 ms ahead.
+  EXPECT_FALSE(l.drive.actuated().has_value());
+  EXPECT_EQ(l.count(DriveEventKind::kActuated), 0U);
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 1U);
+}
+
 TEST(DriveGuard, ExpiredDetectedWithinW) {
   Loop l;
   l.enable();
