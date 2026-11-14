@@ -159,11 +159,21 @@ class Sim:
 
     def stop(self):
         """Ends the launch process group, then tears down the test node. The group goes first
-        and in any case: a teardown error must not leave a simulator running."""
+        and in any case: a teardown error must not leave a simulator running. When both fail,
+        the launch error is the one raised and the teardown error is attached to it as a note."""
+        failure = None
         try:
             self._stop_launch()
-        finally:
+        except Exception as e:
+            failure = e
+        try:
             self._stop_node()
+        except Exception as e:
+            if failure is None:
+                raise
+            failure.add_note(f"also, while tearing down the test node: {type(e).__name__}: {e}")
+        if failure is not None:
+            raise failure
 
     def _stop_launch(self):
         if self._proc is None:
@@ -245,8 +255,13 @@ class Sim:
         deadline = time.monotonic() + timeout_s
         gap = None
         while (left := deadline - time.monotonic()) > 0:
-            ros = self.sample("/joint_states", left)
-            mujoco = self.sample(MUJOCO_STATES, max(0.0, deadline - time.monotonic()))
+            try:
+                ros = self.sample("/joint_states", left)
+                mujoco = self.sample(MUJOCO_STATES, max(0.0, deadline - time.monotonic()))
+            except SimError as e:
+                # The deadline ran out inside a sample: report the pairing, not a 0.0 s timeout.
+                raise SimError(f"no sample pair within {within_s} s of each other (last gap {gap} s); "
+                               f"then: {e}") from e
             # Unstamped messages would pair with a gap of 0 and make the comparison vacuous.
             if ros.stamp_s == 0.0 or mujoco.stamp_s == 0.0:
                 raise SimError(f"unstamped message: /joint_states {ros.stamp_s}, "
