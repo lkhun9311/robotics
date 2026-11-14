@@ -23,3 +23,8 @@ RANGE = {j: (-6.28319, 6.28319) for j in JOINTS} | {"elbow_joint": (-3.1415, 3.1
 
 # Largest per-joint position error (rad) accepted at the end of a trajectory.
 GOAL_TOLERANCE = 0.05
+
+# Per-joint offset from HOME used by the trajectory checks, in JOINTS order. Every joint moves,
+# and the elbow moves away from its +3.1415 limit.
+TARGET_OFFSET = (0.5, 0.3, -0.4, 0.3, 0.5, 0.8)
+TARGET = tuple(h + d for h, d in zip(HOME, TARGET_OFFSET))

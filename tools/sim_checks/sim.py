@@ -21,6 +21,7 @@ from expected import JOINTS
 REPO = pathlib.Path(__file__).resolve().parents[2]
 LOG_DIR = REPO / "artifacts" / "sim"
 CONTROLLERS = ("joint_state_broadcaster", "arm_controller")
+CONTROLLER_STATE = "/arm_controller/controller_state"
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
 
 
@@ -90,8 +91,10 @@ class Sim:
         self._executor = None
         self._spin = None
         self._cond = threading.Condition()
-        # topic -> (count of messages received, latest Sample)
+        # topic -> (count of messages received, latest value: a Sample, or a controller_state() dict)
         self._latest = collections.defaultdict(lambda: (0, None))
+        # topic -> [(monotonic receive time, message value)] while a recording is open
+        self._recording = None
 
     # --- lifecycle ---
 
@@ -204,6 +207,26 @@ class Sim:
                 return ros.position, mujoco.position, gap
         raise SimError(f"no sample pair within {within_s} s of each other (last gap {gap} s)")
 
+    def controller_state(self, timeout_s=5.0):
+        """joint -> (reference position, output position) from the next
+        /arm_controller/controller_state message."""
+        return self.sample(CONTROLLER_STATE, timeout_s)
+
+    def start_recording(self):
+        """Keep every message on the subscribed topics from now on, with its monotonic receive
+        time, until `stop_recording()`."""
+        with self._cond:
+            self._recording = collections.defaultdict(list)
+
+    def stop_recording(self):
+        """topic -> [(monotonic receive time, value)] since `start_recording()`. A value is a
+        Sample for the JointState topics and a `controller_state()` dict for the controller."""
+        with self._cond:
+            recorded, self._recording = self._recording, None
+        if recorded is None:
+            raise SimError("stop_recording() without start_recording()")
+        return dict(recorded)
+
     def active_controllers(self, timeout_s=5.0):
         from controller_manager_msgs.srv import ListControllers
 
@@ -237,6 +260,7 @@ class Sim:
     def _start_node(self):
         import rclpy
         from control_msgs.action import FollowJointTrajectory
+        from control_msgs.msg import JointTrajectoryControllerState
         from controller_manager_msgs.srv import ListControllers
         from rclpy.action import ActionClient
         from rclpy.executors import MultiThreadedExecutor
@@ -247,6 +271,8 @@ class Sim:
         self._node = rclpy.create_node("sim_checks", context=self._ctx)
         for topic in ("/joint_states", "/mujoco_actuators_states"):
             self._node.create_subscription(JointState, topic, lambda m, t=topic: self._on_state(t, m), 10)
+        self._node.create_subscription(JointTrajectoryControllerState, CONTROLLER_STATE,
+                                       self._on_controller_state, 10)
         self._list = self._node.create_client(ListControllers, "/controller_manager/list_controllers")
         self._follow = ActionClient(self._node, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory")
         self._executor = MultiThreadedExecutor(context=self._ctx)
@@ -279,8 +305,18 @@ class Sim:
             dict(zip(msg.name, msg.position)),
             dict(zip(msg.name, msg.velocity)),
         )
+        self._store(topic, s)
+
+    def _on_controller_state(self, msg):
+        state = dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions)))
+        self._store(CONTROLLER_STATE, state)
+
+    def _store(self, topic, value):
+        received = time.monotonic()
         with self._cond:
-            self._latest[topic] = (self._latest[topic][0] + 1, s)
+            self._latest[topic] = (self._latest[topic][0] + 1, value)
+            if self._recording is not None:
+                self._recording[topic].append((received, value))
             self._cond.notify_all()
 
 

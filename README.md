@@ -19,6 +19,12 @@ A simulation-based robot system runtime, built in stages.
 | E1 command and permit contracts, independent judge | done |
 | E2 onward | not started |
 
+E2 (in progress), measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e: a
+goal of 6.5 rad for `wrist_3_joint` was accepted, passed through unchanged as the controller
+output, and aborted with GOAL_TOLERANCE_VIOLATED (-5), while MuJoCo held the joint at or below
+its 6.28319 rad limit. From the home pose the elbow cannot reach its 3.1415 rad limit: the arm
+contacts itself at about 2.89 rad, and JTC then aborts the goal with GOAL_TOLERANCE_VIOLATED (-5).
+
 ## What E1 proves today (logic time, no robot, no ROS)
 
 - A command is applied only while `now < valid_until` as it was sent, and never outlives its
