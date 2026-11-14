@@ -213,23 +213,37 @@ def judge_m1(obs):
     lely_ends = dict(zip([t for t, _ in cmds], sent[1:] + [done["t"]]))
     hb_cob = cia301.HEARTBEAT_BASE + NODE
     sdo_tx = cia301.SDO_TX_BASE + NODE
+    previous = cia301.STATE_PRE_OPERATIONAL  # The state after boot, before the first command.
     for (t0, cs), t1 in zip(cmds, ends):
+        before, previous = previous, cia301.STATE_AFTER[cs]
         expected = cia301.STATE_AFTER[cs]
         beats = frames(obs, "host", hb_cob, t0, t1)
         need(beats, f"no heartbeat of node {NODE} after NMT 0x{cs:02X}")
         lt1 = lely_ends[t0]
         states = [e["state"] for e in events(obs, "state", t0 - GRACE_S, lt1, node=NODE)]
         if cs in cia301.RESETS:
-            check(beats[0][2] == bytes([cia301.STATE_BOOT_UP]),
-                  f"NMT 0x{cs:02X}: first message {hexes(beats[:1])}, not the boot-up")
+            # A heartbeat of the state before the reset, sent just before the node handled the
+            # command, may cross the command in the proxy and be stamped after it. Only that is
+            # tolerated: the previous state's byte, ahead of the boot-up, within GRACE_S.
+            crossing = []
+            while (beats and beats[0][0] <= t0 + GRACE_S and
+                   beats[0][2] == bytes([before]) and before != cia301.STATE_BOOT_UP):
+                crossing.append(beats.pop(0))
+            check(beats and beats[0][2] == bytes([cia301.STATE_BOOT_UP]),
+                  f"NMT 0x{cs:02X}: first message {hexes(beats[:1])}, not the boot-up "
+                  f"(after {len(crossing)} crossing heartbeat(s) within {GRACE_S} s)")
+            t_boot = beats[0][0]
+            early = [f for f in beats[1:] if f[0] <= t_boot + GRACE_S]
+            check(not early, f"NMT 0x{cs:02X}: heartbeat right after the boot-up {hexes(early)}")
             check(len(beats) >= 2 and all(d == bytes([expected]) for _, _, d in beats[1:]),
                   f"NMT 0x{cs:02X}: heartbeats after the boot-up {hexes(beats[1:])}")
             boots = events(obs, "boot", t0 - GRACE_S, lt1, node=NODE)
             check(boots and boots[-1]["es"] == "" and boots[-1]["state"] == expected,
                   f"NMT 0x{cs:02X}: Lely boot events {boots}")
             check(cia301.STATE_BOOT_UP in states, f"NMT 0x{cs:02X}: Lely states {states}")
-            notes.append(f"0x{cs:02X}: boot-up then {len(beats) - 1} x 0x{expected:02X}; Lely "
-                         f"states {states}, boot state {boots[-1]['state']}")
+            notes.append(f"0x{cs:02X}: {len(crossing)} crossing, boot-up then {len(beats) - 1} x "
+                         f"0x{expected:02X}; Lely states {states}, boot state "
+                         f"{boots[-1]['state']}")
             continue
         judged = [f for f in beats if f[0] > t0 + GRACE_S]
         need(judged, f"no heartbeat to judge after NMT 0x{cs:02X}")

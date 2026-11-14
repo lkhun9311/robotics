@@ -52,3 +52,62 @@ def test_trace_overflow_is_inconclusive(row):
     status, text = judges.verdict(obs)
     assert status == "INCONCLUSIVE", f"{row} {status}: {text}"
     assert "trace_overflow = 1" in text, text
+
+
+# M1 resets: a heartbeat the bank sent just before it handled the reset can cross the reset
+# command in the proxy and be stamped on vcan_host after the NMT frame. Only such a frame (the
+# previous state, before the boot-up, within GRACE_S of the command) is tolerated.
+
+def m1_reset(obs, cs):
+    """(t of the reset NMT frame to node 3 on vcan_host, index of its boot-up in obs['host'])."""
+    t0 = next(t for t, c, h in obs["host"] if c == 0 and h == f"{cs:02x}{judges.NODE:02x}")
+    i = next(i for i, (t, c, h) in enumerate(obs["host"])
+             if c == 0x700 + judges.NODE and t > t0 and h == "00")
+    return t0, i
+
+
+def with_frame(obs, t, cob, data):
+    obs["host"].append([t, cob, data])
+    obs["host"].sort(key=lambda f: f[0])
+    return obs
+
+
+@pytest.mark.parametrize("cs", [0x82, 0x81])
+def test_m1_stale_heartbeat_within_grace_passes(cs):
+    obs = load("M1")
+    t0, i = m1_reset(obs, cs)
+    t_boot = obs["host"][i][0]
+    obs["host"][i][0] = t0 + 0.6 * judges.GRACE_S  # boot-up after the crossing heartbeat
+    with_frame(obs, t0 + 0.3 * judges.GRACE_S, 0x700 + judges.NODE, "7f")
+    assert t_boot - t0 < judges.GRACE_S, "the recorded boot-up is not right after the reset"
+    status, text = judges.verdict(obs)
+    assert status == "PASS", f"{status}: {text}"
+
+
+@pytest.mark.parametrize("cs", [0x82, 0x81])
+def test_m1_missing_boot_up_fails(cs):
+    obs = load("M1")
+    _, i = m1_reset(obs, cs)
+    del obs["host"][i]
+    status, text = judges.verdict(obs)
+    assert status == "FAIL" and "boot-up" in text, f"{status}: {text}"
+
+
+@pytest.mark.parametrize("cs", [0x82, 0x81])
+def test_m1_stale_heartbeat_beyond_grace_fails(cs):
+    obs = load("M1")
+    t0, i = m1_reset(obs, cs)
+    obs["host"][i][0] = t0 + 3 * judges.GRACE_S
+    with_frame(obs, t0 + 2 * judges.GRACE_S, 0x700 + judges.NODE, "7f")
+    status, text = judges.verdict(obs)
+    assert status == "FAIL" and "boot-up" in text, f"{status}: {text}"
+
+
+@pytest.mark.parametrize("cs", [0x82, 0x81])
+def test_m1_heartbeat_right_after_boot_up_fails(cs):
+    obs = load("M1")
+    _, i = m1_reset(obs, cs)
+    t_boot = obs["host"][i][0]
+    with_frame(obs, t_boot + 0.5 * judges.GRACE_S, 0x700 + judges.NODE, "7f")
+    status, text = judges.verdict(obs)
+    assert status == "FAIL", f"{status}: {text}"
