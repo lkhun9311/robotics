@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "runtime_core/permit_issuer.hpp"
 
 namespace rc = runtime_core;
@@ -105,4 +107,18 @@ TEST(PermitIssuer, RefusesFutureFeedback) {
   auto in = healthy(now, 11);
   in.feedback_sampled_at = now + rc::Duration{1};
   EXPECT_EQ(is.renew(p, in, now).refusal, rc::RenewalRefusal::kFeedbackStale);
+}
+
+TEST(PermitIssuer, RejectsNonPositiveLease) {
+  EXPECT_THROW((rc::PermitIssuer{rc::ManagerInstance{9}, rc::Duration{0}, rc::milliseconds(5)}),
+               std::invalid_argument);
+  EXPECT_THROW((rc::PermitIssuer{rc::ManagerInstance{9}, rc::Duration{-1}, rc::milliseconds(5)}),
+               std::invalid_argument);
+}
+
+TEST(PermitIssuer, RejectsNonPositiveMaxFeedbackAge) {
+  EXPECT_THROW((rc::PermitIssuer{rc::ManagerInstance{9}, rc::milliseconds(48), rc::Duration{0}}),
+               std::invalid_argument);
+  EXPECT_THROW((rc::PermitIssuer{rc::ManagerInstance{9}, rc::milliseconds(48), rc::Duration{-1}}),
+               std::invalid_argument);
 }
