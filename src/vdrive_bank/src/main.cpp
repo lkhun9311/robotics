@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // The vdrive_bank process: six virtual drives (node IDs 1..6) on one CAN interface.
-//   vdrive_bank --if IF --trace PATH [--inject PATH]
+//   vdrive_bank --if IF --trace PATH [--inject PATH] [--hb-muted NODES]
 // One control thread waits in ppoll on the release timerfd (absolute CLOCK_MONOTONIC, period W),
 // the CAN socket, the inject socket and a signalfd, and runs BankLoop::run_once on every wake
 // (B1). A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX
 // datagram socket for B6 commands; each is answered with "ok" or "err <reason>". SIGTERM or
 // SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
 // Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
-// is on stderr). Exit 1: a failure while running.
+// is on stderr). Exit 1: a failure while running. --hb-muted NODES (comma-separated node IDs,
+// e.g. "2" or "2,5") applies B6 `hb_mute <node> 1` before power-on (B3): a peer started first
+// sees the boot-up and then no periodic heartbeat. The mutes are traced as inject records.
 #include <poll.h>
 #include <pthread.h>
 #include <sys/signalfd.h>
@@ -16,6 +18,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <csignal>
@@ -26,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "socketcan_io/socket.hpp"
 #include "vdrive_bank/bank.hpp"
@@ -37,7 +41,8 @@ namespace {
 
 using runtime_core::MonoTime;
 
-constexpr const char* kUsage = "usage: vdrive_bank --if IF --trace PATH [--inject PATH]\n";
+constexpr const char* kUsage =
+    "usage: vdrive_bank --if IF --trace PATH [--inject PATH] [--hb-muted NODES]\n";
 
 MonoTime mono_now() {
   timespec ts{};
@@ -56,9 +61,32 @@ struct Args {
   std::string ifname;
   std::string trace;
   std::string inject;
+  std::vector<std::uint8_t> hb_muted;  // Nodes muted before power-on.
   bool help{false};
   std::string error;  // Empty when the arguments are usable.
 };
+
+// "2" or "2,5": node IDs 1..kNodeCount, each once.
+bool parse_muted(std::string_view text, std::vector<std::uint8_t>& out) {
+  out.clear();
+  while (true) {
+    const std::size_t comma = text.find(',');
+    const std::string_view item = text.substr(0, comma);
+    if (item.size() != 1 || item[0] < '1' ||
+        item[0] > static_cast<char>('0' + vdrive_bank::kNodeCount)) {
+      return false;
+    }
+    const auto node = static_cast<std::uint8_t>(item[0] - '0');
+    if (std::find(out.begin(), out.end(), node) != out.end()) {
+      return false;
+    }
+    out.push_back(node);
+    if (comma == std::string_view::npos) {
+      return true;
+    }
+    text.remove_prefix(comma + 1);
+  }
+}
 
 Args parse_args(int argc, char** argv) {
   Args a;
@@ -67,6 +95,18 @@ Args parse_args(int argc, char** argv) {
     if (arg == "--help" || arg == "-h") {
       a.help = true;
       return a;
+    }
+    if (arg == "--hb-muted") {
+      if (i + 1 >= argc) {
+        a.error = "--hb-muted needs a value";
+        return a;
+      }
+      ++i;
+      if (!parse_muted(argv[i], a.hb_muted)) {
+        a.error = "--hb-muted needs comma-separated node IDs 1..6";
+        return a;
+      }
+      continue;
     }
     std::string* target = nullptr;
     if (arg == "--if") {
@@ -209,6 +249,15 @@ int run(const Args& args) {
   };
   vdrive_bank::TraceWriter writer(ring, write_record, [trace] { std::fflush(trace); });
   writer.start();
+  for (const std::uint8_t node : args.hb_muted) {
+    const std::string command = "hb_mute " + std::to_string(node) + " 1";
+    if (!loop.inject(command).ok) {
+      std::fprintf(stderr, "vdrive_bank: %s was refused\n", command.c_str());
+      writer.stop();
+      std::fclose(trace);
+      return 1;
+    }
+  }
   loop.start(boot_ids);
 
   // Release k at t0 + k W: absolute, so the timer keeps the phase whatever the loop does.
