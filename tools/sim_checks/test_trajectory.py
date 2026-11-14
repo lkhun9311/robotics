@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trajectory goals through the stock JointTrajectoryController, judged on MuJoCo's joints."""
-import time
 
 from expected import GOAL_TOLERANCE, HOME, JOINTS, RANGE, TARGET
-from sim import CONTROLLER_STATE
+from sim import CONTROLLER_STATE, MUJOCO_STATES
 
 STEP = 0.2  # rad, single-joint move in the mapping check
 
@@ -13,9 +12,12 @@ STEP = 0.2  # rad, single-joint move in the mapping check
 # and upper_arm_link touching wrist_3_link (measured 2026-11-14).
 OUT_OF_RANGE_JOINT = "wrist_3_joint"
 OUT_OF_RANGE_GOAL = 6.5  # rad, beyond RANGE (6.28319) and the actuator ctrlrange (6.2831)
-# Largest allowed gap between received MuJoCo samples while recording. It bounds this test's own
-# receive coverage (a Python subscriber next to 500 Hz topics), not the robot or the controller.
-MAX_RECEIVE_GAP_S = 0.25
+# Largest allowed gap between the header stamps of consecutive recorded /mujoco_actuators_states
+# messages. It bounds the recorded data's coverage in simulation time, independent of when the
+# test process happened to receive the messages.
+MAX_STAMP_GAP_S = 0.1
+# How long after the action result the recording runs, in simulation time.
+AFTER_RESULT_S = 2.0
 # Observed with JTC 4.42.1: the goal is accepted, its value is passed through unchanged as the
 # controller output, and the goal ends ABORTED with GOAL_TOLERANCE_VIOLATED once goal_time
 # (1.0 s) runs out with the joint held short of the goal.
@@ -69,19 +71,26 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     goal = list(HOME)
     goal[JOINTS.index(joint)] = OUT_OF_RANGE_GOAL
     sim.start_recording()
-    sent = time.monotonic()
+    # Send and result moments in simulation time: the latest /mujoco_actuators_states stamp
+    # received at that wall-time moment (depth-10 query subscription, so at most 10 messages
+    # behind what has arrived; it can still lag the simulator by the executor's own delay).
+    sent = sim.latest_stamp()
     r = sim.follow([(3.0, goal)])
-    result = time.monotonic()
-    time.sleep(2.0)
-    rec = sim.stop_recording()
-    mujoco = rec.get("/mujoco_actuators_states", [])
+    result = sim.latest_stamp()
+    rec = sim.stop_recording(until_stamp=result + AFTER_RESULT_S)
+    mujoco = rec.get(MUJOCO_STATES, [])
     state = rec.get(CONTROLLER_STATE, [])
     assert mujoco and state, f"no samples: mujoco {len(mujoco)}, controller_state {len(state)}"
-    stamps = [t for t, _ in mujoco]
+    stamps = [s.stamp_s for _, s in mujoco]
     gap = max(b - a for a, b in zip(stamps, stamps[1:]))
-    assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_RECEIVE_GAP_S, (
-        f"samples do not span the interval: first {stamps[0] - sent:+.3f} s after send, "
-        f"last {stamps[-1] - result:+.3f} s after result, largest gap {gap:.3f} s")
+    received = [t for t, _ in mujoco]
+    receive_gap = max(b - a for a, b in zip(received, received[1:]))
+    # Captured by pytest: shown only with -rP or when the test fails.
+    print(f"largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s")
+    assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_STAMP_GAP_S, (
+        f"samples do not span the interval in simulation time: first stamp {stamps[0] - sent:+.3f} s "
+        f"after send, last {stamps[-1] - result:+.3f} s after result, largest stamp gap {gap:.3f} s "
+        f"(diagnostic: largest receive gap {receive_gap:.3f} s wall time, {len(stamps)} samples)")
     positions = [s.position[joint] for _, s in mujoco]
     upper = RANGE[joint][1]
     # An accepted goal that never executes must not pass: the joint has to reach the boundary.

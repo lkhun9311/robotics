@@ -23,6 +23,12 @@ LOG_DIR = REPO / "artifacts" / "sim"
 CONTROLLERS = ("joint_state_broadcaster", "arm_controller")
 CONTROLLER_STATE = "/arm_controller/controller_state"
 IMAGE_TOPIC = "/overview/image_raw"
+MUJOCO_STATES = "/mujoco_actuators_states"
+# Queue depth of the recording subscriptions: more than 10 s of 500 Hz messages, so a test
+# process that falls behind during a recording queues messages instead of dropping them; a drop
+# that still happens shows up as a gap between consecutive header stamps. The query
+# subscriptions keep depth 10 so that `sample()` is never more than 10 messages old.
+RECORD_QUEUE_DEPTH = 5000
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
 
 
@@ -100,6 +106,7 @@ class Sim:
         self._latest = collections.defaultdict(lambda: (0, None))
         # topic -> [(monotonic receive time, message value)] while a recording is open
         self._recording = None
+        self._recording_subscribed = False
 
     # --- lifecycle ---
 
@@ -217,19 +224,48 @@ class Sim:
         /arm_controller/controller_state message."""
         return self.sample(CONTROLLER_STATE, timeout_s)
 
+    def latest_stamp(self, topic=MUJOCO_STATES):
+        """Header stamp (s) of the latest message received on a JointState topic, without
+        waiting. For /mujoco_actuators_states this is simulation time."""
+        with self._cond:
+            sample = self._latest[topic][1]
+        if sample is None:
+            raise SimError(f"no message on {topic} yet")
+        return sample.stamp_s
+
     def start_recording(self):
-        """Keep every message on the subscribed topics from now on, with its monotonic receive
-        time, until `stop_recording()`."""
+        """Keep every /mujoco_actuators_states and controller_state message from now on, with
+        its monotonic receive time, until `stop_recording()`. The recording has its own deep
+        subscriptions, created on first use and kept until the node stops."""
+        if not self._recording_subscribed:
+            from control_msgs.msg import JointTrajectoryControllerState
+            from sensor_msgs.msg import JointState
+
+            self._node.create_subscription(
+                JointState, MUJOCO_STATES,
+                lambda m: self._record(MUJOCO_STATES, _sample_of(m)), RECORD_QUEUE_DEPTH)
+            self._node.create_subscription(
+                JointTrajectoryControllerState, CONTROLLER_STATE,
+                lambda m: self._record(CONTROLLER_STATE, _controller_state_of(m)), RECORD_QUEUE_DEPTH)
+            self._recording_subscribed = True
         with self._cond:
             self._recording = collections.defaultdict(list)
 
-    def stop_recording(self):
+    def stop_recording(self, until_stamp=None, timeout_s=30.0):
         """topic -> [(monotonic receive time, value)] since `start_recording()`. A value is a
-        Sample for the JointState topics and a `controller_state()` dict for the controller."""
+        Sample for /mujoco_actuators_states and a `controller_state()` dict for the controller.
+        With `until_stamp`, first wait until a recorded /mujoco_actuators_states message is
+        stamped at or after it, so a backlog in the recording queue is drained."""
         with self._cond:
+            if self._recording is None:
+                raise SimError("stop_recording() without start_recording()")
+            if until_stamp is not None:
+                def reached():
+                    rec = self._recording[MUJOCO_STATES]
+                    return bool(rec) and rec[-1][1].stamp_s >= until_stamp
+                if not self._cond.wait_for(reached, timeout_s):
+                    raise SimError(f"recording did not reach stamp {until_stamp} within {timeout_s} s")
             recorded, self._recording = self._recording, None
-        if recorded is None:
-            raise SimError("stop_recording() without start_recording()")
         return dict(recorded)
 
     def active_controllers(self, timeout_s=5.0):
@@ -274,6 +310,7 @@ class Sim:
         self._ctx = rclpy.Context()
         rclpy.init(context=self._ctx)
         self._node = rclpy.create_node("sim_checks", context=self._ctx)
+        self._recording_subscribed = False
         for topic in ("/joint_states", "/mujoco_actuators_states"):
             self._node.create_subscription(JointState, topic, lambda m, t=topic: self._on_state(t, m), 10)
         self._node.create_subscription(JointTrajectoryControllerState, CONTROLLER_STATE,
@@ -309,24 +346,34 @@ class Sim:
         self._ctx = None
 
     def _on_state(self, topic, msg):
-        s = Sample(
-            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-            dict(zip(msg.name, msg.position)),
-            dict(zip(msg.name, msg.velocity)),
-        )
-        self._store(topic, s)
+        self._store(topic, _sample_of(msg))
 
     def _on_controller_state(self, msg):
-        state = dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions)))
-        self._store(CONTROLLER_STATE, state)
+        self._store(CONTROLLER_STATE, _controller_state_of(msg))
 
     def _store(self, topic, value):
-        received = time.monotonic()
         with self._cond:
             self._latest[topic] = (self._latest[topic][0] + 1, value)
+            self._cond.notify_all()
+
+    def _record(self, topic, value):
+        received = time.monotonic()
+        with self._cond:
             if self._recording is not None:
                 self._recording[topic].append((received, value))
-            self._cond.notify_all()
+                self._cond.notify_all()
+
+
+def _sample_of(msg):
+    return Sample(
+        msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+        dict(zip(msg.name, msg.position)),
+        dict(zip(msg.name, msg.velocity)),
+    )
+
+
+def _controller_state_of(msg):
+    return dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions)))
 
 
 def _group_alive(pgid):
