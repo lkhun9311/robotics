@@ -24,12 +24,22 @@ find src -name '*.hpp' -o -name '*.cpp' | xargs --no-run-if-empty clang-format -
 REL=(--build-base build/release --install-base install/release)
 ASAN=(--build-base build/asan --install-base install/asan)
 
+# Runs the tests, prints per-test results, then fails. Printing first matters: under
+# `set -e` a failing `colcon test` would end the script before the failing test is named.
+run_tests() {
+  local base=$1
+  local rc=0
+  colcon test --base-paths src --build-base "$base" --install-base "install/${base#build/}" \
+    --return-code-on-test-failure || rc=$?
+  colcon test-result --test-result-base "$base" --verbose
+  return "$rc"
+}
+
 echo "== build (release) =="
 colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 echo "== unit tests (release) =="
-colcon test --base-paths src "${REL[@]}" --return-code-on-test-failure
-colcon test-result --test-result-base build/release --verbose
+run_tests build/release
 
 echo "== clang-tidy (src and harness; tests excluded, see plan) =="
 find src/runtime_core/src -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
@@ -43,8 +53,7 @@ echo "== sanitizers (ASan + UBSan, with coverage) =="
 colcon build --base-paths src "${ASAN[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=Debug "-DRUNTIME_CORE_SANITIZE=address,undefined" \
   -DRUNTIME_CORE_COVERAGE=ON
-colcon test --base-paths src "${ASAN[@]}" --return-code-on-test-failure
-colcon test-result --test-result-base build/asan --verbose
+run_tests build/asan
 
 echo "== coverage report (reported, not gated) =="
 gcovr --root src/runtime_core --exclude 'src/runtime_core/test/.*' \
