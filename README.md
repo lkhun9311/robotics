@@ -27,8 +27,8 @@ After a build:
 
     docker compose run --rm dev bash -c 'source install/release/setup.bash && ros2 launch robot_bringup ur5e_baseline.launch.py'
 
-Pass `headless:=true` to run without a viewer and `camera:=true` to publish the `overview`
-camera on `/overview/image_raw`. The recording [docs/media/e2-baseline.mp4](docs/media/e2-baseline.mp4)
+The launch is headless by default; `headless:=false` opens the MuJoCo viewer (needs a display).
+Pass `camera:=true` to publish the `overview` camera on `/overview/image_raw`. The recording [docs/media/e2-baseline.mp4](docs/media/e2-baseline.mp4)
 (640x480, from that camera; `tools/sim_checks/record_motion.py`) shows the arm leaving the home pose
 and returning to it.
 
