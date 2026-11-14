@@ -5,6 +5,7 @@ MuJoCo Menagerie, universal_robots_ur5e
   Source: https://github.com/google-deepmind/mujoco_menagerie, commit 370c43965323c0944b433b202aac5058b5f907a9
   License text: models/universal_robots_ur5e/LICENSE
   Fetched at image build time and checksum-verified; not redistributed here.
+  Derived file (BSD-3-Clause): src/ur5e_description/mjcf/scene_baseline.xml, from scene.xml.
 
 ROS packages used at run time and not redistributed
   mujoco_ros2_control   Apache-2.0
