@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""An annotated frame trace of one pdo_stream cycle, from the M5 recording.
+
+Lists every frame on vcan_device (what the six drives saw) from SYNC j, the SYNC before command
+seq k reaches node 3, up to node 3's TPDOs after SYNC j+1, the SYNC at which seq k is actuated;
+the bank's actuation record is placed under the SYNC it was written at. PDOs are decoded through
+the EDS mapping of tools/od/wire.py. Writes docs/media/e3b-frame-trace.txt.
+
+  python3 tools/evidence/frame_trace.py [--row m5] [--seq 21] [--out PATH]
+"""
+import argparse
+import sys
+
+from common import (MEDIA, NODE, cob, decode, drive_records, frames, layouts, load_recording,
+                    print_input, recording_command, rpdo_of_tag, stream_tag, wire)
+
+SYNC_COB = wire.Eds().sync_cob_id()
+VALIDITY_MS = 40  # lely_peer pdo_stream: valid_until = now + 40 ms (src/lely_peer/src/main.cpp)
+NMT_NAMES = {0: "boot-up", 4: "Stopped", 5: "Operational", 127: "Pre-operational"}
+CIA402 = {0x00: "Not Ready to Switch On", 0x40: "Switch On Disabled", 0x21: "Ready to Switch On",
+          0x23: "Switched On", 0x27: "Operation Enabled", 0x07: "Quick Stop Active",
+          0x0F: "Fault Reaction Active", 0x08: "Fault"}
+
+
+def label_of(cob_id):
+    """(PDO label, node) of a PDO COB-ID, or None."""
+    for pdo in layouts().values():
+        for node in range(1, 7):
+            if wire.pdo_cob_id(pdo, node) == cob_id:
+                return pdo["label"], node
+    return None
+
+
+def nmt_state(obs, node, t):
+    state = None
+    for r in obs["bank"]:
+        if r.get("event") == "nmt" and r["node"] == node and r["t_ns"] / 1e9 <= t:
+            state = r["state"]
+    return state
+
+
+def deadline_ms(valid_until_us, t):
+    """valid_until (D5: host CLOCK_MONOTONIC us mod 2^32) minus the frame's capture time."""
+    now_us = int(t * 1e6) % (1 << 32)
+    return ((valid_until_us - now_us) % (1 << 32)) / 1000
+
+
+def statusword_state(sw):
+    return CIA402.get(sw & 0x6F, f"0x{sw & 0x6F:02X}")
+
+
+def note(obs, t, cob_id, data, k, applied_window):
+    if cob_id == SYNC_COB:
+        return "SYNC", ""
+    found = label_of(cob_id)
+    if found is None:
+        return "", "not a PDO"
+    label, node = found
+    v = decode(label, data)
+    fields = " ".join(f"{name}=0x{value:04X}" if name == "statusword" else f"{name}={value}"
+                      for name, value in v.items())
+    if node != NODE:
+        state = nmt_state(obs, node, t)
+        return f"node {node} {label} {fields}", (
+            f"Lely's synchronous {label} for a node it does not stream (zeros); node {node} is "
+            f"{NMT_NAMES.get(state, state)}, so the drive does not process PDOs")
+    if label == "RPDO1":
+        why = (f"command seq {k}, first fragment: target and seq bound to the tag"
+               if v["command_seq"] == k else "a fragment of another seq")
+        return f"node 3 {label} {fields}", why
+    if label == "RPDO2":
+        return f"node 3 {label} {fields}", (
+            f"command seq {k}, second fragment: deadline {deadline_ms(v['valid_until_us'], t):.1f} "
+            f"ms after this frame (pdo_stream sets it {VALIDITY_MS} ms ahead when it writes the "
+            f"values; {VALIDITY_MS - deadline_ms(v['valid_until_us'], t):.1f} ms had passed); "
+            f"the pair is complete and waits for the next SYNC (D7)"
+            if v["command_seq"] == k else "a fragment of another seq")
+    if label == "TPDO1":
+        return f"node 3 {label} {fields}", (
+            f"sampled at the SYNC before it: statusword 0x{v['statusword']:04X} = "
+            f"{statusword_state(v['statusword'])}")
+    if label == "TPDO2":
+        side = "after" if applied_window else "before"
+        return f"node 3 {label} {fields}", (
+            f"applied_seq {v['applied_seq']}: the command accepted at the SYNC before it "
+            f"({side} seq {k}'s actuation)")
+    return f"node 3 {label} {fields}", "applied_tag: the tag of applied_seq"
+
+
+def build(obs, k, row):
+    tag = stream_tag(obs)
+    r1 = [t for t, s, _ in rpdo_of_tag(obs, "device", "RPDO1", tag) if s == k]
+    if not r1:
+        raise SystemExit(f"seq {k} has no RPDO1 on vcan_device")
+    syncs = [t for t, _, _ in frames(obs, "device", {SYNC_COB})]
+    j = max(i for i, s in enumerate(syncs) if s < r1[0])
+    t_j, t_j1 = syncs[j], syncs[j + 1]
+    tpdo3 = [t for t, _, _ in frames(obs, "device", {cob("TPDO3")}, t_j1)]
+    t_end = tpdo3[0]
+    act = [r for r in drive_records(obs) if r["kind"] == "actuated" and r["seq"] == k]
+    if len(act) != 1:
+        raise SystemExit(f"seq {k}: {len(act)} actuation records")
+    t_act = act[0]["t_ns"] / 1e9
+
+    lines = [
+        f"E3b frame trace: one pdo_stream cycle on vcan_device (what the drives saw), node {NODE}, "
+        f"command seq {k}, tag {tag}",
+        f"source: tools/interop/recorded/{row}.json.gz, the recorded observation of "
+        f"test_sync_application_and_sampling_order (matrix row M5)",
+        "generated by: python3 tools/evidence/frame_trace.py "
+        "(PDOs decoded with the EDS mapping of tools/od/wire.py, config/od/vdrive_arm.eds)",
+        "times: ms since SYNC j, CLOCK_MONOTONIC as the capture socket's reader stamped each "
+        "frame; the bank stamps its own records, so a bank line can precede the frame it follows "
+        "by a fraction of a millisecond",
+        "units: target_position and position_actual_value in urad, velocity_actual_value in "
+        "urad/s, valid_until_us and sample_time_us in host us mod 2^32",
+        "",
+        f"{'t_ms':>8}  {'COB':>3}  {'data':<16}  decoded / note",
+    ]
+    seen_sync = 0
+    for t, c, d in frames(obs, "device", None, t_j, t_end):
+        if c == SYNC_COB:
+            name = "SYNC j" if seen_sync == 0 else "SYNC j+1"
+            seen_sync += 1
+            what = ("opens the window in which seq %d arrives" % k if seen_sync == 1 else
+                    f"closes the window: seq {k} is actuated at this SYNC (D7); the TPDOs "
+                    f"that follow are sampled here")
+            lines.append(f"{(t - t_j) * 1e3:8.3f}  {c:03X}  {'':<16}  {name}: {what}")
+            if seen_sync == 2:
+                lines.append(f"{(t_act - t_j) * 1e3:8.3f}  {'':>3}  {'':<16}  bank trace: "
+                             f"actuated node {NODE} seq {k} tag {tag}")
+            continue
+        decoded, why = note(obs, t, c, d, k, seen_sync == 2)
+        lines.append(f"{(t - t_j) * 1e3:8.3f}  {c:03X}  {d.hex():<16}  {decoded}")
+        lines.append(f"{'':8}  {'':>3}  {'':<16}    -> {why}")
+    lines.append("")
+    lines.append(f"SYNC j to SYNC j+1: {(t_j1 - t_j) * 1e3:.3f} ms on the capture clock")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--row", default="m5")
+    parser.add_argument("--seq", type=int, default=21)
+    parser.add_argument("--out", default=str(MEDIA / "e3b-frame-trace.txt"))
+    args = parser.parse_args(argv)
+    print_input(f"tools/interop/recorded/{args.row}.json.gz", recording_command(args.row))
+    text = build(load_recording(args.row), args.seq, args.row)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
