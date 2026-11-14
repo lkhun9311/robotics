@@ -318,6 +318,19 @@ TEST(DriveGuard, TooFarAheadAtIngestionIsDropped) {
   EXPECT_EQ(l.dropped(DropReason::kNotValid), 1U);
 }
 
+// D8 before D5: a fragment of another tag is an other-tag drop whatever its deadline.
+TEST(DriveGuard, OtherTagRpdo2WithExpiredDeadlineIsAnOtherTagDrop) {
+  Loop l;
+  l.enable();
+  l.sync();
+  const auto old_tag = static_cast<std::uint16_t>(l.tag - 1);
+  l.frame(cc::pack_rpdo2(kNode, od::Rpdo2{to_wire_us(l.now()), 1, old_tag}));  // Expired.
+  l.ticks(5);
+  l.sync();
+  EXPECT_EQ(l.dropped(DropReason::kOtherTag), 1U);
+  EXPECT_EQ(l.dropped(DropReason::kNotValid), 0U);
+}
+
 TEST(DriveGuard, ExpiredDetectedWithinW) {
   Loop l;
   l.enable();

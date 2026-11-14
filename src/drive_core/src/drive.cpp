@@ -223,8 +223,11 @@ void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
     ++counts_.pdo;
     // D5: a deadline that is not open when the fragment is received (expired, or farther ahead
     // than the lease) drops the fragment here. Held in the window, a too-far deadline would come
-    // inside the lease by the next SYNC. The SYNC-time check stays.
-    if (!validity_open(rpdo2->valid_until_us, to_wire_us(now), kLeaseUs)) {
+    // inside the lease by the next SYNC. The SYNC-time check stays. The tag is classified first
+    // (D8): a fragment of another (or no) tag is left to the assembler's other-tag drop.
+    const std::uint16_t tag = issuer_.current();
+    if (tag != 0 && rpdo2->exec_tag == tag &&
+        !validity_open(rpdo2->valid_until_us, to_wire_us(now), kLeaseUs)) {
       DriveEvent e{DriveEventKind::kDropped, now};
       e.drop = DropReason::kNotValid;
       e.count = 1;
