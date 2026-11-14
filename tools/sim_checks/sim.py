@@ -216,13 +216,17 @@ class Sim:
                                f"timestamp {self._latest[topic][1]} ns, call at {since} ns)")
             return self._latest[topic][0]
 
-    def mujoco_positions(self, timeout_s=5.0):
-        return self.sample("/mujoco_actuators_states", timeout_s).position
+    def mujoco_state(self, timeout_s=5.0):
+        """The Sample of a /mujoco_actuators_states message published after this call: position
+        and velocity from that one message."""
+        return self.sample(MUJOCO_STATES, timeout_s)
 
-    def mujoco_velocities(self, timeout_s=5.0):
-        return self.sample("/mujoco_actuators_states", timeout_s).velocity
+    def mujoco_positions(self, timeout_s=5.0):
+        """joint -> position from a /mujoco_actuators_states message published after this call."""
+        return self.mujoco_state(timeout_s).position
 
     def joint_states(self, timeout_s=5.0):
+        """joint -> position from a /joint_states message published after this call."""
         return self.sample("/joint_states", timeout_s).position
 
     def paired_positions(self, within_s=0.02, timeout_s=5.0):
@@ -233,7 +237,7 @@ class Sim:
         gap = None
         while (left := deadline - time.monotonic()) > 0:
             ros = self.sample("/joint_states", left)
-            mujoco = self.sample("/mujoco_actuators_states", max(0.0, deadline - time.monotonic()))
+            mujoco = self.sample(MUJOCO_STATES, max(0.0, deadline - time.monotonic()))
             # Unstamped messages would pair with a gap of 0 and make the comparison vacuous.
             if ros.stamp_s == 0.0 or mujoco.stamp_s == 0.0:
                 raise SimError(f"unstamped message: /joint_states {ros.stamp_s}, "
@@ -244,8 +248,8 @@ class Sim:
         raise SimError(f"no sample pair within {within_s} s of each other (last gap {gap} s)")
 
     def controller_state(self, timeout_s=5.0):
-        """joint -> (reference position, output position) from the next
-        /arm_controller/controller_state message."""
+        """joint -> (reference position, output position) from an
+        /arm_controller/controller_state message published after this call."""
         return self.sample(CONTROLLER_STATE, timeout_s)
 
     def stamp_now(self, topic=MUJOCO_STATES, timeout_s=5.0):

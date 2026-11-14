@@ -30,7 +30,9 @@ def test_ros2_control_positions_are_mujoco_positions(sim):
 
 def test_arm_starts_at_the_home_keyframe(sim):
     time.sleep(1.0)  # settle
-    pos, vel = sim.mujoco_positions(), sim.mujoco_velocities()
+    # Position and velocity of the same instant: both from one message.
+    state = sim.mujoco_state()
+    pos, vel = state.position, state.velocity
     for j, home in zip(JOINTS, HOME):
         assert abs(pos[j] - home) <= GOAL_TOLERANCE, f"{j}: {pos[j]} vs home {home}"
         assert abs(vel[j]) < STOPPED_VELOCITY, f"{j}: velocity {vel[j]}"
