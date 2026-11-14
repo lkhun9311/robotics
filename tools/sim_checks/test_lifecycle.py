@@ -4,6 +4,8 @@
 This module never requests the module-scoped `sim` fixture: that simulator stays up until its
 own module ends, and a test here would meet it and trip the guard against a second simulator.
 """
+import re
+
 import pytest
 
 from sim import Sim, SimError
@@ -36,7 +38,9 @@ def test_start_refuses_when_a_simulator_is_already_running():
         b = Sim("test_lifecycle-b")
         with pytest.raises(SimError) as e:
             b.start()
-        assert any(pid in str(e.value) for pid in a_pids), str(e.value)
+        # Whole tokens: as a substring, pid 12 would match a message that names pid 123.
+        named = set(re.findall(r"\b\d+\b", str(e.value)))
+        assert set(a_pids) & named, f"refusal names {sorted(named)}, simulator A runs {a_pids}: {e.value}"
         b.stop()
     finally:
         a.stop()

@@ -85,12 +85,18 @@ def _resolve_mjcf(path):
     chains = _class_chains(root)
 
     def lookup(elem, attr, cls, fallback=None):
+        """`attr` of `elem`, else of its class chain; `fallback` when given, else an error that
+        names the element and the classes searched."""
         if elem.get(attr) is not None:
             return elem.get(attr)
         for d in chains[cls]:
             child = d.find(elem.tag)
             if child is not None and child.get(attr) is not None:
                 return child.get(attr)
+        if fallback is None:
+            searched = [d.get("class", "main") for d in chains[cls]]
+            raise ValueError(f"{path}: {elem.tag} '{elem.get('name')}' has no '{attr}', on the element "
+                             f"or in class chain {searched}")
         return fallback
 
     bodies, joints = {}, {}
@@ -118,6 +124,7 @@ def _resolve_mjcf(path):
         a.get("name"): {
             "joint": a.get("joint"),
             "ctrlrange": _floats(lookup(a, "ctrlrange", a.get("class", "main"))),
+            "forcerange": _floats(lookup(a, "forcerange", a.get("class", "main"))),
         }
         for a in root.find("actuator")
     }
@@ -255,3 +262,28 @@ def test_urdf_origins_and_axes_equal_the_mjcf_bodies(urdf, mjcf):
             if not _close(axis, mjcf["joints"][name]["axis"], 1e-9):
                 mismatches.append(f"{name}: axis {axis} != MJCF axis {mjcf['joints'][name]['axis']}")
     assert not mismatches, "\n".join(mismatches)
+
+
+def test_urdf_effort_equals_the_mjcf_actuator_forcerange(urdf, mjcf):
+    joints = _urdf_joints(urdf)
+    for act, spec in mjcf["actuators"].items():
+        lo, hi = spec["forcerange"]
+        assert lo == -hi, f"{act}: forcerange {(lo, hi)} is not symmetric; one URDF effort cannot express it"
+        effort = float(joints[spec["joint"]].find("limit").get("effort"))
+        assert effort == hi, f"{spec['joint']}: URDF effort {effort} != actuator {act} forcerange {hi}"
+
+
+_MJCF_WITHOUT_RANGE = """<mujoco>
+  <default><default class="arm"><joint axis="0 1 0"/><general ctrlrange="-1 1" forcerange="-2 2"/></default></default>
+  <worldbody><body name="link" childclass="arm"><joint name="j1"/></body></worldbody>
+  <actuator><general class="arm" name="a1" joint="j1"/></actuator>
+  <keyframe><key name="home" qpos="0"/></keyframe>
+</mujoco>
+"""
+
+
+def test_resolver_names_a_missing_range(tmp_path):
+    path = tmp_path / "no_range.xml"
+    path.write_text(_MJCF_WITHOUT_RANGE)
+    with pytest.raises(ValueError, match=r"joint 'j1' has no 'range', on the element or in class chain \['arm'"):
+        _resolve_mjcf(path)

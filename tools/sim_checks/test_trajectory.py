@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trajectory goals through the stock JointTrajectoryController, judged on MuJoCo's joints."""
+import time
+
+import pytest
 
 from expected import GOAL_TOLERANCE, HOME, JOINTS, RANGE, TARGET
-from sim import CONTROLLER_STATE, MUJOCO_STATES
+from sim import CONTROLLER_STATE, MUJOCO_STATES, SimError
 
 STEP = 0.2  # rad, single-joint move in the mapping check
 
@@ -27,6 +30,24 @@ OUT_OF_RANGE_ERROR_CODE = -5  # control_msgs FollowJointTrajectory GOAL_TOLERANC
 def _go_home(sim):
     r = sim.follow([(3.0, HOME)])
     assert r.succeeded, f"return to HOME failed: {r}"
+
+
+def _require_coverage(topic, samples, sent, result, lag_s):
+    """`samples` start no later than 0.1 s after `sent`, end at least 1.5 s after `result`, and
+    no two consecutive header stamps are more than MAX_STAMP_GAP_S apart."""
+    stamps = [s.stamp_s for _, s in samples]
+    gap = max((b - a for a, b in zip(stamps, stamps[1:])), default=float("inf"))
+    received = [t for t, _ in samples]
+    receive_gap = max((b - a for a, b in zip(received, received[1:])), default=float("inf"))
+    # Captured by pytest: shown only with -rP or when the test fails.
+    print(f"{topic}: first stamp {stamps[0] - sent:+.4f} s after send, last {stamps[-1] - result:+.4f} s "
+          f"after result, largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s, "
+          f"largest executor lag {lag_s:.4f} s, {len(stamps)} samples")
+    assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_STAMP_GAP_S, (
+        f"{topic}: samples do not span the interval in simulation time: first stamp "
+        f"{stamps[0] - sent:+.3f} s after send, last {stamps[-1] - result:+.3f} s after result, largest "
+        f"stamp gap {gap:.3f} s (diagnostic: largest receive gap {receive_gap:.3f} s wall time, largest "
+        f"executor lag {lag_s:.3f} s, {len(stamps)} samples)")
 
 
 def _errors(positions, goal):
@@ -81,26 +102,26 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     mujoco = rec.get(MUJOCO_STATES, [])
     state = rec.get(CONTROLLER_STATE, [])
     assert mujoco and state, f"no samples: mujoco {len(mujoco)}, controller_state {len(state)}"
-    stamps = [s.stamp_s for _, s in mujoco]
-    gap = max(b - a for a, b in zip(stamps, stamps[1:]))
-    received = [t for t, _ in mujoco]
-    receive_gap = max(b - a for a, b in zip(received, received[1:]))
-    # Captured by pytest: shown only with -rP or when the test fails.
-    print(f"first stamp {stamps[0] - sent:+.4f} s after send, last {stamps[-1] - result:+.4f} s after "
-          f"result, largest stamp gap {gap:.4f} s, largest receive gap {receive_gap:.4f} s, "
-          f"largest executor lag {sim.recording_lag_s:.4f} s")
-    assert stamps[0] <= sent + 0.1 and stamps[-1] >= result + 1.5 and gap <= MAX_STAMP_GAP_S, (
-        f"samples do not span the interval in simulation time: first stamp {stamps[0] - sent:+.3f} s "
-        f"after send, last {stamps[-1] - result:+.3f} s after result, largest stamp gap {gap:.3f} s "
-        f"(diagnostic: largest receive gap {receive_gap:.3f} s wall time, largest executor lag "
-        f"{sim.recording_lag_s:.3f} s, {len(stamps)} samples)")
+    # Both recordings must span the interval in simulation time: the position checks below read
+    # /mujoco_actuators_states, the output check reads controller_state, and a recording with a
+    # hole could pass either vacuously.
+    for topic, samples in ((MUJOCO_STATES, mujoco), (CONTROLLER_STATE, state)):
+        _require_coverage(topic, samples, sent, result, sim.recording_lag_s)
     positions = [s.position[joint] for _, s in mujoco]
     upper = RANGE[joint][1]
     # An accepted goal that never executes must not pass: the joint has to reach the boundary.
     assert max(positions) >= upper - GOAL_TOLERANCE, f"{joint} reached only {max(positions):.4f}, result {r}"
     assert max(positions) <= upper + 1e-3, f"{joint} reached {max(positions):.4f} > {upper}"
+    # The goal names wrist_3 only; every other joint holds HOME throughout.
+    drift = {j: max(abs(s.position[j] - h) for _, s in mujoco) for j, h in zip(JOINTS, HOME) if j != joint}
+    print(f"largest drift from HOME of the other joints: {max(drift.values()):.4f} rad")
+    moved = {j: round(d, 4) for j, d in drift.items() if d > GOAL_TOLERANCE}
+    assert not moved, f"joints other than {joint} left HOME by more than {GOAL_TOLERANCE} rad: {moved}"
     assert (r.accepted, r.status, r.error_code) == (True, GoalStatus.STATUS_ABORTED, OUT_OF_RANGE_ERROR_CODE), r
-    output = max(s[joint][1] for _, s in state)
+    output = max(s.joints[joint][1] for _, s in state)
+    # Exact equality on purpose: the controller copies the goal value into its output; it is not
+    # computed. 6.5 survives the double round trip unchanged, so any difference means the
+    # controller altered the goal (clamped or interpolated it), which is what this check is for.
     assert output == OUT_OF_RANGE_GOAL, f"controller output max {output}, expected the goal passed through"
 
 
@@ -113,3 +134,18 @@ def test_controller_joint_order_does_not_change_named_motion(sim):
     errors = _errors(after, TARGET)
     assert all(e <= GOAL_TOLERANCE for e in errors.values()), errors
     assert all(abs(after[j] - before[j]) > 2 * GOAL_TOLERANCE for j in JOINTS), (before, after)
+
+
+def test_follow_timeout_cancels_the_goal(sim):
+    _go_home(sim)
+    duration_s = 4.0
+    sent = time.monotonic()
+    with pytest.raises(SimError, match="no answer"):
+        sim.follow([(duration_s, TARGET)], timeout_s=1.0)
+    # Past the end of the trajectory: an uncancelled goal has reached TARGET by now.
+    time.sleep(max(0.0, sent + duration_s + 0.5 - time.monotonic()))
+    at = sim.mujoco_positions()
+    # Cancelled about a quarter of the way in time, the arm holds a pose nearer HOME than TARGET.
+    nearer_target = [j for j, h, t in zip(JOINTS, HOME, TARGET) if abs(at[j] - t) <= abs(at[j] - h)]
+    assert not nearer_target, f"the timed-out goal kept running: {nearer_target} reached toward TARGET: {at}"
+    _go_home(sim)

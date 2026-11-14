@@ -4,17 +4,26 @@ ARG ROS_IMAGE
 # Default keeps every stage's FROM resolvable when only the dev target is built (BuildKit
 # resolves all stages); release builds pass the pinned digest from .env.
 ARG RUNTIME_IMAGE=ros:jazzy-ros-core
+# Base of the build stage: the dev stage below, or an already built dev image. CI passes the dev
+# image it has just checked, so the runtime build neither rebuilds the dev stage nor fetches the
+# model again when the layer cache misses, and ships from the very image the checks ran in.
+ARG BUILD_FROM=dev
 FROM ${ROS_IMAGE} AS base
 ARG ROS_SNAPSHOT
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
-# Pin ROS packages to a dated, signed snapshot. The key fingerprint is checked so a swapped
-# key file fails the build instead of silently changing the trust root.
+# Pin ROS packages to a dated, signed snapshot. The key file must hold exactly one primary key
+# with the expected fingerprint, so a swapped key, or a second key appended to the file (apt
+# would trust every key in the keyring), fails the build instead of changing the trust root.
 COPY docker/keys/ros-snapshots.asc /tmp/ros-snapshots.asc
 RUN gpg --dearmor < /tmp/ros-snapshots.asc > /usr/share/keyrings/ros-snapshots.gpg \
- && fpr="$(gpg --show-keys --with-colons /usr/share/keyrings/ros-snapshots.gpg | awk -F: '/^fpr:/{print $10; exit}')" \
- && test "$fpr" = "4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA" \
- || { echo "ros snapshot key fingerprint mismatch: ${fpr:-none}" >&2; exit 1; } \
+ && keys="$(gpg --show-keys --with-colons /usr/share/keyrings/ros-snapshots.gpg)" \
+ && primaries="$(grep -c '^pub:' <<< "$keys" || true)" \
+ && if [ "$primaries" != 1 ]; then \
+      echo "ros snapshot key file holds ${primaries:-0} primary keys, expected exactly 1" >&2; exit 1; fi \
+ && fpr="$(awk -F: '/^fpr:/{print $10; exit}' <<< "$keys")" \
+ && if [ "$fpr" != "4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA" ]; then \
+      echo "ros snapshot key fingerprint mismatch: ${fpr:-none}" >&2; exit 1; fi \
  && rm /tmp/ros-snapshots.asc \
  && : "${ROS_SNAPSHOT:?set ROS_SNAPSHOT}" \
  && rm -f /etc/apt/sources.list.d/ros2.sources \
@@ -49,7 +58,7 @@ ENV MENAGERIE_UR5E_DIR=/opt/models/menagerie/universal_robots_ur5e
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /ws
 
-FROM dev AS build
+FROM ${BUILD_FROM} AS build
 COPY . /ws
 RUN source /opt/ros/jazzy/setup.bash \
  && colcon build --base-paths src --build-base build/release --install-base install/release \

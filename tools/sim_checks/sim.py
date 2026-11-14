@@ -34,6 +34,10 @@ MUJOCO_STATES = "/mujoco_actuators_states"
 # the queue.
 RECORD_QUEUE_DEPTH = 5000
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
+# Time from SIGINT to SIGKILL for the launch process group in `stop()`.
+STOP_GRACE_S = 10.0
+# How long `follow()` waits for the controller to accept the cancel of a timed-out goal.
+CANCEL_TIMEOUT_S = 5.0
 
 
 class SimError(Exception):
@@ -83,6 +87,15 @@ class FollowResult:
         return self.accepted and self.status == GoalStatus.STATUS_SUCCEEDED and self.error_code == 0
 
 
+@dataclasses.dataclass(frozen=True)
+class ControllerSample:
+    """One JointTrajectoryControllerState message: header stamp in seconds, and joint ->
+    (reference position, output position)."""
+
+    stamp_s: float
+    joints: dict
+
+
 def _wait(future, timeout_s, what):
     done = threading.Event()
     future.add_done_callback(lambda _: done.set())
@@ -106,7 +119,7 @@ class Sim:
         self._executor = None
         self._spin = None
         self._cond = threading.Condition()
-        # topic -> (latest value: a Sample, or a controller_state() dict; its source timestamp in
+        # topic -> (latest value: a Sample or a ControllerSample; its source timestamp in
         # ns, system clock, set by the publisher)
         self._latest = collections.defaultdict(lambda: (None, 0))
         # topic -> [(monotonic receive time, message value)] while a recording is open
@@ -145,20 +158,27 @@ class Sim:
         raise SimError(f"controllers not active within {timeout_s} s: {states}")
 
     def stop(self):
-        self._stop_node()
+        """Ends the launch process group, then tears down the test node. The group goes first
+        and in any case: a teardown error must not leave a simulator running."""
+        try:
+            self._stop_launch()
+        finally:
+            self._stop_node()
+
+    def _stop_launch(self):
         if self._proc is None:
             return
         pgid = self._proc.pid  # start_new_session: the launch process leads its own group
+        # One 10 s budget from SIGINT to SIGKILL, shared by the launch process and its children.
+        deadline = time.monotonic() + STOP_GRACE_S
         try:
             os.killpg(pgid, signal.SIGINT)
         except ProcessLookupError:
             pass
         try:
-            self._proc.wait(timeout=10)
+            self._proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             pass
-        # Children may outlive the launch process; give them the rest of the 10 s, then kill.
-        deadline = time.monotonic() + 10.0
         while _group_alive(pgid) and time.monotonic() < deadline:
             time.sleep(0.1)
         if _group_alive(pgid):
@@ -205,23 +225,28 @@ class Sim:
                                f"timestamp {self._latest[topic][1]} ns, call at {since} ns)")
             return self._latest[topic][0]
 
-    def mujoco_positions(self, timeout_s=5.0):
-        return self.sample("/mujoco_actuators_states", timeout_s).position
+    def mujoco_state(self, timeout_s=5.0):
+        """The Sample of a /mujoco_actuators_states message published after this call: position
+        and velocity from that one message."""
+        return self.sample(MUJOCO_STATES, timeout_s)
 
-    def mujoco_velocities(self, timeout_s=5.0):
-        return self.sample("/mujoco_actuators_states", timeout_s).velocity
+    def mujoco_positions(self, timeout_s=5.0):
+        """joint -> position from a /mujoco_actuators_states message published after this call."""
+        return self.mujoco_state(timeout_s).position
 
     def joint_states(self, timeout_s=5.0):
+        """joint -> position from a /joint_states message published after this call."""
         return self.sample("/joint_states", timeout_s).position
 
     def paired_positions(self, within_s=0.02, timeout_s=5.0):
         """Fresh /joint_states and /mujoco_actuators_states positions whose stamps differ by at
-        most `within_s`, retried until `timeout_s`. Returns (ros, mujoco, stamp gap in s)."""
+        most `within_s`, retried until `timeout_s`, which bounds the whole call. Returns (ros,
+        mujoco, stamp gap in s)."""
         deadline = time.monotonic() + timeout_s
         gap = None
-        while time.monotonic() < deadline:
-            ros = self.sample("/joint_states", timeout_s)
-            mujoco = self.sample("/mujoco_actuators_states", timeout_s)
+        while (left := deadline - time.monotonic()) > 0:
+            ros = self.sample("/joint_states", left)
+            mujoco = self.sample(MUJOCO_STATES, max(0.0, deadline - time.monotonic()))
             # Unstamped messages would pair with a gap of 0 and make the comparison vacuous.
             if ros.stamp_s == 0.0 or mujoco.stamp_s == 0.0:
                 raise SimError(f"unstamped message: /joint_states {ros.stamp_s}, "
@@ -232,8 +257,8 @@ class Sim:
         raise SimError(f"no sample pair within {within_s} s of each other (last gap {gap} s)")
 
     def controller_state(self, timeout_s=5.0):
-        """joint -> (reference position, output position) from the next
-        /arm_controller/controller_state message."""
+        """The ControllerSample of an /arm_controller/controller_state message published after
+        this call."""
         return self.sample(CONTROLLER_STATE, timeout_s)
 
     def stamp_now(self, topic=MUJOCO_STATES, timeout_s=5.0):
@@ -253,7 +278,7 @@ class Sim:
 
     def stop_recording(self, until_stamp=None, timeout_s=30.0):
         """topic -> [(monotonic receive time, value)] since `start_recording()`. A value is a
-        Sample for /mujoco_actuators_states and a `controller_state()` dict for the controller.
+        Sample for /mujoco_actuators_states and a ControllerSample for the controller.
         With `until_stamp`, first wait until a recorded /mujoco_actuators_states message is
         stamped at or after it, so a backlog in the recording queue is drained."""
         with self._cond:
@@ -294,7 +319,17 @@ class Sim:
         handle = _wait(self._follow.send_goal_async(goal), timeout_s, "send_goal")
         if not handle.accepted:
             return FollowResult(False, None, "", None)
-        response = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result")
+        try:
+            response = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result")
+        except SimError as e:
+            # Dropping the result future alone would leave the goal running in the controller.
+            try:
+                cancel = _wait(handle.cancel_goal_async(), CANCEL_TIMEOUT_S, "cancel_goal")
+            except SimError as c:
+                raise SimError(f"{e}; the goal could not be cancelled: {c}") from e
+            if cancel.return_code != cancel.ERROR_NONE:
+                raise SimError(f"{e}; cancel_goal answered return code {cancel.return_code}") from e
+            raise SimError(f"{e}; the goal was cancelled") from e
         return FollowResult(True, response.result.error_code, response.result.error_string, response.status)
 
     # --- ROS node ---
@@ -380,7 +415,10 @@ def _sample_of(msg):
 
 
 def _controller_state_of(msg):
-    return dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions)))
+    return ControllerSample(
+        msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+        dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions))),
+    )
 
 
 def _group_alive(pgid):

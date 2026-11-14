@@ -43,9 +43,9 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
 GTEST_FLOOR=69
-PYTEST_FLOOR=91
+PYTEST_FLOOR=99
 INTEGRATION_FLOOR=11
-SIM_FLOOR=17
+SIM_FLOOR=26
 
 require_at_least() {
   local label=$1 found=$2 floor=$3

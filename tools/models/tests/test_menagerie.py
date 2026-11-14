@@ -4,6 +4,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 import menagerie
 
 SCRIPT = pathlib.Path(menagerie.__file__)
@@ -39,9 +41,7 @@ def test_verify_reports_a_modified_file(tmp_path):
 def test_verify_reports_a_missing_file(tmp_path):
     model, sums = _tree(tmp_path)
     (model / "assets" / "base.obj").unlink()
-    problems = menagerie.verify(model, sums)
-    assert len(problems) == 1
-    assert "missing" in problems[0]
+    assert menagerie.verify(model, sums) == ["missing: assets/base.obj"]
 
 
 def test_verify_reports_an_extra_file(tmp_path):
@@ -52,14 +52,59 @@ def test_verify_reports_an_extra_file(tmp_path):
     assert "unexpected" in problems[0]
 
 
+def _cli(*args):
+    return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True)
+
+
 def test_cli_verify_exit_codes(tmp_path):
     model, sums = _tree(tmp_path)
-    run = lambda: subprocess.run(
-        [sys.executable, str(SCRIPT), "verify", str(model), str(sums)],
-        capture_output=True, text=True,
-    )
-    assert run().returncode == 0
+    assert _cli("verify", model, sums).returncode == 0
     (model / "ur5e.xml").write_text("changed")
-    result = run()
+    result = _cli("verify", model, sums)
     assert result.returncode == 1
     assert "mismatch" in result.stdout + result.stderr
+
+
+def test_cli_usage_exits_2():
+    for args in ((), ("verify", "only-one"), ("frobnicate", "a", "b")):
+        result = _cli(*args)
+        assert result.returncode == 2, args
+        assert "menagerie.py verify <dir> <sums>" in result.stderr, args
+
+
+def test_cli_unreadable_sums_file_exits_3(tmp_path):
+    model, _ = _tree(tmp_path)
+    result = _cli("verify", model, tmp_path / "absent")
+    assert result.returncode == 3
+    assert result.stderr.startswith("menagerie.py: cannot verify: "), result.stderr
+    assert "absent" in result.stderr and "Traceback" not in result.stderr, result.stderr
+
+
+def test_cli_missing_model_dir_exits_3(tmp_path):
+    _, sums = _tree(tmp_path)
+    result = _cli("verify", tmp_path / "nowhere", sums)
+    assert result.returncode == 3
+    assert "nowhere" in result.stderr and "is not a directory" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("line", [
+    "garbage",
+    "abc  ur5e.xml",
+    f"{'0' * 64} ur5e.xml",
+    f"{'0' * 64}  ",
+])
+def test_cli_malformed_sums_line_exits_3(tmp_path, line):
+    model, sums = _tree(tmp_path)
+    sums.write_text(sums.read_text() + line + "\n")
+    result = _cli("verify", model, sums)
+    assert result.returncode == 3, result.stderr
+    assert f"{sums}:3: malformed line" in result.stderr, result.stderr
+
+
+def test_cli_duplicate_sums_entry_exits_3(tmp_path):
+    model, sums = _tree(tmp_path)
+    first = sums.read_text().splitlines()[0]
+    sums.write_text(sums.read_text() + first + "\n")
+    result = _cli("verify", model, sums)
+    assert result.returncode == 3
+    assert f"{sums}:3: duplicate entry for assets/base.obj" in result.stderr, result.stderr

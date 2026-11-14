@@ -2,10 +2,12 @@
 """Fetch and verify the pinned MuJoCo Menagerie UR5e model.
 
     menagerie.py fetch <commit> <dest>    blobless sparse fetch of one commit
-    menagerie.py verify <dir> <sums>      exit 0 verified, 1 mismatch, 2 usage
+    menagerie.py verify <dir> <sums>      exit 0 verified, 1 mismatch, 2 usage,
+                                          3 cannot verify (I/O error, malformed sums file)
 """
 import hashlib
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -23,19 +25,37 @@ def _sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+# sha256sum text format: 64 lowercase hex digits, two spaces, a relative path.
+SUMS_LINE = re.compile(r"([0-9a-f]{64})  (\S.*)")
+
+
+class CannotVerify(Exception):
+    """The tree could not be compared with the sums: unreadable input or a malformed sums file.
+    Distinct from a mismatch, which is a finding about the tree."""
+
+
 def _read_sums(sums_file: pathlib.Path) -> dict[str, str]:
     expected = {}
-    for line in sums_file.read_text().splitlines():
-        if line.strip():
-            digest, _, rel = line.partition("  ")
-            expected[rel.strip()] = digest.strip()
+    for number, line in enumerate(sums_file.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        match = SUMS_LINE.fullmatch(line)
+        if match is None:
+            raise CannotVerify(f"{sums_file}:{number}: malformed line {line!r}")
+        digest, rel = match.groups()
+        if rel in expected:
+            raise CannotVerify(f"{sums_file}:{number}: duplicate entry for {rel}")
+        expected[rel] = digest
     return expected
 
 
 def verify(model_dir: pathlib.Path, sums_file: pathlib.Path) -> list[str]:
-    """Return one line per problem; an empty list means the tree matches the sums."""
+    """Return one line per problem; an empty list means the tree matches the sums. Raises
+    CannotVerify or OSError when the comparison cannot be made."""
     model_dir = pathlib.Path(model_dir)
     expected = _read_sums(pathlib.Path(sums_file))
+    if not model_dir.is_dir():
+        raise CannotVerify(f"{model_dir} is not a directory")
     actual = {
         p.relative_to(model_dir).as_posix(): p
         for p in sorted(model_dir.rglob("*"))
@@ -72,7 +92,11 @@ def main(argv: list[str]) -> int:
         fetch(argv[2], pathlib.Path(argv[3]))
         return 0
     if len(argv) == 4 and argv[1] == "verify":
-        problems = verify(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
+        try:
+            problems = verify(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
+        except (OSError, CannotVerify) as e:
+            print(f"menagerie.py: cannot verify: {e}", file=sys.stderr)
+            return 3
         for line in problems:
             print(line, file=sys.stderr)
         return 1 if problems else 0
