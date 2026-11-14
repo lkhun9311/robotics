@@ -4,10 +4,11 @@
 
 A simulation-based robot system runtime, built in stages.
 
-- **Done (E0, E1):** a pinned ROS 2 Jazzy toolchain with CI, a cyclictest baseline, and a
+- **Done (E0, E1, E2):** a pinned ROS 2 Jazzy toolchain with CI, a cyclictest baseline, a
   ROS-free C++ core of command and permit contracts, checked by an independent judge in
-  logic time.
-- **Planned (E2 onward):** a C++ hardware abstraction layer, a partial CANopen / CiA 402
+  logic time, and the UR5e in MuJoCo under the stock JointTrajectoryController (no permit or
+  generation guarantee).
+- **Planned (E3 onward):** a C++ hardware abstraction layer, a partial CANopen / CiA 402
   stack over virtual CAN, fault injection and real-time loop measurement, on ros2_control
   and MuJoCo.
 
@@ -23,7 +24,7 @@ A simulation-based robot system runtime, built in stages.
 ## E2 baseline
 
 The Menagerie UR5e in MuJoCo under ros2_control, driven by the stock JointTrajectoryController.
-After a build:
+After `docker compose run --rm dev tools/ci/run_checks.sh` has built the workspace:
 
     docker compose run --rm dev bash -c 'source install/release/setup.bash && ros2 launch robot_bringup ur5e_baseline.launch.py'
 

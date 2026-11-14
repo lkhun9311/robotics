@@ -6,6 +6,7 @@
   <description>UR5e URDF with the MuJoCo ros2_control system, and the Menagerie UR5e MJCF it simulates.</description>
   <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
   <license>Apache-2.0</license>
+  <license>BSD-3-Clause</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>mujoco_ros2_control</exec_depend>

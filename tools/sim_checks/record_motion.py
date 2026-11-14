@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Records the E2 baseline motion from the simulated `overview` camera into an MP4.
 
-    python3 tools/sim_checks/record_motion.py --out docs/media/e2-baseline.mp4 [--fps 11]
+    python3 tools/sim_checks/record_motion.py --out docs/media/e2-baseline.mp4 [--fps 15]
 
 Starts the bringup with `camera:=true`, waits for the first frame, then records a fixed 14 s:
 hold 2 s, HOME -> TARGET 4 s, hold 2 s, TARGET -> HOME 4 s, hold 2 s. This is evidence, not a
@@ -52,7 +52,7 @@ class Recorder:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--fps", type=float, default=15.0, help="measured camera rate (ros2 topic hz)")
+    ap.add_argument("--fps", type=float, default=15.0, help="camera rate counted from received frames (the recorder logs it), not `ros2 topic hz`")
     args = ap.parse_args()
 
     ffmpeg = subprocess.Popen(
