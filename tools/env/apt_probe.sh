@@ -11,9 +11,10 @@ packages=(
 )
 apt-get update -qq
 for pkg in "${packages[@]}"; do
-  if apt-get install --simulate --no-install-recommends -qq "$pkg" >/dev/null 2>&1; then
+  if out=$(apt-get install --simulate --no-install-recommends -qq "$pkg" 2>&1); then
     echo "AVAILABLE   $pkg"
   else
-    echo "UNAVAILABLE $pkg"
+    # Keep apt's last line, so "not found" and "unmet dependencies" stay distinguishable.
+    echo "UNAVAILABLE $pkg  reason: $(printf '%s\n' "$out" | grep -v '^\s*$' | tail -1)"
   fi
 done

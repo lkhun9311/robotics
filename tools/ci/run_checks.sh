@@ -9,14 +9,29 @@ source /opt/ros/jazzy/setup.bash
 set -u
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 mkdir -p artifacts
-{
-  echo "{"
-  echo "  \"git_sha\": \"$(git -c safe.directory="$PWD" rev-parse HEAD 2>/dev/null || echo unknown)\","
-  echo "  \"kernel\": \"$(uname -r)\","
-  echo "  \"gcc\": \"$(g++ -dumpfullversion)\","
-  echo "  \"date_utc\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
-  echo "}"
-} > artifacts/run-manifest.json
+# A value that cannot be read is written as "unknown" together with the reason, never dropped.
+python3 - > artifacts/run-manifest.json <<'EOF'
+import datetime, json, os, subprocess
+
+manifest, errors = {}, {}
+for key, cmd in {
+    "git_sha": ["git", "-c", f"safe.directory={os.getcwd()}", "rev-parse", "HEAD"],
+    "kernel": ["uname", "-r"],
+    "gcc": ["g++", "-dumpfullversion"],
+}.items():
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        ok, reason = p.returncode == 0, (p.stderr or p.stdout).strip() or f"exit {p.returncode}"
+    except OSError as e:
+        ok, reason = False, str(e)
+    manifest[key] = p.stdout.strip() if ok else "unknown"
+    if not ok:
+        errors[key] = reason
+manifest["date_utc"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+if errors:
+    manifest["errors"] = errors
+print(json.dumps(manifest, indent=2))
+EOF
 
 echo "== format =="
 find src -name '*.hpp' -o -name '*.cpp' | xargs --no-run-if-empty clang-format --dry-run --Werror
