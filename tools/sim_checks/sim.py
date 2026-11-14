@@ -87,6 +87,15 @@ class FollowResult:
         return self.accepted and self.status == GoalStatus.STATUS_SUCCEEDED and self.error_code == 0
 
 
+@dataclasses.dataclass(frozen=True)
+class ControllerSample:
+    """One JointTrajectoryControllerState message: header stamp in seconds, and joint ->
+    (reference position, output position)."""
+
+    stamp_s: float
+    joints: dict
+
+
 def _wait(future, timeout_s, what):
     done = threading.Event()
     future.add_done_callback(lambda _: done.set())
@@ -110,7 +119,7 @@ class Sim:
         self._executor = None
         self._spin = None
         self._cond = threading.Condition()
-        # topic -> (latest value: a Sample, or a controller_state() dict; its source timestamp in
+        # topic -> (latest value: a Sample or a ControllerSample; its source timestamp in
         # ns, system clock, set by the publisher)
         self._latest = collections.defaultdict(lambda: (None, 0))
         # topic -> [(monotonic receive time, message value)] while a recording is open
@@ -248,8 +257,8 @@ class Sim:
         raise SimError(f"no sample pair within {within_s} s of each other (last gap {gap} s)")
 
     def controller_state(self, timeout_s=5.0):
-        """joint -> (reference position, output position) from an
-        /arm_controller/controller_state message published after this call."""
+        """The ControllerSample of an /arm_controller/controller_state message published after
+        this call."""
         return self.sample(CONTROLLER_STATE, timeout_s)
 
     def stamp_now(self, topic=MUJOCO_STATES, timeout_s=5.0):
@@ -269,7 +278,7 @@ class Sim:
 
     def stop_recording(self, until_stamp=None, timeout_s=30.0):
         """topic -> [(monotonic receive time, value)] since `start_recording()`. A value is a
-        Sample for /mujoco_actuators_states and a `controller_state()` dict for the controller.
+        Sample for /mujoco_actuators_states and a ControllerSample for the controller.
         With `until_stamp`, first wait until a recorded /mujoco_actuators_states message is
         stamped at or after it, so a backlog in the recording queue is drained."""
         with self._cond:
@@ -406,7 +415,10 @@ def _sample_of(msg):
 
 
 def _controller_state_of(msg):
-    return dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions)))
+    return ControllerSample(
+        msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+        dict(zip(msg.joint_names, zip(msg.reference.positions, msg.output.positions))),
+    )
 
 
 def _group_alive(pgid):
