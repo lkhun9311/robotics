@@ -99,8 +99,14 @@ TEST(SocketCan, SendWritesClassicFrame) {
 
 TEST(SocketCan, ReadStampsMonotonicAfterRecv) {
   SysOps ops = no_ops();
-  ops.now = [] { return runtime_core::MonoTime{5'000'000}; };
-  ops.recvmsg = [](int, msghdr* m, int) { return deliver(m, 0x203, true); };
+  // The clock reads 1 ms until recvmsg has returned and 5 ms after, so a stamp taken before
+  // the receive would show 1 ms.
+  bool received = false;
+  ops.now = [&received] { return runtime_core::MonoTime{received ? 5'000'000 : 1'000'000}; };
+  ops.recvmsg = [&received](int, msghdr* m, int) {
+    received = true;
+    return deliver(m, 0x203, true);
+  };
   CanSocket sock(-1, ops);
   const auto rx = sock.read_one();
   ASSERT_TRUE(rx.has_value());
