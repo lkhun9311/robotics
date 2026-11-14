@@ -357,3 +357,10 @@ def test_unit_scenario_is_not_reachable_from_files(tmp_path):
     p.write_text("".join(json.dumps(e) + "\n" for e in base()), encoding="utf-8")
     v = judge_file(p)
     assert v.result == INCONCLUSIVE and reasons(v, "unit")
+
+
+def test_unknown_fault_name_is_inconclusive():
+    events = [*base()[:-1], ev(30 * MS, "fault_injected", name="not_a_known_fault"), end()]
+    v = judge(events)
+    assert v.result == INCONCLUSIVE and reasons(v, "unknown fault")
+

@@ -34,6 +34,9 @@ MAX_LEASE_NS = 48_000_000
 STOP_DEADLINE_NS = 4_000_000
 EXIT_CODES = {PASS: 0, FAIL: 1, INCONCLUSIVE: 2, NOT_RUN: 3}
 IDENTITY = ("session", "generation", "valid_until_ns")
+# Every fault the oracle has rules for. An injected fault outside this set has no obligation,
+# so a trace with one cannot PASS: the oracle would not know what it was meant to check.
+KNOWN_FAULTS = ("injected_fault", "manager_stall")
 
 INT_FIELDS = {
     "scenario_begin": ("stop_deadline_ns", "lease_ns"),
@@ -143,6 +146,8 @@ def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
             if active is not None and key == (active["manager"], active["session"], active["generation"]):
                 closed_sessions.add((key[0], key[1]))
                 active = None
+        elif kind == "fault_injected" and e["name"] not in KNOWN_FAULTS:
+            incomplete.append(f"t={t}: unknown fault {e['name']!r} has no obligation")
         elif kind == "fault_injected" and e["name"] == "injected_fault":
             open_fault = open_obligation(t, latched=False)
         elif kind == "state_transition":
