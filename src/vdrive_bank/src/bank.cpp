@@ -136,7 +136,8 @@ const char* parse_injection(std::string_view command, Injection& in) {
     return "bad node";
   }
   if (in.verb == Injection::Verb::kFault) {
-    if (const std::optional<std::uint16_t> code = parse_hex16(tok[2])) {
+    // CiA 301: EMCY code 0x0000 is the error reset, so it can never name a fault.
+    if (const std::optional<std::uint16_t> code = parse_hex16(tok[2]); code && *code != 0U) {
       in.code = *code;
     } else {
       return "bad error code";

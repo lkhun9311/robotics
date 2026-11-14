@@ -39,10 +39,26 @@ class FakeEntropy final : public EntropySource {
 TEST(Inject, RejectsMalformedCommands) {
   Rig r;
   r.ready();
-  for (const std::string_view command :
-       {"fault 9 8611", "fault 3 zz", "explode 3", "fault 0 8611", "fault 3", "fault 3 18611",
-        "fault 3 -1", "fault 3 0x8611", "fault 03 8611", "fault 3 8611 1", "torque_loss",
-        "torque_loss 7", "stuck 3 2", "stuck 3", "hb_mute 3 yes", "", " ", "FAULT 3 8611"}) {
+  for (const std::string_view command : {"fault 9 8611",
+                                         "fault 3 zz",
+                                         "explode 3",
+                                         "fault 0 8611",
+                                         "fault 3",
+                                         "fault 3 18611",
+                                         "fault 3 -1",
+                                         "fault 3 0",
+                                         "fault 3 0000",
+                                         "fault 3 0x8611",
+                                         "fault 03 8611",
+                                         "fault 3 8611 1",
+                                         "torque_loss",
+                                         "torque_loss 7",
+                                         "stuck 3 2",
+                                         "stuck 3",
+                                         "hb_mute 3 yes",
+                                         "",
+                                         " ",
+                                         "FAULT 3 8611"}) {
     SCOPED_TRACE(command);
     const Bank::InjectResult res = r.inject(command);
     EXPECT_FALSE(res.ok);
