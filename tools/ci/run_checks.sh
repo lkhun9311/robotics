@@ -96,7 +96,8 @@ echo "== simulation checks (release install, headless) =="
   # shellcheck disable=SC1091
   source install/release/setup.bash
   set -u
-  python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest-sim.xml tools/sim_checks
+  # -rP: a passing check's printed measurements (stamp gap, executor lag) stay in the CI log.
+  python3 -m pytest -p no:cacheprovider -q -rP --junitxml=artifacts/pytest-sim.xml tools/sim_checks
 )
 require_at_least "simulation checks" "$(junit_count artifacts/pytest-sim.xml)" "$SIM_FLOOR"
 
