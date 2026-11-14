@@ -57,6 +57,19 @@ RUN : "${MENAGERIE_COMMIT:?set MENAGERIE_COMMIT}" \
  && python3 /tmp/models/menagerie.py verify /opt/models/menagerie/universal_robots_ur5e /tmp/models/SHA256SUMS \
  && rm -rf /tmp/models
 ENV MENAGERIE_UR5E_DIR=/opt/models/menagerie/universal_robots_ur5e
+# MuJoCo Python bindings for the simulation checks' forward kinematics and the replay render:
+# the PyPI wheel of the same MuJoCo version as ros-jazzy-mujoco-vendor (3.12.0), pinned by its
+# SHA-256. --no-deps: its runtime imports come from the Ubuntu archive (typing_extensions, and
+# PyOpenGL for EGL rendering); glfw, etils and absl are needed only by viewers and extras.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-typing-extensions python3-opengl \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf '%s\n' 'mujoco==3.12.0 --hash=sha256:7ec16ce408871a0a9157cc556958ab66cd34db9fc1dccd3ef07717170163a4e0' \
+      > /tmp/mujoco-requirements.txt \
+ && pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes --break-system-packages \
+      -r /tmp/mujoco-requirements.txt \
+ && rm /tmp/mujoco-requirements.txt \
+ && python3 -c 'import mujoco; v = mujoco.mj_versionString(); assert v == "3.12.0", v'
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /ws
 
