@@ -96,8 +96,22 @@ run_tests() {
     --return-code-on-test-failure || rc=$?
   colcon test-result --test-result-base "$base" --verbose | tee "$base/test-result.txt"
   [ "$rc" -eq 0 ] || return "$rc"
-  found=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' "$base/test-result.txt" | tail -1)
-  require_at_least "gtest ($base)" "${found:-0}" "$GTEST_FLOOR"
+  # "Summary: N tests, E errors, F failures, S skipped". A skipped test did not run: any skip is
+  # a failure, and the floor counts only the tests that ran.
+  local summary total skipped
+  summary=$(grep '^Summary: ' "$base/test-result.txt" | tail -1)
+  total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
+  skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
+  if ! [[ $total =~ ^[0-9]+$ && $skipped =~ ^[0-9]+$ ]]; then
+    echo "FAIL: gtest ($base): could not read the summary (got '$summary')" >&2
+    exit 1
+  fi
+  if [ "$skipped" -ne 0 ]; then
+    echo "FAIL: gtest ($base): $skipped tests skipped; a skipped test did not run" >&2
+    exit 1
+  fi
+  found=$((total - skipped))
+  require_at_least "gtest ($base)" "$found" "$GTEST_FLOOR"
 }
 
 echo "== build (release) =="
