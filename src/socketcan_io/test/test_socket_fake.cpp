@@ -154,3 +154,36 @@ TEST(SocketCan, OpenFailsOnUnknownInterface) {
   EXPECT_FALSE(CanSocket::open("nonexistent_can0", &error).has_value());
   EXPECT_FALSE(error.empty());
 }
+
+TEST(SocketCan, ReceiveErrorIsCountedAndKept) {
+  SysOps ops = no_ops();
+  ops.recvmsg = [](int, msghdr*, int) -> ssize_t {
+    errno = ENETDOWN;
+    return -1;
+  };
+  CanSocket sock(-1, ops);
+  EXPECT_FALSE(sock.read_one().has_value());
+  EXPECT_EQ(sock.counts().rx_error, 1U);
+  EXPECT_EQ(sock.last_rx_errno(), ENETDOWN);
+}
+
+TEST(SocketCan, EagainIsNotAReceiveError) {
+  CanSocket sock(-1, no_ops());
+  EXPECT_FALSE(sock.read_one().has_value());
+  EXPECT_EQ(sock.counts().rx_error, 0U);
+  EXPECT_EQ(sock.last_rx_errno(), 0);
+}
+
+TEST(SocketCan, RejectedFrameStormIsBoundedPerCall) {
+  SysOps ops = no_ops();
+  int calls = 0;
+  ops.recvmsg = [&](int, msghdr* m, int) {
+    ++calls;
+    return deliver(m, 0x203 | CAN_RTR_FLAG, false);
+  };
+  CanSocket sock(-1, ops);
+  EXPECT_FALSE(sock.read_one().has_value());
+  EXPECT_EQ(calls, static_cast<int>(CanSocket::kMaxRejectedPerRead));
+  EXPECT_EQ(sock.counts().rx_reject_budget_hits, 1U);
+  EXPECT_EQ(sock.counts().rx, CanSocket::kMaxRejectedPerRead);
+}

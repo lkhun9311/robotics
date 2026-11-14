@@ -40,6 +40,8 @@ SysOps system_ops();
 struct IoCounts {
   std::uint64_t rx{};                                      // Every frame received, accepted or not.
   std::array<std::uint64_t, kRxClassCount> rx_rejected{};  // Indexed by RxClass; kData stays 0.
+  std::uint64_t rx_error{};               // recvmsg failures other than EAGAIN/EWOULDBLOCK/EINTR.
+  std::uint64_t rx_reject_budget_hits{};  // read_one calls cut short by kMaxRejectedPerRead.
   std::uint64_t tx{};
   std::uint64_t tx_eagain{};
   std::uint64_t tx_enobufs{};
@@ -59,13 +61,21 @@ class CanSocket {
   CanSocket& operator=(const CanSocket&) = delete;
   ~CanSocket();
 
+  // Rejected frames one read_one call skips before it gives the caller control back, so an
+  // error-frame storm cannot starve a loop that drains with a per-wake budget.
+  static constexpr std::uint64_t kMaxRejectedPerRead = 64;
+
   // The next frame the codec may see; rejected frames are counted and skipped.
-  // std::nullopt when nothing is pending (EAGAIN) or on a receive error.
+  // std::nullopt means one of three things, told apart by the counters: nothing pending
+  // (EAGAIN: no counter moves), a receive error (counts().rx_error rises and last_rx_errno()
+  // holds the errno), or the reject budget was spent (counts().rx_reject_budget_hits rises;
+  // frames may still be pending, so the caller reads again on its next turn).
   std::optional<RxFrame> read_one();
   bool send(const canopen_codec::Frame& frame);
 
   const IoCounts& counts() const { return counts_; }
   int fd() const { return fd_; }
+  int last_rx_errno() const { return last_rx_errno_; }  // Of the latest rx_error; 0 if none.
 
  private:
   void close_fd();
@@ -73,6 +83,7 @@ class CanSocket {
   int fd_;
   SysOps ops_;
   IoCounts counts_{};
+  int last_rx_errno_{0};
 };
 
 }  // namespace socketcan_io

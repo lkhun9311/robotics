@@ -78,7 +78,10 @@ std::optional<CanSocket> CanSocket::open(std::string_view ifname, std::string* e
 CanSocket::CanSocket(int fd, SysOps ops) : fd_(fd), ops_(std::move(ops)) {}
 
 CanSocket::CanSocket(CanSocket&& other) noexcept
-    : fd_(std::exchange(other.fd_, -1)), ops_(std::move(other.ops_)), counts_(other.counts_) {}
+    : fd_(std::exchange(other.fd_, -1)),
+      ops_(std::move(other.ops_)),
+      counts_(other.counts_),
+      last_rx_errno_(other.last_rx_errno_) {}
 
 CanSocket& CanSocket::operator=(CanSocket&& other) noexcept {
   if (this != &other) {
@@ -86,6 +89,7 @@ CanSocket& CanSocket::operator=(CanSocket&& other) noexcept {
     fd_ = std::exchange(other.fd_, -1);
     ops_ = std::move(other.ops_);
     counts_ = other.counts_;
+    last_rx_errno_ = other.last_rx_errno_;
   }
   return *this;
 }
@@ -100,6 +104,7 @@ void CanSocket::close_fd() {
 }
 
 std::optional<RxFrame> CanSocket::read_one() {
+  std::uint64_t rejected = 0;
   for (;;) {
     canfd_frame frame{};
     alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(timespec))> control{};
@@ -115,7 +120,11 @@ std::optional<RxFrame> CanSocket::read_one() {
       continue;
     }
     if (n < 0) {
-      return std::nullopt;  // EAGAIN: drained; any other error is left to the caller's next poll.
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        ++counts_.rx_error;
+        last_rx_errno_ = errno;
+      }
+      return std::nullopt;
     }
     // Stamp first: nothing between the syscall's return and this read may take time.
     const runtime_core::MonoTime rx_mono = ops_.now();
@@ -124,6 +133,10 @@ std::optional<RxFrame> CanSocket::read_one() {
     const std::optional<canopen_codec::Frame> codec = to_codec(frame, nbytes);
     if (!codec.has_value()) {
       ++counts_.rx_rejected[static_cast<std::size_t>(classify(frame, nbytes))];
+      if (++rejected >= kMaxRejectedPerRead) {
+        ++counts_.rx_reject_budget_hits;
+        return std::nullopt;
+      }
       continue;
     }
     RxFrame out;
