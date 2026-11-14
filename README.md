@@ -385,6 +385,10 @@ The numbers below come from those recordings; this prints every verdict with its
 
     python3 tools/evidence/rejudge.py            # or one row: python3 tools/evidence/rejudge.py f7
 
+The vcan stage also writes every observation it judges, passed or failed, to `artifacts/interop`,
+which CI uploads in `checks-artifacts`; a CI failure is judged again from there with
+`python3 tools/evidence/rejudge.py --dir ci-<run>/artifacts/interop f2`.
+
 What each row shows, and what it does not:
 
 | Row | Shows (from `rejudge.py`) | Does not show |

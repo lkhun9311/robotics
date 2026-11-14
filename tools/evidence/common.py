@@ -64,8 +64,8 @@ def print_input(what, command):
     print(f"reproduce the input: {command}")
 
 
-def load_recording(row):
-    with gzip.open(RECORDED / f"{row}.json.gz", "rt") as f:
+def load_recording(row, directory=RECORDED):
+    with gzip.open(pathlib.Path(directory) / f"{row}.json.gz", "rt") as f:
         return json.load(f)
 
 
