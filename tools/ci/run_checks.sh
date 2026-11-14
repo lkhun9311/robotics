@@ -295,7 +295,11 @@ echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) ==
   # shellcheck disable=SC1091
   source install/release/setup.bash
   set -u
-  python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q -rP \
+  # Every judged observation (passed or failed) is kept under artifacts/interop, one gzipped
+  # JSON per row (about 30 kB each), so a CI failure can be judged again from its artifact.
+  rm -rf artifacts/interop
+  INTEROP_RECORD_DIR=artifacts/interop \
+    python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q -rP \
     --junitxml=artifacts/pytest-vcan.xml tools/interop
   verdict="FAIL: interop test count"
   require_at_least "vcan integration" "$(junit_count artifacts/pytest-vcan.xml)" "$VCAN_FLOOR"
