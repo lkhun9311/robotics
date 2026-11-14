@@ -35,6 +35,10 @@ jobs:
           name: vcan-preflight-status
           path: artifacts/preflight/vcan-status.txt
           if-no-files-found: error
+      - name: Fit the memory layout to ThreadSanitizer
+        # GCC 13's TSan runtime cannot place its shadow memory when mmap is randomized with more
+        # than 28 bits; the TSan stage fails loudly ("unexpected memory mapping") if this is missing.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: Run checks
         # NET_ADMIN: the vcan stage creates vcan_host and vcan_device in the container's namespace.
         run: >-
