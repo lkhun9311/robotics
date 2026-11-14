@@ -31,6 +31,7 @@ EDS_PATH = ROOT / "config" / "od" / "vdrive_arm.eds"
 NODE = 3  # The node the matrix judges (M2 judges node 2's heartbeat).
 NODES = (1, 2, 3, 4, 5, 6)
 GRACE_S = 0.005  # A frame this soon after an NMT command may predate the node's processing.
+LELY_GROUP_S = 0.001  # Lely prints the rpdo lines of one SYNC within this of its sync line.
 HB_TIMEOUT_BOUND_S = 1.0  # M2: broad bound for Lely's heartbeat-timeout report.
 # B15: objects no master may download to unless the scenario asked for it.
 CONST_OBJECTS = ({0x1017} | set(range(0x1400, 0x1403)) | set(range(0x1600, 0x1603)) |
@@ -211,6 +212,7 @@ def judge_m1(obs):
     sent = [e["t"] for e in events(obs, "nmt_sent", node=NODE)]
     need(len(sent) == len(M1_SEQUENCE), f"Lely reported {len(sent)} NMT commands sent")
     lely_ends = dict(zip([t for t, _ in cmds], sent[1:] + [done["t"]]))
+    lely_starts = dict(zip([t for t, _ in cmds], sent))
     hb_cob = cia301.HEARTBEAT_BASE + NODE
     sdo_tx = cia301.SDO_TX_BASE + NODE
     previous = cia301.STATE_PRE_OPERATIONAL  # The state after boot, before the first command.
@@ -255,6 +257,14 @@ def judge_m1(obs):
         need(len(syncs) >= 5, f"NMT 0x{cs:02X}: only {len(syncs)} SYNC frames in the state")
         tpdos = frames(obs, "host", TPDO_COBS, t0 + GRACE_S, t1)
         lely_pdos = events(obs, "rpdo", t0 + GRACE_S, lt1, node=NODE)
+        if expected not in cia301.PDO_STATES:
+            # Lely applies a synchronous TPDO at the next SYNC (CiA 301 synchronous
+            # reception): the TPDO sent before the command is reported at Lely's first SYNC
+            # after it. Lely's lines from then on are judged.
+            lt0 = lely_starts[t0]
+            first_sync = [e["t"] for e in events(obs, "sync", lt0)][:1]
+            need(first_sync, f"NMT 0x{cs:02X}: no Lely SYNC after the command")
+            lely_pdos = [e for e in lely_pdos if e["t"] > first_sync[0] + LELY_GROUP_S]
         if expected in cia301.PDO_STATES:
             for a, b in zip(syncs, syncs[1:]):
                 got = sorted(c for t, c, _ in tpdos if a < t < b)

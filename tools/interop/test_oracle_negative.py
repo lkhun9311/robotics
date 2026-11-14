@@ -111,3 +111,29 @@ def test_m1_heartbeat_right_after_boot_up_fails(cs):
     with_frame(obs, t_boot + 0.5 * judges.GRACE_S, 0x700 + judges.NODE, "7f")
     status, text = judges.verdict(obs)
     assert status == "FAIL", f"{status}: {text}"
+
+
+# M1 Stopped/Pre-op: Lely applies a synchronous TPDO it received at the next SYNC (CiA 301
+# synchronous reception), so the TPDO the node sent right before the command is reported by
+# Lely at its first SYNC after the command. Only that one SYNC of lag is tolerated.
+
+def m1_lely_pdo_group(obs, cs, nth_sync):
+    """Adds Lely rpdo lines for node 3 at Lely's nth SYNC after the NMT command cs."""
+    sent = next(e["t"] for e in obs["peer"] if e.get("event") == "nmt_sent" and e["cs"] == cs)
+    t = [e["t"] for e in obs["peer"] if e.get("event") == "sync" and e["t"] > sent][nth_sync - 1]
+    group = [{"t": t + 1e-6 * (i + 1), "event": "rpdo", "node": judges.NODE, "index": 0x6041,
+              "sub": 0, "value": 0x0260} for i in range(1)]
+    obs["peer"] = sorted(obs["peer"] + group, key=lambda e: e["t"])
+    return obs
+
+
+@pytest.mark.parametrize("cs", [0x02, 0x80])
+def test_m1_lely_pdo_at_first_sync_after_command_passes(cs):
+    status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 1))
+    assert status == "PASS", f"{status}: {text}"
+
+
+@pytest.mark.parametrize("cs", [0x02, 0x80])
+def test_m1_lely_pdo_at_second_sync_after_command_fails(cs):
+    status, text = judges.verdict(m1_lely_pdo_group(load("M1"), cs, 2))
+    assert status == "FAIL" and "Lely decoded PDO values" in text, f"{status}: {text}"
