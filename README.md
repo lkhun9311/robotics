@@ -15,12 +15,32 @@ A simulation-based robot system runtime, built in stages.
 
 | Stage | State |
 |---|---|
-| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest and cyclictest baseline done; MuJoCo plugin, CANopen peers, supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
+| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, and the MuJoCo plugin and Menagerie model done; CANopen peers, supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
 | E1 command and permit contracts, independent judge | done |
-| E2 onward | not started |
+| E2 official plugin baseline | done: stock JTC baseline; no permit/generation guarantee |
+| E3 onward | not started |
 
-E2 (in progress), measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e: a
-goal of 6.5 rad for `wrist_3_joint` was accepted, passed through unchanged as the controller
+## E2 baseline
+
+The Menagerie UR5e in MuJoCo under ros2_control, driven by the stock JointTrajectoryController.
+After a build:
+
+    docker compose run --rm dev bash -c 'source install/release/setup.bash && ros2 launch robot_bringup ur5e_baseline.launch.py'
+
+Pass `headless:=true` to run without a viewer and `camera:=true` to publish the `overview`
+camera on `/overview/image_raw`. The recording [docs/media/e2-baseline.mp4](docs/media/e2-baseline.mp4)
+(640x480, from that camera; `tools/sim_checks/record_motion.py`) shows the arm leaving the home pose
+and returning to it.
+
+The simulation checks (`tools/sim_checks`) show that:
+
+- the joints, actuators and controller joints map to each other by name;
+- the arm starts at the home pose;
+- a normal goal is accepted and reached within 0.05 rad at its end;
+- out-of-range goals behave as measured below.
+
+Out-of-range behaviour, measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e:
+A goal of 6.5 rad for `wrist_3_joint` was accepted, passed through unchanged as the controller
 output, and aborted with GOAL_TOLERANCE_VIOLATED (-5), while the MuJoCo joint stayed at or below
 6.2815 rad. The actuator `ctrlrange` (6.2831) is below the joint `range` (6.28319), so this run
 does not show which of the two held the joint; the project HAL (E3) owns limit enforcement. A
@@ -28,6 +48,12 @@ goal of 3.5 rad for `elbow_joint` from the home pose was also passed through and
 GOAL_TOLERANCE_VIOLATED (-5); the elbow stopped at about 2.89 rad, short of its 3.1415 rad limit.
 A standalone MuJoCo 4.0.1 run of the same scene showed the elbow actuator at its force limit and
 `upper_arm_link` touching `wrist_3_link`.
+
+Pinned versions: ROS snapshot 2026-10-05, `mujoco_ros2_control` 0.1.2,
+`joint_trajectory_controller` 4.42.1, MuJoCo Menagerie commit
+`370c43965323c0944b433b202aac5058b5f907a9` (files verified by SHA-256).
+
+This path uses the stock JointTrajectoryController. It accepts goals on its own action and topic interfaces, and nothing outside it can prove which goal produced a given output, so E2 claims no permit or generation guarantee. Those claims start with the project's own controller in E3.
 
 ## What E1 proves today (logic time, no robot, no ROS)
 
@@ -65,10 +91,15 @@ the path it claims to test. Each rule has a deliberate defect in the harness tha
 
 - `src/runtime_core` ROS-free C++ contracts, GoogleTest, logic-time harness
 - `tools/oracle` independent trace judge
+- `src/ur5e_description` UR5e model, scene and ros2_control description
+- `src/robot_bringup` launch file and controller and plugin configuration
+- `models/` checksums of the pinned Menagerie model; `tools/models` fetch and verify
+- `tools/sim_checks` simulation checks and the motion recorder
 - `tools/env`, `tools/bench` environment manifest and cyclictest baseline
 - `docker`, `compose.yaml`, `.github/workflows` toolchain, images and CI
 
 ## Limits
 
-Logic time only: no OS jitter, no real IPC, no CAN, no physics yet. The numeric limits are
-project-declared, not industry values.
+E1 runs in logic time only: no OS jitter, no real IPC, no CAN. E2 adds MuJoCo physics, but its
+timing is the simulator's, not a real-time measurement. The numeric limits are project-declared,
+not industry values. Ubuntu archive packages in the image are not pinned to a snapshot.
