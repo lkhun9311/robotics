@@ -97,7 +97,12 @@ cc::Frame Drive::boot_up_frame() const {
   return cc::encode_heartbeat({node_, cc::NmtState::kBootUp});
 }
 
-std::vector<cc::Frame> Drive::power_on() {
+std::vector<cc::Frame> Drive::power_on(runtime_core::MonoTime now) {
+  // D3: the boot quarantine counts from boot-up, not from constructing the Drive. Only the first
+  // power-on of this boot rearms it: a repeated call must not restart the tag allocator.
+  if (nmt_.state() == cc::NmtState::kBootUp) {
+    issuer_.boot(issuer_.boot_id(), now);
+  }
   cia402_.complete_initialisation();
   nmt_.boot_up();
   return {boot_up_frame()};

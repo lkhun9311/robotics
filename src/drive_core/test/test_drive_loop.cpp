@@ -56,7 +56,7 @@ struct Loop {
 
   Loop() {
     drive.set_event_sink([this](const DriveEvent& e) { events.push_back(e); });
-    drive.power_on();
+    drive.power_on(now());
     clock.advance(milliseconds(100));
     frame(cc::encode_nmt({cc::NmtCommand::kStart, kNode}));
   }

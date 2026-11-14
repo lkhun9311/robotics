@@ -127,9 +127,9 @@ class Drive {
   Drive(const Drive&) = delete;
   Drive& operator=(const Drive&) = delete;
 
-  // Power on: CiA 402 initialisation, NMT boot-up. Returns the boot-up message. The node stays
-  // in Pre-operational until an NMT Start.
-  std::vector<canopen_codec::Frame> power_on();
+  // Power on at `now`: CiA 402 initialisation, NMT boot-up. Returns the boot-up message. The
+  // node stays in Pre-operational until an NMT Start. The boot quarantine (D3) counts from here.
+  std::vector<canopen_codec::Frame> power_on(runtime_core::MonoTime now);
 
   // Handles one received frame and returns the frames to send in reply (TPDO1-3 after an
   // accepted SYNC in Operational, D7/D13). Never throws for any frame content; the only throw is
