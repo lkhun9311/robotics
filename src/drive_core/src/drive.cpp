@@ -523,10 +523,13 @@ bool Drive::policy_reset(runtime_core::MonoTime now) {
 
 void Drive::inject_fault(std::uint16_t error_code, runtime_core::MonoTime now) {
   const Cia402State before = cia402_.state();
-  cia402_.drive_fault(error_code);
+  const bool accepted = cia402_.drive_fault(error_code);
   actuated_.reset();
   issuer_.revoke();
   after_transition(before, now);
+  if (!accepted) {
+    return;  // Already handling a fault: the first code stays and nothing new happened.
+  }
   DriveEvent e{DriveEventKind::kFault, now};
   e.fault_code = error_code;
   emit(e);

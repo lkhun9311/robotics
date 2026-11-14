@@ -1052,6 +1052,36 @@ TEST(Fault, TorqueLossDuringFaultHandlingUpdatesCode) {
   }
 }
 
+// A fault while one is already being handled changes no CiA 402 state and keeps the first code,
+// so it is not a new fault: no kFault event (the bank sends one EMCY per kFault event).
+TEST(Fault, SecondFaultWhileInFaultEmitsNothing) {
+  constexpr std::uint16_t kOtherCode = 0x5000;
+  {
+    SCOPED_TRACE("Fault Reaction Active");
+    Loop l;
+    l.run_at_vmax();
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    ASSERT_EQ(l.state(), Cia402State::kFaultReactionActive);
+    ASSERT_EQ(l.count(DriveEventKind::kFault), 1U);
+    l.drive.inject_fault(kOtherCode, l.now());
+    EXPECT_EQ(l.count(DriveEventKind::kFault), 1U);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+  }
+  {
+    SCOPED_TRACE("Fault");
+    Loop l;
+    l.cw(0x06);
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    l.ticks(10);
+    ASSERT_EQ(l.state(), Cia402State::kFault);
+    ASSERT_EQ(l.count(DriveEventKind::kFault), 1U);
+    l.drive.inject_fault(kOtherCode, l.now());
+    EXPECT_EQ(l.state(), Cia402State::kFault);
+    EXPECT_EQ(l.count(DriveEventKind::kFault), 1U);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+  }
+}
+
 TEST(Fault, ResetNeedsNewCommitAndEnable) {
   Loop l;
   l.run_at_vmax();

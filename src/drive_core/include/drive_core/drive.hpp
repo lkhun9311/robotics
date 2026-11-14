@@ -158,6 +158,8 @@ class Drive {
   // Injected faults (D11). A recoverable fault ramps in Fault Reaction Active and enters Fault
   // once the stop is confirmed. Torque loss enters Fault at once with no ramp: the joint keeps
   // its velocity, stop_unconfirmed is reported and drive_unavailable stays set for the process.
+  // inject_fault emits kFault only when the fault was accepted (transition 13): a fault while one
+  // is already being handled keeps the first code and emits nothing.
   void inject_fault(std::uint16_t error_code, runtime_core::MonoTime now);
   void inject_torque_loss(runtime_core::MonoTime now);
   // A stuck joint ignores the brake (tests stop_unconfirmed).
