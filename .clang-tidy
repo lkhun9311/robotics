@@ -6,4 +6,4 @@ Checks: >
   -performance-enum-size,
   clang-analyzer-*
 WarningsAsErrors: '*'
-HeaderFilterRegex: 'runtime_core/.*'
+HeaderFilterRegex: '(runtime_core|canopen_codec)/.*'

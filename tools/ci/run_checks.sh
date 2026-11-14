@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=69
+GTEST_FLOOR=87
 PYTEST_FLOOR=215
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
@@ -58,6 +58,24 @@ require_at_least() {
     exit 1
   fi
   echo "$label: $found tests (floor $floor)"
+}
+
+# Pure C++ packages: every directory under src/ whose src/ holds .cpp files. Computed here,
+# apart from the loops below, so a loop that silently skips a package is caught by its count.
+mapfile -t CPP_PACKAGES < <(find src -path 'src/*/src/*' -name '*.cpp' | cut -d/ -f2 | sort -u)
+if [ "${#CPP_PACKAGES[@]}" -eq 0 ]; then
+  echo "FAIL: found no C++ package under src/ (expected at least runtime_core)" >&2
+  exit 1
+fi
+echo "C++ packages: ${CPP_PACKAGES[*]}"
+
+require_all_packages() {
+  local label=$1 checked=$2
+  if [ "$checked" -eq 0 ] || [ "$checked" -ne "${#CPP_PACKAGES[@]}" ]; then
+    echo "FAIL: $label checked $checked packages, expected ${#CPP_PACKAGES[@]} (${CPP_PACKAGES[*]})" >&2
+    exit 1
+  fi
+  echo "$label: $checked packages"
 }
 
 # Tests that ran and were not skipped, from a pytest JUnit XML file.
@@ -103,6 +121,7 @@ require_at_least "simulation checks" "$(junit_count artifacts/pytest-sim.xml)" "
 
 echo "== clang-tidy (every package's src and harness; tests excluded, see plan) =="
 # A package with sources but no compile database cannot be checked, which is a failure, not a skip.
+tidied=0
 for pkg_dir in src/*/; do
   pkg=$(basename "$pkg_dir")
   for sub in src harness; do
@@ -113,8 +132,12 @@ for pkg_dir in src/*/; do
     fi
     find "$pkg_dir$sub" -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
       clang-tidy -p "build/release/$pkg" --quiet
+    if [ "$sub" = src ] && [ -n "$(find "${pkg_dir}src" -name '*.cpp' -print -quit)" ]; then
+      tidied=$((tidied + 1))
+    fi
   done
 done
+require_all_packages "clang-tidy" "$tidied"
 
 echo "== sanitizers (ASan + UBSan, with coverage) =="
 colcon build --base-paths src "${ASAN[@]}" \
@@ -122,6 +145,7 @@ colcon build --base-paths src "${ASAN[@]}" \
   -DROBOTICS_COVERAGE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 # The ASan build is only worth running if the flags reached the compile line of every package
 # that has sources; a misspelt option would otherwise build clean, unsanitized, and pass.
+sanitized=0
 for pkg_dir in src/*/; do
   pkg=$(basename "$pkg_dir")
   [ -d "${pkg_dir}src" ] || continue
@@ -129,16 +153,29 @@ for pkg_dir in src/*/; do
     echo "FAIL: ASan build of $pkg has no -fsanitize=address,undefined on its compile line" >&2
     exit 1
   fi
+  sanitized=$((sanitized + 1))
 done
+require_all_packages "sanitizer flags" "$sanitized"
 # Counters from an earlier run no longer match a rebuilt object (gcov "stamp mismatch"),
 # and logic_sim only runs after the report, so nothing would refresh its counters.
 find build/asan -name '*.gcda' -delete
 run_tests build/asan
 
 echo "== coverage report (reported, not gated) =="
-gcovr --root src/runtime_core --exclude 'src/runtime_core/test/.*' \
-  --txt artifacts/coverage.txt --xml artifacts/coverage.xml build/asan/runtime_core
+# Every C++ package's own sources (src, include, harness); tests and generated headers excluded.
+gcovr_args=()
+for pkg in "${CPP_PACKAGES[@]}"; do
+  gcovr_args+=(--filter "src/$pkg/" --exclude "src/$pkg/test/")
+done
+gcovr --root . "${gcovr_args[@]}" --txt artifacts/coverage.txt --xml artifacts/coverage.xml \
+  "${CPP_PACKAGES[@]/#/build/asan/}"
 cat artifacts/coverage.txt
+for pkg in "${CPP_PACKAGES[@]}"; do
+  if ! grep -q "^src/$pkg/" artifacts/coverage.txt; then
+    echo "FAIL: coverage report has no file of $pkg" >&2
+    exit 1
+  fi
+done
 
 echo "== python tests (release harness; traces kept in artifacts/traces/release) =="
 # launch_testing's pytest plugin answers pytest_ignore_collect with False ahead of pytest's own
