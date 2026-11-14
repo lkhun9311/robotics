@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>drive_core</name>
+  <version>0.1.0</version>
+  <description>ROS-free logic of the virtual arm drive: drive-issued execution tag, wire validity and two-fragment command assembly.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
