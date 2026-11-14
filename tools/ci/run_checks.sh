@@ -45,6 +45,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 GTEST_FLOOR=69
 PYTEST_FLOOR=91
 INTEGRATION_FLOOR=11
+SIM_FLOOR=7
 
 require_at_least() {
   local label=$1 found=$2 floor=$3
@@ -87,6 +88,18 @@ colcon build --base-paths src "${REL[@]}" \
 echo "== unit tests (release) =="
 run_tests build/release
 
+echo "== simulation checks (release install, headless) =="
+# The colcon setup script reads unset variables (COLCON_TRACE), so it cannot be sourced
+# under `set -u` (reproduced 2026-11-14). Run the stage in a subshell with nounset off.
+(
+  set +u
+  # shellcheck disable=SC1091
+  source install/release/setup.bash
+  set -u
+  python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest-sim.xml tools/sim_checks
+)
+require_at_least "simulation checks" "$(junit_count artifacts/pytest-sim.xml)" "$SIM_FLOOR"
+
 echo "== clang-tidy (src and harness; tests excluded, see plan) =="
 find src/runtime_core/src -name '*.cpp' -print0 | xargs -0 --no-run-if-empty \
   clang-tidy -p build/release/runtime_core --quiet
@@ -110,9 +123,13 @@ gcovr --root src/runtime_core --exclude 'src/runtime_core/test/.*' \
 cat artifacts/coverage.txt
 
 echo "== python tests (release harness; traces kept in artifacts/traces/release) =="
+# launch_testing's pytest plugin answers pytest_ignore_collect with False ahead of pytest's own
+# hook, which silently defeats --ignore (seen 2026-11-14). No test here is a launch test, and
+# launch_ros (launch_testing_ros) only registers hooks that launch_testing declares, so both go.
 LOGIC_SIM_BIN="$PWD/install/release/runtime_core/lib/runtime_core/logic_sim" \
 ORACLE_TRACE_DIR="$PWD/artifacts/traces/release" \
-  python3 -m pytest -p no:cacheprovider -q --junitxml=artifacts/pytest.xml tools
+  python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q \
+  --junitxml=artifacts/pytest.xml --ignore=tools/sim_checks tools
 require_at_least "pytest (tools)" "$(junit_count artifacts/pytest.xml)" "$PYTEST_FLOOR"
 
 echo "== oracle x harness (ASan + UBSan harness; traces in artifacts/traces/asan) =="
