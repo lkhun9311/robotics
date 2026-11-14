@@ -16,7 +16,7 @@ import pytest
 import judges
 
 RECORDED = pathlib.Path(__file__).parent / "recorded"
-FAULT_ROWS = ("F1", "F2", "F3", "F4", "F5", "F6")
+FAULT_ROWS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7")
 ROWS = FAULT_ROWS + ("R1",)
 _CACHE = {}
 
@@ -204,7 +204,7 @@ def test_r1_replayed_frame_not_counted_fails():
                 r.get("kind") == "dropped" and t_sync < r["t_ns"] / 1e9 < t_next)
     drop["count"] -= 1
     status, text = verdict(obs)
-    assert status == "FAIL" and "other-tag drops at the SYNC" in text, f"{status}: {text}"
+    assert status == "FAIL" and "other-tag drops (expected" in text, f"{status}: {text}"
 
 
 def test_r1_same_tag_after_restart_fails():
@@ -216,3 +216,65 @@ def test_r1_same_tag_after_restart_fails():
             e["value"] = old_tag
     status, text = verdict(obs)
     assert status == "FAIL" and "committed the old tag" in text, f"{status}: {text}"
+
+
+def delayed_stream_rpdo2(obs):
+    """(seq, index in obs['device']) of the stream-tag RPDO2 frames the delay rule matched, in
+    device order."""
+    tag = stream_tag(obs)
+    matched = judges.expected_matches(obs, judges.parse_rules(obs["harness"]["rules"]))[0]
+    wanted = {d.hex() for _, _, d in matched}
+    return [(int.from_bytes(bytes.fromhex(h)[4:6], "little"), i)
+            for i, (_, c, h) in enumerate(obs["device"])
+            if c == 0x303 and h in wanted and bytes.fromhex(h)[6:8] == tag.to_bytes(2, "little")]
+
+
+def test_f7_delayed_seq_actuated_fails():
+    obs = load("F7")
+    seq = delayed_stream_rpdo2(obs)[0][0]
+    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=seq, tag=stream_tag(obs)))
+    status, text = verdict(obs)
+    assert status == "FAIL" and "delayed seqs actuated" in text, f"{status}: {text}"
+
+
+def test_f7_missing_not_valid_drop_fails():
+    obs = load("F7")
+    nv = [r for r in drive(obs, "dropped") if r["drop"] == judges.DROP_NOT_VALID]
+    obs["bank"].remove(nv[len(nv) // 2])
+    status, text = verdict(obs)
+    assert status == "FAIL" and "not-valid" in text, f"{status}: {text}"
+
+
+def test_f7_non_delayed_seq_not_actuated_fails():
+    obs = load("F7")
+    delayed = {s for s, _ in delayed_stream_rpdo2(obs)}
+    seq = next(s for s in range(10, 50) if s not in delayed)
+    obs["bank"].remove(next(r for r in drive(obs, "actuated") if r["seq"] == seq))
+    status, text = verdict(obs)
+    assert status == "FAIL" and f"[{seq}]" in text, f"{status}: {text}"
+
+
+def test_f1_delayed_frame_outside_every_judged_span_is_inconclusive():
+    obs = load("F1")
+    t_stop = drive(obs, "quick_stop")[0]["t_ns"] / 1e9
+    _, i = delayed_stream_rpdo2(obs)[0]
+    obs["device"][i][0] = t_stop + 0.002  # Between the stop and the first judged SYNC.
+    obs["device"].sort(key=lambda f: f[0])
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "not accounted" in text, f"{status}: {text}"
+
+
+def test_r1_control_counted_other_tag_fails():
+    """The tag revoked before the replay SYNC: the control is one more other-tag drop and no
+    lone half is dropped."""
+    obs = load("R1")
+    t_sync, t_next = obs["harness"]["t_sync"], obs["harness"]["t_second_stream"]
+    at_sync = [r for r in obs["banks"][-1] if r.get("event") == "drive" and
+               r.get("kind") == "dropped" and t_sync < r["t_ns"] / 1e9 < t_next]
+    other = next(r for r in at_sync if r["drop"] == judges.DROP_OTHER_TAG)
+    other["count"] += 1
+    for r in at_sync:
+        if r["drop"] == judges.DROP_MISSING_HALF:
+            obs["banks"][-1].remove(r)
+    status, text = verdict(obs)
+    assert status in ("FAIL", "INCONCLUSIVE") and "control" in text, f"{status}: {text}"

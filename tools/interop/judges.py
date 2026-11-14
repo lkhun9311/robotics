@@ -760,6 +760,11 @@ def decode(label, data):
     return out
 
 
+def encode(label, values):
+    """One PDO frame's bytes by the EDS mapping (wire.py's encoder)."""
+    return bytes(wire.pdo_frame(pdo_layout(label), NODE, values, "judge")["data"])
+
+
 def rpdo_seqs(obs, side, n, tag, t0=None, t1=None):
     """[(t, seq, data)] of RPDOn of node 3 with `tag` on `side`."""
     out = []
@@ -852,23 +857,29 @@ def drops_by_sync(obs, reason, syncs):
     return out
 
 
-def other_tag_after(obs, t_stop):
-    """Checks, for every SYNC interval that opens 5 ms or more after t_stop, that the other-tag
-    drops at its closing SYNC equal the RPDO1/RPDO2 frames of node 3 inside it. Returns (a
-    predicate telling whether a device time lies in a judged interval, the frames judged)."""
+def judged_span(obs, t_stop):
+    """The SYNC intervals judged after a stop: those opening 5 ms or more after t_stop. Returns
+    (the SYNC times, the indices of the judged intervals' opening SYNCs, a predicate telling
+    whether a device time lies inside a judged interval)."""
     syncs = device_syncs(obs)
-    drops = drops_by_sync(obs, DROP_OTHER_TAG, syncs)
-    cobs = (cia301.RPDO_BASE[1] + NODE, cia301.RPDO_BASE[2] + NODE)
     judged = [i for i in range(len(syncs) - 1) if syncs[i] >= t_stop + 0.005]
     need(len(judged) >= 10, f"only {len(judged)} SYNC intervals after the stop")
+    lo, hi = syncs[judged[0]], syncs[judged[-1] + 1]
+    return syncs, judged, (lambda t: lo < t < hi)
+
+
+def other_tag_after(obs, syncs, judged):
+    """Checks, for every judged SYNC interval, that the other-tag drops at its closing SYNC
+    equal the RPDO1/RPDO2 frames of node 3 inside it; returns the frames judged."""
+    drops = drops_by_sync(obs, DROP_OTHER_TAG, syncs)
+    cobs = (cia301.RPDO_BASE[1] + NODE, cia301.RPDO_BASE[2] + NODE)
     total = 0
     for i in judged:
         n = len(frames(obs, "device", cobs, syncs[i], syncs[i + 1]))
         check(drops.get(i + 1, 0) == n, f"SYNC interval {i}: {n} RPDO1/RPDO2 of node 3, "
                                         f"{drops.get(i + 1, 0)} other-tag drops at its SYNC")
         total += n
-    lo, hi = syncs[judged[0]], syncs[judged[-1] + 1]
-    return (lambda t: lo < t < hi), total
+    return total
 
 
 def actuated_seqs(obs, tag, **kw):
@@ -894,12 +905,23 @@ def judge_f1(obs):
     # A delayed RPDO2 reaching the drive while its tag is current is a not-valid drop at
     # receipt (D5). After the stop revoked the tag, D8 classifies the tag first: every RPDO1 and
     # RPDO2 of node 3 between two SYNCs is then one other-tag drop at the second SYNC, exactly.
-    check(not_valid >= len(live), f"{len(live)} delayed RPDO2 before the stop, {not_valid} "
+    check(not_valid == len(live), f"{len(live)} delayed RPDO2 before the stop, {not_valid} "
                                   f"not-valid drops")
-    accounted, late = other_tag_after(obs, t_stop)
+    need({s for _, s, _ in on_device} == set(seqs),
+         f"stream seqs whose delayed RPDO2 never reached the drive: "
+         f"{sorted(set(seqs) - {s for _, s, _ in on_device})}")
+    syncs, judged, accounted = judged_span(obs, t_stop)
+    t_last_sync = syncs[-1]
     covered = [s for t, s, _ in on_device if accounted(t)]
-    need(len(set(covered)) >= len(seqs) - 10,
-         f"only {len(set(covered))} delayed seqs reached the drive inside a judged SYNC interval")
+    trailing = [s for t, s, _ in on_device if t > t_last_sync]
+    # Every delayed RPDO2 on vcan_device is accounted for exactly once: before the stop (a
+    # not-valid drop), inside a judged SYNC interval (an other-tag drop at its closing SYNC), or
+    # after the last SYNC on the bus (no SYNC ever closed its interval; named).
+    unaccounted = [(round(t - t_stop, 4), s) for t, s, _ in on_device
+                   if t > t_stop and not accounted(t) and t < t_last_sync]
+    need(not unaccounted, f"delayed RPDO2 (s after the stop, seq) not accounted for by a "
+                          f"judged SYNC interval: {unaccounted}")
+    late = other_tag_after(obs, syncs, judged)
     sw = last_statusword(obs)
     check(sw & 0x6F == QUICK_STOP_ACTIVE, f"last statusword 0x{sw:04X}, not Quick Stop Active")
     flags = drive_flags(obs)
@@ -907,8 +929,9 @@ def judge_f1(obs):
     applied = set(applied_on_host(obs)) - {0}
     check(not applied, f"TPDO2 applied_seq on vcan_host {sorted(applied)}")
     return [f"{len(delayed)} RPDO2 delayed 60 ms ({len(live)} reached the drive before the stop: "
-            f"{not_valid} not-valid drops; {len(set(covered))} seqs after it among {late} "
-            f"RPDO1/RPDO2, each one other-tag drop at its SYNC); none actuated; quick stop "
+            f"{not_valid} not-valid drops; {len(covered)} after it in judged SYNC intervals among "
+            f"{late} RPDO1/RPDO2, each one other-tag drop at its SYNC; trailing after the last "
+            f"SYNC: seqs {trailing}); none actuated; quick stop "
             f"{QS_NAMES[stops[0]['reason']]}; statusword 0x{sw:04X}; drive_flags 0x{flags:04X}; "
             f"TPDO2 applied_seq stayed 0"]
 
@@ -1136,18 +1159,26 @@ def judge_r1(obs):
     cobs = (cia301.RPDO_BASE[1] + NODE, cia301.RPDO_BASE[2] + NODE)
     t_prev = frames(obs, "device", cia301.SYNC_COB, None, t_replay)[-1][0]
     on_device = [d for _, _, d in frames(obs, "device", cobs, t_prev, t_sync)]
-    need(on_device[len(on_device) - len(replay):] == replay,
-         f"the {len(replay)} replayed frames are not the last RPDO1/RPDO2 on vcan_device before "
-         f"the SYNC")
-    extra = on_device[:len(on_device) - len(replay)]
+    # The control: one RPDO1 of the new tag, the last frame before the SYNC.
+    control = bytes.fromhex(h["control"][2])
+    need(decode("RPDO1", control)["exec_tag"] == new_tag, "the control does not carry the new tag")
+    need(on_device[-1:] == [control] and
+         on_device[len(on_device) - len(replay) - 1:-1] == replay,
+         f"the {len(replay)} replayed frames and then the control are not the last RPDO1/RPDO2 "
+         f"on vcan_device before the SYNC")
+    extra = on_device[:len(on_device) - len(replay) - 1]
     need(all(d[6:8] != new_tag.to_bytes(2, "little") for d in extra),
-         f"a frame of the new tag before the replay SYNC: {[d.hex() for d in extra]}")
+         f"a frame of the new tag before the replay: {[d.hex() for d in extra]}")
     drops = drive_records(last, "dropped", t0=t_sync, t1=t_next)
     other = sum(r["count"] for r in drops if r["drop"] == DROP_OTHER_TAG)
-    rest = [r for r in drops if r["drop"] != DROP_OTHER_TAG]
-    check(other == len(on_device) and not rest,
-          f"{len(replay)} old-tag frames replayed after {len(extra)} of the master's, {other} "
-          f"other-tag drops at the SYNC; other drops {rest}")
+    lone = sum(r["count"] for r in drops if r["drop"] == DROP_MISSING_HALF)
+    rest = [r for r in drops if r["drop"] not in (DROP_OTHER_TAG, DROP_MISSING_HALF)]
+    # With the new tag current at the SYNC, the control is a lone half, not an other-tag drop;
+    # with the tag revoked it would be one more other-tag drop and the replay would prove nothing.
+    check(other == len(on_device) - 1 and lone == 1 and not rest,
+          f"{len(replay)} old-tag frames replayed after {len(extra)} of the master's and before "
+          f"the control of the new tag: {other} other-tag drops (expected {len(on_device) - 1}), "
+          f"{lone} missing-half drop(s) for the control (expected 1); other drops {rest}")
     act_old = [r for r in drive_records(last, "actuated") if r["tag"] == old_tag]
     check(not act_old, f"old-tag seqs actuated after the restart: {[r['seq'] for r in act_old]}")
     check(not drive_records(last, "actuated", t1=t_next), "a command actuated before the stream")
@@ -1160,9 +1191,67 @@ def judge_r1(obs):
     return [f"tag {old_tag} before the kill, {new_tag} after the restart ({len(h['collisions'])} "
             f"collision(s)); {len(replay)} old-tag RPDO1/RPDO2 replayed on vcan_device (after "
             f"{len(extra)} tag-{[int.from_bytes(d[6:8], 'little') for d in extra]} frames of the "
-            f"console's master): {other} other-tag drops at the next SYNC, none actuated, TPDO2 "
+            f"console's master): {other} other-tag drops at the next SYNC, the control RPDO1 of "
+            f"the new tag a lone half (tag still current); none actuated, TPDO2 "
             f"applied_seq 0; then "
             f"pdo_stream --count {h['count_second']} actuated {len(act)}"]
 
 
 JUDGES["R1"] = judge_r1
+
+
+DELAY_TAIL_SEQS = 6  # F7: 60 ms of delay is six SYNC periods of stream.
+
+
+def judge_f7(obs):
+    """A minority of RPDO2 delayed past their deadline: each reaches the drive while its tag is
+    current and is exactly one not-valid drop at receipt; those seqs never actuate, the others
+    do (ordinary gaps), and the drive stays enabled."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    need(rules[0]["action"] == "delay" and rules[0]["every"] > 1,
+         "the rule is not a minority delay")
+    last = seqs[-1]
+    delayed = [d for _, _, d in matched[0] if decode("RPDO2", d)["exec_tag"] == tag]
+    first_rpdo2 = {}
+    for t, s, d in rpdo_seqs(obs, "host", 2, tag):
+        first_rpdo2.setdefault(s, d)
+    delayed_seqs = {s for s, d in first_rpdo2.items() if d in delayed}
+    need(len(delayed_seqs - {last}) >= len(seqs) // rules[0]["every"] - 1,
+         f"only {len(delayed_seqs)} stream seqs had their RPDO2 delayed")
+    on_device = [(t, s) for t, s, d in rpdo_seqs(obs, "device", 2, tag) if d in delayed]
+    need(len(on_device) == len(delayed), f"{len(delayed)} RPDO2 delayed, {len(on_device)} on "
+                                         f"vcan_device")
+    act = actuated_once(obs, tag)
+    t_last_act = max(r["t_ns"] for r in drive_records(obs, "actuated") if r["tag"] == tag) / 1e9
+    early = drive_records(obs, "quick_stop", t1=t_last_act)
+    check(not early, f"quick stop while streaming: {[QS_NAMES[r['reason']] for r in early]}")
+    stops = drive_records(obs, "quick_stop")
+    t_stop = stops[0]["t_ns"] / 1e9 if stops else float("inf")
+    live = [s for t, s in on_device if t < t_stop]
+    trailing = [s for t, s in on_device if t > t_stop]
+    # The stream ends, the last command expires and the drive stops: an RPDO2 delayed in the
+    # last 60 ms of the stream arrives after that stop, with the tag revoked (named, not counted
+    # as not-valid). The stop is after the last actuation (checked above).
+    tail = last - DELAY_TAIL_SEQS
+    need(all(s > tail for s in trailing),
+         f"delayed RPDO2 of seqs {trailing} reached the drive after its stop, earlier than the "
+         f"last {DELAY_TAIL_SEQS} seqs")
+    not_valid = dropped(obs, DROP_NOT_VALID)
+    check(not_valid == len(live), f"{len(live)} delayed RPDO2 reached the drive with the tag "
+                                  f"current, {not_valid} not-valid drops")
+    hit = sorted(act & (delayed_seqs - {last}))
+    check(not hit, f"delayed seqs actuated: {hit}")
+    expected = set(seqs) - delayed_seqs
+    check(expected <= act, f"non-delayed seqs not actuated: {sorted(expected - act)}")
+    gaps = dropped(obs, DROP_MISSING_HALF)
+    check(gaps >= len(delayed_seqs - {last}),
+          f"{len(delayed_seqs)} delayed seqs, only {gaps} missing-half drops (the lone RPDO1)")
+    applied_matches(obs, act)
+    return [f"{len(delayed)} stream RPDO2 delayed 60 ms (seqs {sorted(delayed_seqs)}): {len(live)} "
+            f"reached the drive with the tag current, {not_valid} not-valid drops; trailing "
+            f"after the drive's stop: {trailing}; none of those seqs actuated, the other "
+            f"{len(expected)} all actuated ({gaps} missing-half drops); no quick stop while "
+            f"streaming"]
+
+
+JUDGES["F7"] = judge_f7

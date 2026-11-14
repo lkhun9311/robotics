@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every fourth RPDO2 of node 3 held 60 ms: past its 40 ms deadline when it reaches the drive,
+# while the drive stays enabled on the others (one missing SYNC: a 20 ms gap < 30 ms timeout).
+h2d 0x303/0x7FF every 4 offset 1 delay 60

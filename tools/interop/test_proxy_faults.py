@@ -27,6 +27,7 @@ FAULTS = ROOT / "config" / "interop" / "faults"
 ARTIFACTS = ROOT / "artifacts"
 COST_FRAMES = 5000  # B10 sample size; fewer is INCONCLUSIVE.
 COST_LIMIT_S = 60
+CONTROL_SEQ = 1000  # R1: the control fragment's seq, one no stream reaches.
 
 
 def rules_text(name):
@@ -61,8 +62,13 @@ def stream_through(row, rules, capture, start_bank, start_proxy, start_peer, pee
     return observe(row, host, device, lely, bank, proxy, harness)
 
 
-def test_delay_past_deadline_is_dropped_not_actuated(capture, start_bank, start_proxy,
-                                                     start_peer, peer):
+def test_late_rpdo2_is_dropped_not_valid(capture, start_bank, start_proxy, start_peer, peer):
+    judge(stream_through("F7", rules_text("delay_some_rpdo2.rules"), capture, start_bank,
+                         start_proxy, start_peer, peer))
+
+
+def test_all_late_rpdo2_times_out_to_quick_stop(capture, start_bank, start_proxy, start_peer,
+                                                peer):
     judge(stream_through("F1", rules_text("delay_rpdo2.rules"), capture, start_bank,
                          start_proxy, start_peer, peer))
 
@@ -191,6 +197,13 @@ def test_restart_rejects_captured_old_tag_frames(capture, start_bank, start_prox
     for c, d in old:
         harness["replay"].append([raw.send(c, d), c, d.hex()])
         time.sleep(0.001)
+    # Control: one RPDO1 of the new tag (a seq the drive has not seen). While the tag is
+    # current it is held in the window and dropped as a lone half at the SYNC; were the tag
+    # revoked, it would be one more other-tag drop and the replay would prove nothing.
+    control = judges.encode("RPDO1", {"target_position": 0, "command_seq": CONTROL_SEQ,
+                                      "exec_tag": new_tag})
+    harness["control"] = [raw.send(judges.cia301.RPDO_BASE[1] + NODE, control),
+                          judges.cia301.RPDO_BASE[1] + NODE, control.hex()]
     time.sleep(0.02)
     harness["t_sync"] = raw.send(judges.cia301.SYNC_COB)
     time.sleep(0.05)
