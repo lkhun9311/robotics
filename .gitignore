@@ -9,3 +9,4 @@ __pycache__/
 # editor / tooling
 .vscode/
 .idea/
+artifacts/
