@@ -8,8 +8,14 @@
 //   hb     {node, occurred}               Lely OnHeartbeat (consumer timeout occurred/resolved)
 //   emcy   {node, code, register}         Lely OnEmcy
 //   sync   {cnt}                          Lely OnSync (the master's own SYNC)
-//   rpdo   {node, index, sub, value}      a changed value Lely decoded into its remote-mapped
-//                                         objects (statusword 0x6041, applied_seq 0x2030:02)
+//   rpdo   {node, index, sub, value}      every value Lely decoded from node N's TPDOs into its
+//                                         remote-mapped objects, in the order Lely wrote them
+//                                         (one line per mapped entry; --node N, any scenario)
+//   rpdo_unread {node, index, sub}        ... an entry the peer has no type for (a defect here)
+//   stream {node, seq, target, valid_until, tag}  the RPDO1/RPDO2 values pdo_stream wrote at a SYNC
+//   cmd    {n, line}                      console: line n read from stdin
+//   cmd_done {n, ok}                      console: line n performed (ok: the step was carried
+//                                         out; an SDO result is in its own sdo_* line before)
 //   nmt_sent {node, cs}                   an NMT command the scenario asked Lely to send
 //   cw     {node, value}                  a controlword the scenario wrote for RPDO3
 //   sdo_ok {node, op, index, sub, value}  an SDO transfer Lely's client completed
@@ -19,6 +25,7 @@
 //   scenario_failed {scenario, reason}    a step could not be performed; exit 1
 //   exit   {}                             last line
 //   lely_peer --if IF --dcf PATH --scenario NAME [--node N] [--count K] [--duration-ms MS]
+//   (console: --node is optional and only selects the node whose TPDO values are reported)
 // Scenarios (the node scenarios start when Lely reports node N booted; --duration-ms is their
 // deadline, default 15 s, after which they fail):
 //   idle               send nothing of its own until the duration ends (default: SIGTERM/SIGINT)
@@ -29,6 +36,9 @@
 //                      abort code (M3); any mismatch fails the scenario
 //   commit_and_enable  NMT Start; controlwords 0x06, 0x07 by RPDO3; the drive extension's commit
 //                      transaction through Lely's SDO client; controlword 0x0F
+//   console            the commands of lely_peer::parse_console, one per line on stdin, each
+//                      performed in order on the driver of its node; `quit`, SIGTERM/SIGINT or
+//                      the duration end it with scenario_done; a line that does not parse fails it
 //   pdo_stream         commit_and_enable, then K updates of RPDO1/RPDO2 (one per SYNC, seq + 1,
 //                      valid_until = now + 40 ms) that Lely sends as synchronous PDOs; then stop
 // Every PDO is encoded by Lely from the remote-mapped objects of the master DCF (dcfgen -r); the
@@ -42,15 +52,22 @@
 #include <lely/io2/sys/sigset.hpp>
 #include <lely/io2/sys/timer.hpp>
 // The C++ form of the NMT service API: in C++ the C header needs the types this one declares.
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <array>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <functional>
 #include <lely/co/nmt.hpp>
 #include <lely/coapp/sdo_error.hpp>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -150,6 +167,16 @@ class PeerDriver : public canopen::FiberDriver {
   PeerDriver(ev::Executor exec, canopen::AsyncMaster& master, std::uint8_t id, Run& run)
       : FiberDriver(exec, master, id), run_(run) {}
 
+  // console: performs one parsed command in a fiber of this driver, then prints cmd_done.
+  void Perform(const lely_peer::ConsoleCommand& c, std::uint64_t n) {
+    ++run_.fibers;
+    GetExecutor().post([this, c, n]() {
+      const bool ok = Do(c);
+      emit("cmd_done", "\"n\":" + std::to_string(n) + ",\"ok\":" + (ok ? "true" : "false"));
+      --run_.fibers;
+    });
+  }
+
  private:
   void OnState(canopen::NmtState st) noexcept override {
     state_ = st;
@@ -192,7 +219,14 @@ class PeerDriver : public canopen::FiberDriver {
   }
 
   // Values Lely decoded from the drive's TPDOs into the remote-mapped objects.
+  // AsyncMaster posts this to the driver's executor after Lely wrote the object (reading the
+  // value inside the master's own OnRpdoWrite stopped the event loop). Assumed, not proven: the
+  // posted task runs before the next frame is handled, so the value read is this PDO's; the M4
+  // judge compares every TPDO frame with these values, so a value from a later PDO would fail it.
   void OnRpdoWrite(std::uint16_t idx, std::uint8_t subidx) noexcept override {
+    if (id() == run_.node) {
+      Report(idx, subidx);
+    }
     const bool statusword = idx == kStatusword && subidx == 0;
     const bool applied = idx == kFeedbackExt && subidx == 2;
     if (!statusword && !applied) {
@@ -203,14 +237,33 @@ class PeerDriver : public canopen::FiberDriver {
     if (ec) {
       return;
     }
-    std::uint16_t& last = statusword ? statusword_ : applied_seq_;
     if (statusword) {
       statuswords_.push_back(value);
+      statusword_ = value;
+    } else {
+      applied_seq_ = value;
     }
-    if (value != last || (statusword && statuswords_.size() == 1)) {
-      emit("rpdo", node_field(id()) + num("index", idx) + num("sub", subidx) + num("value", value));
+  }
+
+  // One `rpdo` line per decoded entry. Types are those of our EDS for the TPDO-mapped objects.
+  void Report(std::uint16_t idx, std::uint8_t subidx) {
+    std::error_code ec;
+    std::optional<std::int64_t> value;
+    const bool u16 = (idx == kStatusword && subidx == 0) ||
+                     (idx == kFeedbackExt && (subidx == 1 || subidx == 2 || subidx == 4));
+    if (u16) {
+      value = rpdo_mapped[idx][subidx].Read<std::uint16_t>(ec);
+    } else if ((idx == 0x6064 || idx == 0x606C) && subidx == 0) {
+      value = rpdo_mapped[idx][subidx].Read<std::int32_t>(ec);
+    } else if (idx == kFeedbackExt && subidx == 3) {
+      value = rpdo_mapped[idx][subidx].Read<std::uint32_t>(ec);
     }
-    last = value;
+    const std::string where = node_field(id()) + num("index", idx) + num("sub", subidx);
+    if (value && !ec) {
+      emit("rpdo", where + num("value", *value));
+    } else {
+      emit("rpdo_unread", where);
+    }
   }
 
   // pdo_stream: one update of RPDO1/RPDO2 per SYNC; Lely sends the synchronous PDOs.
@@ -233,6 +286,8 @@ class PeerDriver : public canopen::FiberDriver {
       run_.finish(false, "writing the RPDO1/RPDO2 values: " + ec.message());
       return;
     }
+    emit("stream", node_field(id()) + num("seq", seq_) + num("target", target) +
+                       num("valid_until", until) + num("tag", tag_));
     --remaining_;
     ++sent_;
     if (enable_pending_) {
@@ -434,6 +489,56 @@ class PeerDriver : public canopen::FiberDriver {
     emit("sdo_ok", node_field(id()) + ",\"op\":\"write\"" + num("index", idx) + num("sub", sub) +
                        num("value", widen(value)));
     return true;
+  }
+
+  // One console step. A read or a write is carried out when Lely confirmed it (any result) or
+  // timed it out; it is not when the run finished first.
+  bool Do(const lely_peer::ConsoleCommand& c) {
+    using Verb = lely_peer::ConsoleCommand::Verb;
+    using Type = lely_peer::ConsoleCommand::Type;
+    switch (c.verb) {
+      case Verb::kNmt:
+        return Nmt(static_cast<canopen::NmtCommand>(c.value));
+      case Verb::kControlword:
+        return Controlword(static_cast<std::uint16_t>(c.value));
+      case Verb::kRead:
+      case Verb::kWrite:
+        break;
+      case Verb::kQuit:
+        return false;
+    }
+    const bool write = c.verb == Verb::kWrite;
+    last_sdo_ = SdoResult{};
+    switch (c.type) {
+      case Type::kU8:
+        Transfer<std::uint8_t>(c, write);
+        break;
+      case Type::kU16:
+        Transfer<std::uint16_t>(c, write);
+        break;
+      case Type::kU32:
+        Transfer<std::uint32_t>(c, write);
+        break;
+      case Type::kI8:
+        Transfer<std::int8_t>(c, write);
+        break;
+      case Type::kI16:
+        Transfer<std::int16_t>(c, write);
+        break;
+      case Type::kI32:
+        Transfer<std::int32_t>(c, write);
+        break;
+    }
+    return last_sdo_.kind != SdoResult::Kind::kCancelled;
+  }
+
+  template <typename T>
+  void Transfer(const lely_peer::ConsoleCommand& c, bool write) {
+    if (write) {
+      SdoWrite<T>(c.index, c.sub, static_cast<T>(c.value));
+    } else {
+      SdoRead<T>(c.index, c.sub);
+    }
   }
 
   // ---- scenarios ----
@@ -718,10 +823,11 @@ int run(const lely_peer::Options& opts) {
   Run run;
   run.scenario = opts.values.at("scenario");
   const bool node_scenario = is_node_scenario(run.scenario);
-  if (!node_scenario && run.scenario != "idle" && run.scenario != "emcy_watch") {
+  const bool console = run.scenario == "console";
+  if (!node_scenario && run.scenario != "idle" && run.scenario != "emcy_watch" && !console) {
     std::fprintf(stderr,
-                 "lely_peer: unknown scenario '%s' (known: idle, emcy_watch, nmt_sequence, "
-                 "sdo_suite, commit_and_enable, pdo_stream)\n",
+                 "lely_peer: unknown scenario '%s' (known: idle, emcy_watch, console, "
+                 "nmt_sequence, sdo_suite, commit_and_enable, pdo_stream)\n",
                  run.scenario.c_str());
     return 2;
   }
@@ -760,10 +866,12 @@ int run(const lely_peer::Options& opts) {
   PeerMaster master(timer, chan, opts.values.at("dcf"));
 
   std::vector<std::unique_ptr<PeerDriver>> drivers;
+  std::map<std::uint8_t, PeerDriver*> by_id;
   std::string slaves;
   bool node_assigned = false;
   for (const auto id : assigned_slaves(master)) {
     drivers.push_back(std::make_unique<PeerDriver>(exec, master, id, run));
+    by_id[id] = drivers.back().get();
     slaves += (slaves.empty() ? "" : ",") + std::to_string(id);
     node_assigned = node_assigned || id == run.node;
   }
@@ -812,15 +920,17 @@ int run(const lely_peer::Options& opts) {
     exec.post([&]() { stop_when_idle(); });
   };
   const auto counters = [&]() {
-    return run.scenario == "emcy_watch" ? num("emcy", static_cast<std::int64_t>(run.emcy))
-                                        : std::string();
+    if (run.scenario == "emcy_watch") {
+      return num("emcy", static_cast<std::int64_t>(run.emcy));
+    }
+    return console ? num("emcy", static_cast<std::int64_t>(run.emcy)) : std::string();
   };
 
   sigset.insert(SIGINT);
   sigset.insert(SIGTERM);
   sigset.submit_wait([&](int) {
     sigset.clear();
-    if (run.scenario == "emcy_watch") {
+    if (run.scenario == "emcy_watch" || console) {
       run.finish(true, counters());
     } else if (node_scenario) {
       run.finish(false, "stopped by a signal before the scenario ended");
@@ -842,11 +952,76 @@ int run(const lely_peer::Options& opts) {
     });
   }
 
+  // console: stdin is read without blocking on a 2 ms timer of the loop; each complete line is
+  // parsed and handed to its node's driver (or ends the run).
+  io::Timer console_timer(poll, exec, CLOCK_MONOTONIC);
+  std::string console_buf;
+  std::uint64_t console_lines = 0;
+  std::function<void()> console_poll = [&]() {
+    if (run.finished) {
+      return;
+    }
+    std::array<char, 512> chunk{};
+    bool eof = false;
+    for (;;) {
+      const ssize_t n = ::read(STDIN_FILENO, chunk.data(), chunk.size());
+      if (n > 0) {
+        console_buf.append(chunk.data(), static_cast<std::size_t>(n));
+        continue;
+      }
+      eof = n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+      break;
+    }
+    for (std::size_t nl = console_buf.find('\n'); nl != std::string::npos && !run.finished;
+         nl = console_buf.find('\n')) {
+      const std::string line = console_buf.substr(0, nl);
+      console_buf.erase(0, nl + 1);
+      const std::uint64_t n = ++console_lines;
+      emit("cmd",
+           "\"n\":" + std::to_string(n) + ",\"line\":\"" + lely_peer::json_escape(line) + "\"");
+      const lely_peer::ConsoleCommand c = lely_peer::parse_console(line);
+      if (!c.ok) {
+        run.finish(false, "console line " + std::to_string(n) + ": " + c.error);
+        return;
+      }
+      if (c.verb == lely_peer::ConsoleCommand::Verb::kQuit) {
+        run.finish(true, counters());
+        return;
+      }
+      const auto it = by_id.find(c.node);
+      if (it == by_id.end()) {
+        run.finish(false, "console line " + std::to_string(n) + ": node " + std::to_string(c.node) +
+                              " is not a slave in the DCF");
+        return;
+      }
+      it->second->Perform(c, n);
+    }
+    if (eof) {
+      return;  // stdin closed: no more commands; SIGTERM or the duration ends the run.
+    }
+    console_timer.settime(std::chrono::milliseconds(2));
+    console_timer.submit_wait([&](int, std::error_code ec) {
+      if (!ec) {
+        console_poll();
+      }
+    });
+  };
+  if (console) {
+    const int flags = ::fcntl(STDIN_FILENO, F_GETFL);
+    if (flags < 0 || ::fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
+      std::fprintf(stderr, "lely_peer: console: stdin: %s\n", std::strerror(errno));
+      return 1;
+    }
+  }
+
   master.Reset();
   emit("start", node_field(master.id()) + ",\"ifname\":\"" + lely_peer::json_escape(ifname) +
                     "\",\"slaves\":[" + slaves + "]");
   if (node_scenario && !node_assigned) {
     run.finish(false, "node " + std::to_string(run.node) + " is not a slave in the DCF");
+  }
+  if (console) {
+    exec.post([&]() { console_poll(); });
   }
   loop.run();
   emit("exit");

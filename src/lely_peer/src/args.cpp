@@ -151,4 +151,143 @@ std::uint32_t commit_crc(std::uint32_t attempt_id, std::uint32_t generation_lo,
   return crc32_iso_hdlc(bytes.data(), bytes.size());
 }
 
+namespace {
+
+// Decimal or 0x hex, optionally negative, in [low, high].
+bool console_number(std::string_view text, std::int64_t low, std::int64_t high, std::int64_t& out) {
+  bool negative = false;
+  if (!text.empty() && text.front() == '-') {
+    negative = true;
+    text.remove_prefix(1);
+  }
+  int base = 10;
+  if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+    base = 16;
+    text.remove_prefix(2);
+  }
+  std::uint64_t magnitude = 0;
+  const char* end = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(text.data(), end, magnitude, base);
+  if (text.empty() || ec != std::errc() || ptr != end || magnitude > (1ULL << 32U)) {
+    return false;
+  }
+  const auto value =
+      negative ? -static_cast<std::int64_t>(magnitude) : static_cast<std::int64_t>(magnitude);
+  if (value < low || value > high) {
+    return false;
+  }
+  out = value;
+  return true;
+}
+
+// Space-separated tokens; an empty token (a double, leading or trailing space) is kept so the
+// line is rejected rather than read loosely.
+std::vector<std::string_view> console_tokens(std::string_view line) {
+  std::vector<std::string_view> out;
+  if (line.empty()) {
+    return out;
+  }
+  while (true) {
+    const std::size_t space = line.find(' ');
+    out.push_back(line.substr(0, space));
+    if (space == std::string_view::npos) {
+      return out;
+    }
+    line.remove_prefix(space + 1);
+  }
+}
+
+}  // namespace
+
+ConsoleCommand parse_console(std::string_view line) {
+  using Verb = ConsoleCommand::Verb;
+  using Type = ConsoleCommand::Type;
+  ConsoleCommand c;
+  const std::vector<std::string_view> tok = console_tokens(line);
+  if (tok.empty()) {
+    c.error = "empty command";
+    return c;
+  }
+  std::size_t arity = 0;
+  if (tok[0] == "quit") {
+    c.verb = Verb::kQuit;
+    arity = 1;
+  } else if (tok[0] == "nmt") {
+    c.verb = Verb::kNmt;
+    arity = 3;
+  } else if (tok[0] == "cw") {
+    c.verb = Verb::kControlword;
+    arity = 3;
+  } else if (tok[0] == "read") {
+    c.verb = Verb::kRead;
+    arity = 5;
+  } else if (tok[0] == "write") {
+    c.verb = Verb::kWrite;
+    arity = 6;
+  } else {
+    c.error = "unknown command '" + std::string(tok[0]) + "'";
+    return c;
+  }
+  if (tok.size() != arity) {
+    c.error = "wrong argument count for '" + std::string(tok[0]) + "'";
+    return c;
+  }
+  if (c.verb == Verb::kQuit) {
+    c.ok = true;
+    return c;
+  }
+  std::int64_t node = 0;
+  if (!console_number(tok[1], 1, 127, node)) {
+    c.error = "bad node '" + std::string(tok[1]) + "'";
+    return c;
+  }
+  c.node = static_cast<std::uint8_t>(node);
+  if (c.verb == Verb::kNmt || c.verb == Verb::kControlword) {
+    const std::int64_t high = c.verb == Verb::kNmt ? 0xFF : 0xFFFF;
+    if (!console_number(tok[2], 0, high, c.value)) {
+      c.error = "bad value '" + std::string(tok[2]) + "'";
+      return c;
+    }
+    c.ok = true;
+    return c;
+  }
+  std::int64_t index = 0;
+  std::int64_t sub = 0;
+  if (!console_number(tok[2], 0, 0xFFFF, index) || !console_number(tok[3], 0, 0xFF, sub)) {
+    c.error = "bad index or sub-index";
+    return c;
+  }
+  c.index = static_cast<std::uint16_t>(index);
+  c.sub = static_cast<std::uint8_t>(sub);
+  struct Range {
+    std::string_view name;
+    Type type;
+    std::int64_t low;
+    std::int64_t high;
+  };
+  constexpr std::array<Range, 6> kTypes{{{"u8", Type::kU8, 0, 0xFF},
+                                         {"u16", Type::kU16, 0, 0xFFFF},
+                                         {"u32", Type::kU32, 0, 0xFFFF'FFFF},
+                                         {"i8", Type::kI8, -0x80, 0x7F},
+                                         {"i16", Type::kI16, -0x8000, 0x7FFF},
+                                         {"i32", Type::kI32, -0x8000'0000LL, 0x7FFF'FFFF}}};
+  const Range* range = nullptr;
+  for (const Range& r : kTypes) {
+    if (r.name == tok[4]) {
+      range = &r;
+    }
+  }
+  if (range == nullptr) {
+    c.error = "bad type '" + std::string(tok[4]) + "'";
+    return c;
+  }
+  c.type = range->type;
+  if (c.verb == Verb::kWrite && !console_number(tok[5], range->low, range->high, c.value)) {
+    c.error = "bad value '" + std::string(tok[5]) + "' for " + std::string(range->name);
+    return c;
+  }
+  c.ok = true;
+  return c;
+}
+
 }  // namespace lely_peer

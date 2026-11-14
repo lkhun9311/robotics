@@ -9,7 +9,9 @@
 
 namespace {
 
+using lely_peer::ConsoleCommand;
 using lely_peer::json_escape;
+using lely_peer::parse_console;
 using lely_peer::parse_nodes;
 using lely_peer::parse_number;
 using lely_peer::parse_options;
@@ -76,6 +78,49 @@ TEST(Crc, IsoHdlcCheckValueAndCommitLayout) {
             lely_peer::crc32_iso_hdlc(words.data(), words.size()));
   EXPECT_NE(lely_peer::commit_crc(1, 0x89AB'CDEF, 0x0123'4567, 0xDEAD'BEEF),
             lely_peer::commit_crc(2, 0x89AB'CDEF, 0x0123'4567, 0xDEAD'BEEF));
+}
+
+TEST(Console, ParsesEachVerb) {
+  const ConsoleCommand nmt = parse_console("nmt 3 129");
+  ASSERT_TRUE(nmt.ok) << nmt.error;
+  EXPECT_EQ(nmt.verb, ConsoleCommand::Verb::kNmt);
+  EXPECT_EQ(nmt.node, 3);
+  EXPECT_EQ(nmt.value, 129);
+
+  const ConsoleCommand cw = parse_console("cw 3 0x80");
+  ASSERT_TRUE(cw.ok) << cw.error;
+  EXPECT_EQ(cw.verb, ConsoleCommand::Verb::kControlword);
+  EXPECT_EQ(cw.value, 0x80);
+
+  const ConsoleCommand read = parse_console("read 2 0x1018 1 u32");
+  ASSERT_TRUE(read.ok) << read.error;
+  EXPECT_EQ(read.verb, ConsoleCommand::Verb::kRead);
+  EXPECT_EQ(read.node, 2);
+  EXPECT_EQ(read.index, 0x1018);
+  EXPECT_EQ(read.sub, 1);
+  EXPECT_EQ(read.type, ConsoleCommand::Type::kU32);
+
+  const ConsoleCommand write = parse_console("write 3 0x6060 0 i8 -2");
+  ASSERT_TRUE(write.ok) << write.error;
+  EXPECT_EQ(write.verb, ConsoleCommand::Verb::kWrite);
+  EXPECT_EQ(write.type, ConsoleCommand::Type::kI8);
+  EXPECT_EQ(write.value, -2);
+
+  const ConsoleCommand quit = parse_console("quit");
+  ASSERT_TRUE(quit.ok) << quit.error;
+  EXPECT_EQ(quit.verb, ConsoleCommand::Verb::kQuit);
+}
+
+TEST(Console, RejectsBadCommands) {
+  for (const std::string_view bad :
+       {"", "jump 3", "nmt 3", "nmt 0 1", "nmt 128 1", "nmt 3 256", "cw 3 0x10000",
+        "read 3 0x1000 0", "read 3 0x1000 0 u64", "read 3 0x10000 0 u8", "read 3 0x1000 256 u8",
+        "write 3 0x6060 0 i8 128", "write 3 0x6060 0 u8 -1", "write 3 0x6060 0 u16 70000",
+        "write 3 0x6060 0 i32 2147483648", "read 3 0x1000 0 u8 5", "quit now", "nmt 3 1 "}) {
+    const ConsoleCommand c = parse_console(bad);
+    EXPECT_FALSE(c.ok) << "'" << bad << "'";
+    EXPECT_FALSE(c.error.empty()) << "'" << bad << "'";
+  }
 }
 
 }  // namespace
