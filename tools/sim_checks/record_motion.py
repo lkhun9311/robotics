@@ -75,7 +75,7 @@ def main():
         hold(2.0)
         out = sim.follow([(4.0, TARGET)])
         assert out.succeeded, f"HOME -> TARGET failed: {out}"
-        hold(10.0)
+        hold(8.0)
         back = sim.follow([(4.0, HOME)])
         assert back.succeeded, f"TARGET -> HOME failed: {back}"
         hold(DURATION_S)
