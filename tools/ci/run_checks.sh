@@ -53,6 +53,9 @@ echo "== sanitizers (ASan + UBSan, with coverage) =="
 colcon build --base-paths src "${ASAN[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=Debug "-DRUNTIME_CORE_SANITIZE=address,undefined" \
   -DRUNTIME_CORE_COVERAGE=ON
+# Counters from an earlier run no longer match a rebuilt object (gcov "stamp mismatch"),
+# and logic_sim only runs after the report, so nothing would refresh its counters.
+find build/asan -name '*.gcda' -delete
 run_tests build/asan
 
 echo "== coverage report (reported, not gated) =="
