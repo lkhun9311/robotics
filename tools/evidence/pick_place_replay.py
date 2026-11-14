@@ -267,9 +267,16 @@ def main(argv=None):
     print_input(os.path.relpath(args.src, ROOT), RECORD_COMMAND)
     rec = load(args.src)
     kin = Kinematics()
-    problems = pick_place.failures(*judged(rec, kin))
+    reaches, heights = judged(rec, kin)
+    problems = pick_place.failures(reaches, heights)
     if problems:
         raise SystemExit(f"{args.src} fails the simulation check's conditions: {problems}")
+    for r in reaches:
+        print(f"{r.name:15s} best largest-joint error {r.best_error:.4f} rad, lowest site z {r.lowest_z:.4f} m")
+    print(f"lowest site z from PICK reached to PLACE reached {heights['pick_to_place']:.4f} m "
+          f"(object's lowest point {heights['pick_to_place'] - OBJECT_HANG:+.4f} m), while carried "
+          f"{heights['carry']:.4f} m; carried from {carried_interval(rec, kin)[0]:.3f} s to "
+          f"{carried_interval(rec, kin)[1]:.3f} s")
     draw_svg(rec, args.svg, kin)
     print(f"wrote {args.svg}")
     if args.video:
