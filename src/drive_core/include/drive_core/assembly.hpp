@@ -76,7 +76,10 @@ struct AssemblyResult {
 //   are dropped as superseded. A lone half is an ordinary gap. The window then clears.
 // - The last actuated seq advances only through mark_actuated, which the owner calls when it
 //   actually actuates the candidate: a candidate the owner drops (e.g. not Operation Enabled)
-//   leaves no trace, so the same seq may be sent again with another payload.
+//   is recorded through mark_dropped instead: its seq may be sent again with a new deadline, but
+//   its target stays bound to the seq, so an RPDO1 of that seq with another target is an
+//   integrity violation. At most kWindowSlots dropped seqs are remembered; when an older one is
+//   evicted, every seq not newer than it is dropped as stale from then on.
 // Any change of the issuer's epoch (commit, revoke, expiry, reset communication, boot) clears
 // the window and the last actuated seq. The issuer must outlive the assembler.
 class CommandAssembler {
@@ -93,6 +96,9 @@ class CommandAssembler {
   // The owner actuated `command` (a candidate of the latest on_sync): its seq and payload become
   // the last actuated. Ignored when `command` is not of the current tag.
   void mark_actuated(const Command& command);
+  // The owner dropped `command` (a candidate of the latest on_sync) without actuating it, e.g.
+  // not Operation Enabled: its target stays bound to its seq. Ignored for another tag.
+  void mark_dropped(const Command& command);
   // The owner has acted on every violation detected so far; they are no longer pending.
   void acknowledge_violation() { violation_pending_ = false; }
 
@@ -129,6 +135,14 @@ class CommandAssembler {
   std::uint64_t epoch_;
   std::array<Slot, kWindowSlots> window_{};
   std::optional<Command> last_actuated_;
+  // Targets of candidates the owner dropped (mark_dropped), by seq; and the newest evicted seq.
+  struct Dropped {
+    bool used{false};
+    std::uint16_t seq{};
+    std::int32_t target{};
+  };
+  std::array<Dropped, kWindowSlots> dropped_candidates_{};
+  std::optional<std::uint16_t> dropped_floor_;
   bool violated_{false};
   // Survives tag changes and reset(); cleared by on_sync or acknowledge_violation.
   bool violation_pending_{false};

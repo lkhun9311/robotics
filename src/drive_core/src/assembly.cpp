@@ -45,6 +45,8 @@ void CommandAssembler::reset() {
   epoch_ = issuer_.epoch();
   clear_window();
   last_actuated_.reset();
+  dropped_candidates_.fill(Dropped{});
+  dropped_floor_.reset();
   violated_ = false;
 }
 
@@ -93,6 +95,10 @@ OfferResult CommandAssembler::admit(std::uint16_t seq, bool matches_actuated) {
     ++dropped_.blocked;
     return OfferResult::kBlocked;
   }
+  if (dropped_floor_ && !runtime_core::seq16_newer(seq, *dropped_floor_)) {
+    ++dropped_.stale_seq;  // A dropped seq whose bound target is no longer remembered.
+    return OfferResult::kDroppedStaleSeq;
+  }
   if (last_actuated_) {
     if (seq == last_actuated_->command_seq) {
       if (!matches_actuated) {
@@ -120,6 +126,11 @@ OfferResult CommandAssembler::offer(const Rpdo1& fragment) {
       last_actuated_ && last_actuated_->target_position == fragment.target_position;
   if (const auto r = admit(fragment.command_seq, matches_actuated); r != OfferResult::kAccepted) {
     return r;
+  }
+  for (const Dropped& d : dropped_candidates_) {
+    if (d.used && d.seq == fragment.command_seq && d.target != fragment.target_position) {
+      return violate();  // Another target for a seq whose target is bound by a dropped candidate.
+    }
   }
   Slot* slot = slot_for(fragment.command_seq);
   if (slot == nullptr) {
@@ -162,6 +173,36 @@ void CommandAssembler::mark_actuated(const Command& command) {
   if (command.exec_tag != 0 && command.exec_tag == issuer_.current()) {
     last_actuated_ = command;
   }
+}
+
+void CommandAssembler::mark_dropped(const Command& command) {
+  follow_issuer();
+  if (command.exec_tag == 0 || command.exec_tag != issuer_.current()) {
+    return;
+  }
+  Dropped* free = nullptr;
+  Dropped* oldest = &dropped_candidates_.front();
+  for (Dropped& d : dropped_candidates_) {
+    if (!d.used) {
+      free = free != nullptr ? free : &d;
+      continue;
+    }
+    if (d.seq == command.command_seq) {
+      return;  // Same seq again: its target already matched (offer checked it).
+    }
+    if (!oldest->used || runtime_core::seq16_newer(oldest->seq, d.seq)) {
+      oldest = &d;
+    }
+  }
+  if (free == nullptr) {
+    // Full (so `oldest` is a used entry): the oldest gives way, and every seq up to it becomes
+    // stale.
+    if (!dropped_floor_ || runtime_core::seq16_newer(oldest->seq, *dropped_floor_)) {
+      dropped_floor_ = oldest->seq;
+    }
+    free = oldest;
+  }
+  *free = Dropped{true, command.command_seq, command.target_position};
 }
 
 AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {

@@ -266,7 +266,9 @@ void Drive::emit_drops(const Counters& dropped, runtime_core::MonoTime now) {
 }
 
 void Drive::apply_inhibit() {
-  cia402_.set_operation_enable_inhibited(policy_latched_ || drive_unavailable_);
+  // Spec §8.4: no entry into Operation Enabled while the latest stop is unconfirmed either.
+  cia402_.set_operation_enable_inhibited(policy_latched_ || drive_unavailable_ ||
+                                         stop_unconfirmed_);
 }
 
 void Drive::start_stop_monitor(runtime_core::MonoTime now) {
@@ -274,7 +276,8 @@ void Drive::start_stop_monitor(runtime_core::MonoTime now) {
   stop_started_ = now;
   quiet_ticks_ = 0;
   stop_confirmed_ = false;
-  stop_unconfirmed_ = false;
+  stop_deadline_passed_ = false;
+  // stop_unconfirmed_ stays: only a stop confirmed by observation clears it.
 }
 
 void Drive::hold_unavailable_fault() {
@@ -301,10 +304,10 @@ void Drive::after_transition(Cia402State before, runtime_core::MonoTime now) {
     sync_ref_ = now;
     command_ref_ = now;
     // Re-entry (transition 16 after a controlword quick stop) abandons the stop: its monitor
-    // must not judge the joint that now moves again.
+    // must not judge the joint that now moves again. stop_unconfirmed_ cannot be set here: it
+    // inhibits every entry into Operation Enabled.
     stop_active_ = false;
     stop_confirmed_ = false;
-    stop_unconfirmed_ = false;
   }
   if (after == Cia402State::kQuickStopActive || after == Cia402State::kFaultReactionActive) {
     start_stop_monitor(now);
@@ -367,12 +370,14 @@ std::vector<cc::Frame> Drive::on_sync(runtime_core::MonoTime now) {
       e.drop = DropReason::kNotEnabled;
       e.count = 1;
       emit(e);
+      assembler_.mark_dropped(cmd);  // Its target stays bound to its seq.
     } else if (!validity_open(cmd.valid_until_us, now_us, kLeaseUs)) {
       // D9: validity is checked again when the candidate is actuated.
       DriveEvent e{DriveEventKind::kDropped, now};
       e.drop = DropReason::kNotValid;
       e.count = 1;
       emit(e);
+      assembler_.mark_dropped(cmd);
     } else {
       actuated_ = cmd;
       assembler_.mark_actuated(cmd);  // Only an actuated command advances the last seq (D8).
@@ -434,14 +439,18 @@ void Drive::tick(runtime_core::MonoTime now) {
     if (quiet_ticks_ >= kQuietTicks) {
       stop_active_ = false;
       stop_confirmed_ = true;
+      stop_unconfirmed_ = false;  // Observed at rest: the joint is stopped after all.
+      apply_inhibit();
       emit(DriveEvent{DriveEventKind::kStopConfirmed, now});
       if (cia402_.state() == Cia402State::kFaultReactionActive) {
         const Cia402State before = cia402_.state();
         cia402_.fault_reaction_done();
         after_transition(before, now);
       }
-    } else if (!stop_unconfirmed_ && now - stop_started_ >= kStopDeadline) {
+    } else if (!stop_deadline_passed_ && now - stop_started_ >= kStopDeadline) {
+      stop_deadline_passed_ = true;
       stop_unconfirmed_ = true;  // The monitor keeps watching; a later rest is still reported.
+      apply_inhibit();
       emit(DriveEvent{DriveEventKind::kStopUnconfirmed, now});
       if (cia402_.state() == Cia402State::kFaultReactionActive) {
         // The reaction cannot bring the joint to rest (e.g. a stuck joint): it ends here, and
@@ -513,6 +522,7 @@ void Drive::inject_torque_loss(runtime_core::MonoTime now) {
   stop_active_ = false;
   stop_confirmed_ = false;
   stop_unconfirmed_ = true;
+  apply_inhibit();
   DriveEvent fault{DriveEventKind::kFault, now};
   fault.fault_code = kErrorTorqueLoss;
   emit(fault);

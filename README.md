@@ -102,7 +102,14 @@ What the contract fixes:
 - SYNC timeline: RPDOs received between SYNC k and k+1 are actuated at SYNC k+1; TPDOs are
   sampled at SYNC k. Loss of SYNC or of commands, an integrity violation or leaving NMT
   Operational starts a quick stop.
-- Quick stop is an achieved deceleration ramp, not a switch of state.
+- Quick stop is an achieved deceleration ramp, not a switch of state. A stop not confirmed at
+  rest within 0.112 s is reported unconfirmed (a fault reaction then ends in Fault). While the
+  latest stop is unconfirmed, the drive refuses every entry into Operation Enabled, also after
+  Fault Reset and a new commit; only observing the joint at rest (below 0.01 rad/s for 5 ticks)
+  clears it.
+- A command pair dropped because the drive was not Operation Enabled binds its target to its
+  sequence number: the same sequence may be sent again with a new deadline, but another target
+  for it is an integrity violation.
 - A policy stop sets a latch that survives reset node and reset communication and clears only
   through an explicit policy reset.
 - Fault layers separate controlled faults from torque loss; after torque loss the drive stays in
@@ -183,7 +190,7 @@ Decision index (the `D<n>` references in code comments):
 | D7 | RPDOs received between SYNC k and k+1 actuate at SYNC k+1; TPDOs are sampled at SYNC k; no SYNC for 3 T_bus stops; a SYNC sooner than T_bus/2 is ignored |
 | D8 | Fragments pair on equal tag and seq; the newest complete pair actuates; two payloads for one seq are an integrity violation, detected at ingestion, stopping at the next W tick |
 | D9 | Validity is checked at actuation and every W tick; no actuated command for 30 ms in Operation Enabled stops |
-| D10 | Quick stop: option 6, a_stop 10 rad/s^2 achieved exactly; stop confirmed after 5 quiet ticks, unconfirmed after 0.112 s |
+| D10 | Quick stop: option 6, a_stop 10 rad/s^2 achieved exactly; stop confirmed after 5 quiet ticks, unconfirmed after 0.112 s; no enable while unconfirmed |
 | D11 | Policy stops latch until an explicit policy reset after a confirmed stop; normal disable needs no reset; torque loss is Fault without a ramp |
 | D12 | NMT service matrix; reset communication keeps boot_id and the tag allocator; leaving Operational while Operation Enabled is a policy stop |
 | D13 | TPDO1-3 carry statusword, position, velocity, sample time and the applied seq and tag, joined by sample_seq |

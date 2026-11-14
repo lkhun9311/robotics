@@ -430,4 +430,25 @@ TEST(Assembly, AcknowledgedViolationIsNotReportedAgain) {
   EXPECT_FALSE(d.assembler.integrity_violation());
 }
 
+TEST(Assembly, DroppedTargetsStayBoundAndEvictedSeqsTurnStale) {
+  Drive d;
+  // Nine candidates, each dropped by the owner: seqs 1..9, target = 10 * seq.
+  for (std::uint16_t seq = 1; seq <= 9; ++seq) {
+    EXPECT_EQ(d.assembler.offer(r1(d.tag, seq, 10 * seq)), OfferResult::kAccepted);
+    EXPECT_EQ(d.assembler.offer(r2(d.tag, seq, kNow + 20'000)), OfferResult::kAccepted);
+    const auto result = d.assembler.on_sync(kNow);
+    ASSERT_TRUE(result.command.has_value());
+    d.assembler.mark_dropped(*result.command);
+  }
+  // Seq 1 was evicted (eight remembered): it and anything older are stale now.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 10)), OfferResult::kDroppedStaleSeq);
+  // A remembered seq takes its own target again with a new deadline, and nothing else.
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 2, 20)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r2(d.tag, 2, kNow + 30'000)), OfferResult::kAccepted);
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 9, 91)), OfferResult::kIntegrityViolation);
+  // A new tag forgets all of it.
+  d.tag = d.commit();
+  EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 11)), OfferResult::kAccepted);
+}
+
 }  // namespace

@@ -259,7 +259,10 @@ class Drive {
   runtime_core::MonoTime stop_started_{};
   int quiet_ticks_{0};
   bool stop_confirmed_{false};
+  // Set when a stop misses its deadline (or on torque loss); it inhibits every entry into
+  // Operation Enabled and clears only when a stop is confirmed by observation (D10, spec §8.4).
   bool stop_unconfirmed_{false};
+  bool stop_deadline_passed_{false};  // The current stop's deadline was already reported.
 };
 
 }  // namespace drive_core

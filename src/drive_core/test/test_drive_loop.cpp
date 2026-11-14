@@ -801,6 +801,58 @@ TEST(Integrity, ResendOfPairDroppedWhileNotEnabledIsAccepted) {
   EXPECT_EQ(l.drive.actuated()->command_seq, l.seq);
 }
 
+// Switched On with a tag; one complete pair (seq 1, target `target`) evaluated and dropped as not
+// enabled; then Enable Operation. Returns the dropped pair's deadline.
+std::uint32_t drop_one_pair_then_enable(Loop& l, std::int32_t target) {
+  l.cw(0x06);
+  l.cw(0x07);
+  l.commit();
+  l.sync();
+  ++l.seq;
+  const std::uint32_t until = to_wire_us(l.now() + milliseconds(48));
+  l.rpdo1(l.seq, target);
+  l.rpdo2(l.seq, until);
+  l.period(false);
+  EXPECT_EQ(l.dropped(DropReason::kNotEnabled), 1U);
+  l.cw(0x0F);
+  EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
+  l.tick();
+  return until;
+}
+
+TEST(Integrity, ResendOfDroppedSeqWithAnotherTargetIsAViolation) {
+  // The target of a dropped candidate stays bound to its seq: the seq may be sent again with a
+  // new deadline, but never with another target.
+  Loop l;
+  drop_one_pair_then_enable(l, kFar);
+  l.rpdo1(l.seq, kFar - 1);
+  EXPECT_EQ(l.count(DriveEventKind::kIntegrity), 1U);
+  l.rpdo2(l.seq, to_wire_us(l.now() + milliseconds(48)));
+  l.ticks(4);
+  l.sync();
+  EXPECT_EQ(l.count(DriveEventKind::kActuated), 0U);
+  EXPECT_TRUE(l.drive.policy_latched());
+  EXPECT_EQ(l.stop_reason(), QuickStopReason::kIntegrity);
+}
+
+TEST(Integrity, DelayedCopyOfDroppedTargetIsTheOnlyTargetForItsSeq) {
+  // The re-review sequence: after the drop, a delayed copy of RPDO1(s, A) arrives, the host's
+  // RPDO1(s, B) is lost and its fresh RPDO2(s, d2) arrives. A and d2 pair: A is the one target
+  // the drive accepts for s, so this is what a conforming host (which re-sends s only with A)
+  // asked for. When B shows up later it is a second payload for an actuated seq: a violation.
+  Loop l;
+  drop_one_pair_then_enable(l, kFar);
+  l.rpdo1(l.seq, kFar);  // The delayed copy.
+  l.rpdo2(l.seq, to_wire_us(l.now() + milliseconds(48)));
+  l.ticks(4);
+  l.sync();
+  ASSERT_TRUE(l.drive.actuated().has_value());
+  EXPECT_EQ(l.drive.actuated()->target_position, kFar);
+  l.rpdo1(l.seq, kFar - 1);  // B, late.
+  EXPECT_EQ(l.count(DriveEventKind::kIntegrity), 1U);
+  EXPECT_FALSE(l.drive.actuated().has_value());
+}
+
 TEST(Lifetime, StreamPastTagLifetimeEndsInTimeoutStop) {
   // D3: a tag lives at most 5 min, even while commands stream. Once it is revoked, every
   // fragment is of another tag, nothing actuates and the command timeout stops the drive.
@@ -1052,6 +1104,42 @@ TEST(Fault, StuckJointFaultReactionEndsAtDeadline) {
   EXPECT_FALSE(l.drive.stop_confirmed());
   EXPECT_EQ(l.count(DriveEventKind::kStopUnconfirmed), 1U);
   EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+}
+
+TEST(Fault, UnconfirmedStopRefusesEnableUntilObservedAtRest) {
+  // Spec §8.4: no Enable Operation while the latest stop is unconfirmed. A stuck fault reaction
+  // ends in Fault with stop_unconfirmed; Fault Reset and the full rearm must not re-enable, and
+  // nothing but an observed rest clears the flag.
+  Loop l;
+  l.run_at_vmax();
+  l.drive.inject_stuck_joint(true);
+  l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+  l.ticks(static_cast<int>(drive_core::kStopDeadline.ns / kW.ns));
+  ASSERT_EQ(l.state(), Cia402State::kFault);
+  ASSERT_TRUE(l.drive.stop_unconfirmed());
+  EXPECT_FALSE(l.drive.policy_latched());  // A recoverable fault sets no latch.
+  l.cw(0x80);                              // Fault Reset.
+  ASSERT_EQ(l.state(), Cia402State::kSwitchOnDisabled);
+  l.cw(0x06);
+  l.cw(0x07);
+  l.commit();
+  l.cw(0x0F);
+  EXPECT_EQ(l.state(), Cia402State::kSwitchedOn) << "enabled with an unconfirmed stop";
+  EXPECT_TRUE(l.drive.stop_unconfirmed());
+  l.ticks(20);  // Still stuck: still refused.
+  l.cw(0x0F);
+  EXPECT_EQ(l.state(), Cia402State::kSwitchedOn);
+  // The joint frees and brakes; once it is observed at rest for five ticks, the flag clears.
+  l.drive.inject_stuck_joint(false);
+  for (int i = 0; i < 200 && l.drive.stop_unconfirmed(); ++i) {
+    l.tick();
+  }
+  EXPECT_FALSE(l.drive.stop_unconfirmed());
+  EXPECT_TRUE(l.drive.stop_confirmed());
+  EXPECT_LT(std::llabs(l.drive.joint().velocity_nrad_s), drive_core::kQuietVelocityNradS);
+  EXPECT_EQ(l.drive.drive_flags(), 0U);
+  l.cw(0x0F);
+  EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
 }
 
 TEST(Constants, LeaseIsTheE1Bound) {
