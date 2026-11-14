@@ -146,7 +146,17 @@ def test_pick_place_height_plot_draws_mujocos_site_height_per_sample(pick_place_
         _, arrive, leave = next(x for x in pick_place_rec["schedule"] if x[0] == name)
         return min((z, t) for t, z in zip(data["t"], data["site_z"]) if arrive <= t <= leave + 0.2)[1]
     assert data["carried"] == (lowest("PICK"), lowest("PLACE"))
-    assert data["lowest_carry"] >= data["carry_min_z"]
+    assert data["lowest_lift_to_place_approach"] >= data["carry_min_z"]
+
+
+def test_judged_pick_to_place_window_covers_the_whole_carried_interval(pick_place_rec, kin):
+    """The window the check judges for table penetration (and the README and the plot report)
+    must include every sample at which the ball is drawn carried, up to its release."""
+    attach, release = pick_place_replay.carried_interval(pick_place_rec, kin)
+    carried = [kin.site(dict(zip(pick_place_rec["joints"], row[1:])))[0][2]
+               for row in pick_place_rec["samples"] if attach <= row[0] <= release]
+    _, heights = pick_place_replay.judged(pick_place_rec, kin)
+    assert carried and heights["pick_to_place"] <= min(carried), (heights["pick_to_place"], min(carried))
 
 
 def test_drawn_object_rests_rides_with_the_tool_only_while_carried_then_rests(pick_place_rec, kin):

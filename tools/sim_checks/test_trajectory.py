@@ -177,7 +177,8 @@ def test_pick_place_trajectory_reaches_each_waypoint(sim):
     for x in reaches:
         print(f"{x.name}: {x.samples} samples in the dwell, best largest-joint error {x.best_error:.4f} rad, "
               f"reached at {x.reached_s} s, lowest site z {x.lowest_z} m at {x.lowest_s} s")
-    print(f"lowest site z: PICK to PLACE {heights.get('pick_to_place')} m, carry {heights.get('carry')} m")
+    print(f"lowest site z: PICK reached to the release in the PLACE dwell {heights.get('pick_to_place')} m, "
+          f"LIFT to PLACE_APPROACH {heights.get('carry')} m")
     missed = {x.name: round(x.best_error, 4) for x in reaches if x.reached_s is None}
     assert not missed, f"waypoints not reached within {GOAL_TOLERANCE} rad during their dwell: {missed}"
     by = {x.name: x for x in reaches}
@@ -187,8 +188,8 @@ def test_pick_place_trajectory_reaches_each_waypoint(sim):
             f"{pick_place.GRASP_MAX_Z} m: the object would not come down to the table")
     lowest = heights["pick_to_place"] - OBJECT_HANG
     assert lowest >= TABLE_Z - pick_place.CONTACT_ALLOWANCE, (
-        f"between PICK and PLACE the object's lowest point reaches z {lowest:.4f} m, more than "
+        f"between PICK and the release in the PLACE dwell the object's lowest point reaches z {lowest:.4f} m, more than "
         f"{pick_place.CONTACT_ALLOWANCE} m into the table")
     assert heights["carry"] >= pick_place.CARRY_MIN_Z, (
-        f"the carried object dips to site z {heights['carry']:.4f} m, below {pick_place.CARRY_MIN_Z} m")
+        f"from LIFT to PLACE_APPROACH the site dips to z {heights['carry']:.4f} m, below {pick_place.CARRY_MIN_Z} m")
     _go_home(sim)

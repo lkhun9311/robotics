@@ -33,7 +33,8 @@ CARRY_MIN_Z = 0.20
 # PICK and PLACE bring the object down to the table: during their dwell the site comes at least
 # this low (the object's lowest point within 0.02 m of the table; the waypoints aim at 0.01 m).
 GRASP_MAX_Z = TABLE_Z + OBJECT_HANG + 0.02
-# Between PICK and PLACE the object may touch the table but not go into it by more than this.
+# From PICK reached to the release in the PLACE dwell the object may touch the table but not go
+# into it by more than this.
 CONTACT_ALLOWANCE = 0.01
 
 
@@ -58,8 +59,8 @@ class Reach:
 def judge(samples, sent, site_z, schedule=SCHEDULE):
     """`samples`: [(stamp s, joint -> position)] in stamp order; `sent`: stamp of the send;
     `site_z(positions)`: MuJoCo's site height. Returns (per-waypoint Reach list, {window: min
-    site z}) with windows "pick_to_place" (PICK reached to PLACE reached) and "carry" (LIFT reached
-    to PLACE_APPROACH reached). A window whose ends were not reached is absent."""
+    site z}) with windows "pick_to_place" (PICK reached to the lowest sample of the PLACE dwell, the
+    release) and "carry" (LIFT reached to PLACE_APPROACH reached). A window whose ends were not reached is absent."""
     rel = [(s - sent, p) for s, p in samples]
     reaches = []
     for name, arrive, leave in schedule:
@@ -74,9 +75,13 @@ def judge(samples, sent, site_z, schedule=SCHEDULE):
     for r in reaches:
         by.setdefault(r.name, r)  # the first visit: the demo's retreat revisits PLACE_APPROACH
     heights = {}
-    for key, a, b in (("pick_to_place", "PICK", "PLACE"), ("carry", "LIFT", "PLACE_APPROACH")):
+    # "pick_to_place" ends at the release instant (the lowest sample of the PLACE dwell, where the
+    # replay render lets go of the ball), not at PLACE reached: the arm is still descending then.
+    windows = (("pick_to_place", "PICK", "PLACE", lambda r: r.lowest_s),
+               ("carry", "LIFT", "PLACE_APPROACH", lambda r: r.reached_s))
+    for key, a, b, end in windows:
         if a in by and b in by and by[a].reached_s is not None and by[b].reached_s is not None:
-            zs = [site_z(p) for t, p in rel if by[a].reached_s <= t <= by[b].reached_s]
+            zs = [site_z(p) for t, p in rel if by[a].reached_s <= t <= end(by[b])]
             heights[key] = min(zs) if zs else None
     return reaches, heights
 

@@ -115,7 +115,7 @@ def plot_data(rec, kin):
     return {"t": t, "site_z": site_z, "object_low": low,
             "dwells": [tuple(x) for x in rec["schedule"]], "carried": carried_interval(rec, kin),
             "carry_min_z": pick_place.CARRY_MIN_Z, "table_z": TABLE_Z,
-            "lowest_pick_to_place": heights["pick_to_place"], "lowest_carry": heights["carry"]}
+            "lowest_pick_to_release": heights["pick_to_place"], "lowest_lift_to_place_approach": heights["carry"]}
 
 
 def draw_svg(rec, out, kin):
@@ -138,15 +138,15 @@ def draw_svg(rec, out, kin):
     ax.axhline(d["table_z"], color=INK, linewidth=1.0)
     ax.text(d["t"][-1], d["table_z"] + 0.006, "table (floor plane, z 0) ", color=INK, ha="right", fontsize=8)
     ax.axhline(d["carry_min_z"], color=RED, linewidth=1.0, linestyle="--")
-    ax.text(d["t"][-1], d["carry_min_z"] + 0.006, f"carry floor {d['carry_min_z']} m (sim check) ", color=RED,
-            ha="right", fontsize=8)
+    ax.text(0.15, d["carry_min_z"] - 0.008, f"LIFT to PLACE_APPROACH floor {d['carry_min_z']} m (sim check)",
+            color=RED, ha="left", va="top", fontsize=8)
     ax.set_xlim(0, d["t"][-1])
     ax.set_ylim(-0.11, 0.64)
     ax.set_xlabel("simulation time since the goal was sent (s); grey: waypoint dwells", color=INK)
     ax.set_ylabel("height (m)", color=INK)
     ax.set_title("E2 pick_place demo: recorded MuJoCo joint positions through MuJoCo's kinematics\n"
-                 f"lowest site point PICK to PLACE {d['lowest_pick_to_place']:.4f} m, while carried "
-                 f"{d['lowest_carry']:.4f} m; no grasp physics", color=INK, fontsize=10.5)
+                 f"lowest site point PICK to release {d['lowest_pick_to_release']:.4f} m, LIFT to PLACE_APPROACH "
+                 f"{d['lowest_lift_to_place_approach']:.4f} m; no grasp physics", color=INK, fontsize=10.5)
     ax.legend(loc="upper left", fontsize=8, frameon=False)
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
@@ -273,8 +273,8 @@ def main(argv=None):
         raise SystemExit(f"{args.src} fails the simulation check's conditions: {problems}")
     for r in reaches:
         print(f"{r.name:15s} best largest-joint error {r.best_error:.4f} rad, lowest site z {r.lowest_z:.4f} m")
-    print(f"lowest site z from PICK reached to PLACE reached {heights['pick_to_place']:.4f} m "
-          f"(object's lowest point {heights['pick_to_place'] - OBJECT_HANG:+.4f} m), while carried "
+    print(f"lowest site z from PICK reached to the release in the PLACE dwell {heights['pick_to_place']:.4f} m "
+          f"(object's lowest point {heights['pick_to_place'] - OBJECT_HANG:+.4f} m), from LIFT to PLACE_APPROACH "
           f"{heights['carry']:.4f} m; carried from {carried_interval(rec, kin)[0]:.3f} s to "
           f"{carried_interval(rec, kin)[1]:.3f} s")
     draw_svg(rec, args.svg, kin)

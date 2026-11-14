@@ -85,14 +85,14 @@ The simulation check `test_pick_place_trajectory_reaches_each_waypoint` sends th
 judges the 500 Hz MuJoCo joint positions: every waypoint is reached within 0.05 rad during its
 dwell; by the `attachment_site` height from MuJoCo's own kinematics, the site comes low enough at
 PICK and PLACE for the ball to be within 0.02 m of the table, the ball never goes more than 0.01 m
-into the table between them, and the site stays above 0.20 m from LIFT to PLACE_APPROACH. From the
+into the table from PICK until its release at the lowest point of the PLACE dwell, and the site stays above 0.20 m from LIFT to PLACE_APPROACH. From the
 committed recording (100 Hz):
 
     python3 tools/evidence/pick_place_replay.py           # prints the values, redraws the SVG
     python3 tools/evidence/pick_place_replay.py --video   # also renders the MP4 and the GIF
 
 the largest joint error at its best point in each dwell was 0.0081 to 0.0122 rad; the lowest site
-point between PICK and PLACE was 0.0875 m, which puts the ball's lowest point 0.0025 m above the
+point from PICK to the release was 0.0870 m, which puts the ball's lowest point 0.0020 m above the
 table; from LIFT to PLACE_APPROACH the site stayed at or above 0.2436 m. The script prints the command that
 records the trajectory again. The generic pytest stage checks that the recording is of the current
 waypoints and passes the check's conditions, that the plot draws MuJoCo's site height for every
