@@ -94,10 +94,15 @@ def render(dictionary: od.ObjectDictionary, source_name: str) -> str:
     emcy = dictionary.entry(0x1014, 0).default()
     if sync.node_relative or not emcy.node_relative:
         raise ValueError("expected an absolute SYNC COB-ID (0x1005) and a node-relative EMCY COB-ID (0x1014)")
+    # Flag bits (31 invalid, 30 SYNC producer, 29 extended frame) are not part of an identifier;
+    # refuse them instead of masking them away.
+    for label, value in (("SYNC COB-ID 0x1005", sync), ("EMCY COB-ID 0x1014", emcy)):
+        if value.value & ~0x7FF:
+            raise ValueError(f"{label} {value.value:#x} is not a plain 11-bit identifier")
     lines += [
         "// Service identifiers (0x1005 SYNC, 0x1014 EMCY; EMCY adds the node-ID).",
-        f"inline constexpr std::uint16_t kSyncCobId = {_hex(sync.value & 0x7FF, 3)};",
-        f"inline constexpr std::uint16_t kEmcyCobIdBase = {_hex(emcy.value & 0x7FF, 3)};",
+        f"inline constexpr std::uint16_t kSyncCobId = {_hex(sync.value, 3)};",
+        f"inline constexpr std::uint16_t kEmcyCobIdBase = {_hex(emcy.value, 3)};",
         "",
         "namespace addr {",
     ]
@@ -170,7 +175,11 @@ def main(argv) -> int:
         for error in errors:
             print(f"{eds}: {error}", file=sys.stderr)
         return 1
-    text = render(dictionary, eds.name)
+    try:
+        text = render(dictionary, eds.name)
+    except ValueError as error:
+        print(f"{eds}: {error}", file=sys.stderr)
+        return 1
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_text(text)

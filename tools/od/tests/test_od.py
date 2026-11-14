@@ -109,6 +109,13 @@ EXPECTED = {
     0x6085: {0: (U32, "rw", 10_000_000, False)},
 }
 
+# Value limits (LowLimit, HighLimit) the drive enforces on SDO writes; every other entry has
+# none. 0x6060: cyclic synchronous position is the only mode; 0x2015: policy_reset is 0 or 1.
+LIMITS = {
+    (0x6060, 0): (8, 8),
+    (0x2015, 0): (0, 1),
+}
+
 # D4 and D13: (kind, number) -> (COB-ID base added to the node-ID, transmission type,
 # mapping as (index, sub, bits) in order, total bits).
 PDOS = {
@@ -147,6 +154,9 @@ def test_object_entries(dictionary, index):
             assert entry.default() == od.Value(default[0], node_relative=True), where
         else:
             assert entry.default() == od.Value(default, node_relative=False), where
+        low, high = LIMITS.get((index, sub), (None, None))
+        assert entry.low() == (None if low is None else od.Value(low)), where
+        assert entry.high() == (None if high is None else od.Value(high)), where
 
 
 @pytest.mark.parametrize("key", sorted(PDOS), ids=lambda k: f"{k[0]}{k[1]}")

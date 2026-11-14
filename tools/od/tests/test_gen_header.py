@@ -130,3 +130,18 @@ def test_generator_refuses_an_invalid_eds(tmp_path):
     assert result.returncode != 0
     assert "not RPDO-mappable" in result.stderr
     assert not out.exists()
+
+
+@pytest.mark.parametrize("flags", [0x40000000, 0x80000000], ids=["producer_bit30", "invalid_bit31"])
+def test_generator_refuses_flag_bits_in_the_sync_cob_id(tmp_path, flags):
+    cfg = defects._read()
+    cfg["1005"]["DefaultValue"] = f"0x{flags | 0x80:08X}"
+    broken = tmp_path / "sync_flags.eds"
+    with broken.open("w") as f:
+        cfg.write(f)
+    out = tmp_path / "out.hpp"
+    result = subprocess.run([sys.executable, str(SCRIPT), str(broken), str(out)],
+                            capture_output=True, text=True)
+    assert result.returncode == 1, result.stderr
+    assert "SYNC COB-ID 0x1005" in result.stderr and "not a plain 11-bit identifier" in result.stderr
+    assert not out.exists()
