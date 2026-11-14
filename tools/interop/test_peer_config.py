@@ -226,7 +226,8 @@ def test_master_sends_no_sdo_download_to_const_objects(start_probe, start_peer, 
     """Whole run with SIGKILL and restart of the slaves: Lely sends only expedited upload requests
     of 0x1000:00 (12 = six nodes x two boots), no download. After the restart each node's
     boot-up message makes Lely run the 'boot slave' process again (a second `boot` event), with
-    no NMT frame of its own."""
+    no NMT frame of its own; the slaves stay 0x00/0x7F. With start_nodes: true the re-boot sent
+    000#0101..0106 about 0.35 s after SIGKILL and the slaves went to 0x05: both asserts catch it."""
     cap = capture()
     probe = start_probe()
     peer = start_peer()
@@ -256,6 +257,14 @@ def test_master_sends_no_sdo_download_to_const_objects(start_probe, start_peer, 
         for r in requests).items()))
     assert [r for r in downloads if r[3] in CONST_OBJECTS] == [], downloads
     assert downloads == [], f"the master wrote objects: {downloads}"
+    # The re-boot after the restart neither starts nor resets: no NMT frame from SIGKILL on, and
+    # every restarted slave stays in boot-up/Pre-operational.
+    after_kill = [fmt(f) for f in frames if f[1] == wire.NMT_COB and f[0] >= t_kill]
+    assert after_kill == [], f"NMT after SIGKILL or during the re-boot: {after_kill}"
+    for n in NODES:
+        states = [s for t, s in heartbeats(frames, n) if t >= t_restart]
+        assert states, f"INCONCLUSIVE: no heartbeat of node {n} after the restart"
+        assert set(states) <= {BOOT_UP, PRE_OPERATIONAL}, (n, sorted(set(states)))
 
 
 # ---------------------------------------------------------------------------------------------
