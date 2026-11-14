@@ -24,7 +24,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 from common import (MEDIA, NODE, cob, decode, drive_records, frames, load_recording,  # noqa: E402
-                    print_input, recording_command, rpdo_of_tag, stream_tag, wire)
+                    print_input, recording_command, rpdo_of_tag, stream_tag, svg_metadata,
+                    wire)
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#d9d8d3"
 BLUE, ORANGE, AQUA, VIOLET, RED, GRAY = ("#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#e34948",
@@ -45,8 +46,9 @@ LANE_NAMES = {
 }
 STORY = {
     "f1": "No pair completes: the lone RPDO1s are dropped as missing halves until the command "
-          "timeout stops the drive; the stop revokes the tag, so every later fragment "
-          "(the late RPDO2s included) is an other-tag drop.",
+          "timeout stops the drive; the stop revokes the tag, so a later fragment (a late RPDO2 "
+          "included) that a SYNC closes on is an other-tag drop; frames after the bus's last "
+          "SYNC are never closed and are named by the judge as trailing.",
     "f7": "A held RPDO2 reaches the drive past its deadline while the tag is current: dropped "
           "not valid, and its RPDO1 alone was dropped as a missing half; that seq is never "
           "actuated, the others are.",
@@ -65,7 +67,10 @@ def rule_lines(obs):
     return [ln for ln in obs["harness"]["rules"].splitlines() if ln and not ln.startswith("#")]
 
 
-def panel(ax, row):
+def panel_data(row):
+    """Everything a panel plots, as data: {tag, rules, syncs: [x], marks: [{lane, x, kind,
+    label}], states: [(from x, to x, CiA 402 state)], arrows: [(host x, device x, seq)]}, x in
+    ms since the stream's first RPDO1 on vcan_device, only what lies in [T0, T1]."""
     obs = load_recording(row)
     tag = stream_tag(obs)
     r1_dev = rpdo_of_tag(obs, "device", "RPDO1", tag)
@@ -73,64 +78,45 @@ def panel(ax, row):
     r2_dev = rpdo_of_tag(obs, "device", "RPDO2", tag)
     t0 = r1_dev[0][0]
     within = lambda x: T0 <= x <= T1  # noqa: E731
-
+    out = {"tag": tag, "rules": rule_lines(obs), "syncs": [], "marks": [], "states": [],
+           "arrows": []}
     sync = wire.Eds().sync_cob_id()
-    for t, _, _ in frames(obs, "device", {sync}):
-        if within(ms(t, t0)):
-            ax.axvline(ms(t, t0), color=GRID, linewidth=0.8, zorder=0)
+    out["syncs"] = [ms(t, t0) for t, _, _ in frames(obs, "device", {sync}) if within(ms(t, t0))]
+
+    def mark(lane, x, kind, label=""):
+        out["marks"].append({"lane": lane, "x": x, "kind": kind, "label": label})
 
     host_t = {}
     for t, s, _ in r2_host:
         host_t.setdefault(s, t)
-        x = ms(t, t0)
-        if within(x):
-            ax.plot(x, LANES["host2"], "o", color=BLUE, ms=6, zorder=3)
-            ax.text(x, LANES["host2"] + 0.22, str(s), ha="center", fontsize=6.5, color=MUTED)
+        if within(ms(t, t0)):
+            mark("host2", ms(t, t0), "frame", s)
     first_dev = {}
     for t, s, _ in r2_dev:
         late = s in host_t and ms(t, host_t[s]) > LATE_MS and s not in first_dev
         first_dev.setdefault(s, t)
         x = ms(t, t0)
         if within(x):
-            ax.plot(x, LANES["dev2"], "D" if late else "o", color=ORANGE if late else BLUE, ms=6,
-                    zorder=3)
-            ax.text(x, LANES["dev2"] + (-0.42 if late else 0.22), str(s), ha="center",
-                    fontsize=6.5, color=MUTED)
+            mark("dev2", x, "late" if late else "frame", s)
             if late and within(ms(host_t[s], t0)):
-                ax.annotate("", xy=(x, LANES["dev2"] + 0.12),
-                            xytext=(ms(host_t[s], t0), LANES["host2"] - 0.12),
-                            arrowprops={"arrowstyle": "->", "color": ORANGE, "lw": 1.0},
-                            zorder=2)
+                out["arrows"].append((ms(host_t[s], t0), x, s))
     seen1 = set()
     for t, s, _ in r1_dev:
-        x = ms(t, t0)
-        if within(x) and s not in seen1:
+        if within(ms(t, t0)) and s not in seen1:
             seen1.add(s)
-            ax.plot(x, LANES["dev1"], "o", color=BLUE, ms=6, zorder=3)
-            ax.text(x, LANES["dev1"] + 0.22, str(s), ha="center", fontsize=6.5, color=MUTED)
-
-    stop_x = None
+            mark("dev1", ms(t, t0), "frame", s)
+    drops = {DROP_NOT_VALID: "not_valid", DROP_MISSING_HALF: "missing_half",
+             DROP_OTHER_TAG: "other_tag"}
     for r in drive_records(obs):
         x = ms(r["t_ns"] / 1e9, t0)
         if not within(x):
             continue
-        y = LANES["drive"]
         if r["kind"] == "actuated":
-            ax.plot(x, y + 0.14, "o", color=AQUA, ms=7, zorder=3)
-            ax.text(x, y + 0.34, str(r["seq"]), ha="center", fontsize=6.5, color=MUTED)
-        elif r["kind"] == "dropped" and r["drop"] == DROP_NOT_VALID:
-            ax.plot(x, y - 0.1, "X", color=ORANGE, ms=8, zorder=4)
-        elif r["kind"] == "dropped" and r["drop"] == DROP_MISSING_HALF:
-            ax.plot(x, y - 0.1, "v", color=VIOLET, ms=7, zorder=4)
-        elif r["kind"] == "dropped" and r["drop"] == DROP_OTHER_TAG:
-            ax.plot(x, y - 0.34, "s", color=GRAY, ms=5, zorder=3)
-            ax.text(x + 1.4, y - 0.34, f"{r['count']}", ha="left", va="center", fontsize=6,
-                    color=MUTED)
+            mark("drive", x, "actuated", r["seq"])
+        elif r["kind"] == "dropped" and r["drop"] in drops:
+            mark("drive", x, drops[r["drop"]], r["count"])
         elif r["kind"] == "quick_stop":
-            stop_x = x
-            ax.plot(x, y + 0.14, "*", color=RED, ms=13, zorder=5)
-            ax.text(x + 1.5, y + 0.3, f"quick stop: {QS_NAMES.get(r['reason'], r['reason'])}",
-                    fontsize=7.5, color=INK, va="bottom")
+            mark("drive", x, "quick_stop", QS_NAMES.get(r["reason"], r["reason"]))
 
     sw = [(ms(t, t0), decode("TPDO1", d)["statusword"] & 0x6F)
           for t, _, d in frames(obs, "host", {cob("TPDO1")})]
@@ -143,16 +129,48 @@ def panel(ax, row):
     for i, (a, b, state) in enumerate(segments):
         b = segments[i + 1][0] if i + 1 < len(segments) else b
         a, b = max(a, T0), min(b, T1)
-        if b <= a:
-            continue
+        if b > a:
+            out["states"].append((a, b, state))
+    return out
+
+
+STYLE = {  # (marker, color, size, y offset, z) per mark kind and lane
+    "frame": ("o", BLUE, 6, 0.0, 3), "late": ("D", ORANGE, 6, 0.0, 3),
+    "actuated": ("o", AQUA, 7, 0.14, 3), "not_valid": ("X", ORANGE, 8, -0.1, 4),
+    "missing_half": ("v", VIOLET, 7, -0.1, 4), "other_tag": ("s", GRAY, 5, -0.34, 3),
+    "quick_stop": ("*", RED, 13, 0.14, 5),
+}
+
+
+def panel(ax, row):
+    data = panel_data(row)
+    for x in data["syncs"]:
+        ax.axvline(x, color=GRID, linewidth=0.8, zorder=0)
+    for xh, xd, _ in data["arrows"]:
+        ax.annotate("", xy=(xd, LANES["dev2"] + 0.12), xytext=(xh, LANES["host2"] - 0.12),
+                    arrowprops={"arrowstyle": "->", "color": ORANGE, "lw": 1.0}, zorder=2)
+    for m in data["marks"]:
+        marker, color, size, dy, z = STYLE[m["kind"]]
+        x, y = m["x"], LANES[m["lane"]] + dy
+        ax.plot(x, y, marker, color=color, ms=size, zorder=z)
+        if m["kind"] == "other_tag":
+            ax.text(x + 1.4, y, str(m["label"]), ha="left", va="center", fontsize=6, color=MUTED)
+        elif m["kind"] == "quick_stop":
+            ax.text(x + 1.5, y + 0.16, f"quick stop: {m['label']}", fontsize=7.5, color=INK,
+                    va="bottom")
+        elif m["kind"] in ("frame", "late", "actuated"):
+            below = m["kind"] == "late"
+            ax.text(x, y + (-0.42 if below else 0.2), str(m["label"]), ha="center",
+                    fontsize=6.5, color=MUTED)
+    for a, b, state in data["states"]:
         name, color = STATES.get(state, (f"0x{state:02X}", GRAY))
         ax.barh(LANES["state"], b - a, left=a, height=0.34, color=color, alpha=0.85, zorder=2)
         if b - a > 12:
             ax.text((a + b) / 2, LANES["state"] + 0.26, name, ha="center", fontsize=7.5, color=INK)
 
-    rules = "; ".join(rule_lines(obs))
+    rules = "; ".join(data["rules"])
     ax.set_title(f"{ROWS[row]}   (proxy rule: {rules})\n{textwrap.fill(STORY[row], 125)}\n"
-                 f"recording: tools/interop/recorded/{row}.json.gz, node {NODE}, tag {tag}",
+                 f"recording: tools/interop/recorded/{row}.json.gz, node {NODE}, tag {data['tag']}",
                  fontsize=9, color=INK, loc="left")
     ax.set_yticks(list(LANE_NAMES), [LANE_NAMES[k] for k in LANE_NAMES], fontsize=7.5)
     ax.set_ylim(0.45, 5.6)
@@ -162,7 +180,6 @@ def panel(ax, row):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_color(MUTED)
-    return stop_x
 
 
 def draw(out):
@@ -188,7 +205,7 @@ def draw(out):
     fig.suptitle("E3b proxy fault rows on vcan: Lely master -> bus_fault_proxy -> vdrive_bank, "
                  "node 3, pdo_stream of 60 commands", fontsize=10.5, color=INK)
     fig.tight_layout(rect=(0, 0.05, 1, 0.97))
-    fig.savefig(out, format="svg", facecolor="white", metadata={"Date": None})
+    fig.savefig(out, format="svg", facecolor="white", metadata=svg_metadata())
     plt.close(fig)
 
 

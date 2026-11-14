@@ -19,33 +19,33 @@ import matplotlib
 matplotlib.use("svg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from common import MEDIA, PROXY_COST_COMMAND, ROOT, print_input  # noqa: E402
+from common import MEDIA, PROXY_COST_COMMAND, ROOT, print_input, svg_metadata  # noqa: E402
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 BAR, MARK = "#2a78d6", "#eb6834"
 
 
-def binned(dist, bin_ns):
+def plot_data(cost, bin_ns):
+    """What the histogram plots: bars [(bin start in µs, frames)] ascending and the marker
+    positions {p50, p99, max} in µs, as the JSON states them."""
     counts = {}
-    for value, n in dist:
-        b = value // bin_ns
-        counts[b] = counts.get(b, 0) + n
-    return counts
+    for value, n in cost["dist"]:
+        counts[value // bin_ns] = counts.get(value // bin_ns, 0) + n
+    bars = [(b * bin_ns / 1000, counts[b]) for b in sorted(counts)]
+    return {"bars": bars, "markers": {name: cost[name] / 1000 for name in ("p50", "p99", "max")}}
 
 
 def draw(cost, out, bin_ns):
     plt.rcParams.update({"svg.hashsalt": "e3b-proxy-cost", "font.size": 10,
                          "font.family": "DejaVu Sans"})
-    counts = binned(cost["dist"], bin_ns)
+    data = plot_data(cost, bin_ns)
     fig, ax = plt.subplots(figsize=(8, 4.2), facecolor="white")
     ax.set_facecolor("white")
-    xs = [b * bin_ns / 1000 for b in counts]
-    ax.bar(xs, list(counts.values()), width=bin_ns / 1000 * 0.9, align="edge", color=BAR,
+    ax.bar([x for x, _ in data["bars"]], [n for _, n in data["bars"]], width=bin_ns / 1000 * 0.9, align="edge", color=BAR,
            linewidth=0)
     ax.set_yscale("log")
-    top = max(counts.values())
-    for name in ("p50", "p99", "max"):
-        x = cost[name] / 1000
+    top = max(n for _, n in data["bars"])
+    for name, x in data["markers"].items():
         ax.axvline(x, color=MARK, linewidth=1.5, linestyle="--")
         ax.text(x, top * 1.6, f" {name} {x:.2f} µs", color=INK, va="bottom", ha="left",
                 fontsize=9)
@@ -64,7 +64,7 @@ def draw(cost, out, bin_ns):
         ax.spines[side].set_color(MUTED)
     ax.tick_params(colors=MUTED)
     fig.tight_layout()
-    fig.savefig(out, format="svg", facecolor="white", metadata={"Date": None})
+    fig.savefig(out, format="svg", facecolor="white", metadata=svg_metadata())
     plt.close(fig)
 
 

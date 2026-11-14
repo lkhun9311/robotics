@@ -131,3 +131,39 @@ def rpdo_of_tag(obs, side, label, tag):
             if v["exec_tag"] == tag:
                 out.append((t, v["command_seq"], d))
     return out
+
+
+TOOLCHAIN_PREFIX = "toolchain: "
+
+
+def toolchain():
+    """The matplotlib version and the font file it draws with (name-table version and SHA-256):
+    the SVG bytes embed glyph outlines, so either one changes the bytes."""
+    import hashlib
+
+    import matplotlib
+    from matplotlib import font_manager
+    from matplotlib.ft2font import FT2Font
+
+    path = font_manager.findfont("DejaVu Sans")
+    names = FT2Font(path).get_sfnt()
+    raw = names.get((3, 1, 1033, 5)) or names.get((1, 0, 0, 5)) or b""
+    version = raw.decode("utf-16-be" if (3, 1, 1033, 5) in names else "latin-1")
+    with open(path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()[:16]
+    return f"matplotlib {matplotlib.__version__}; DejaVu Sans {version} sha256:{digest}"
+
+
+def svg_metadata():
+    """SVG metadata: no date (reproducible bytes) and the toolchain that drew the image."""
+    return {"Date": None, "Description": TOOLCHAIN_PREFIX + toolchain()}
+
+
+def recorded_toolchain(svg_path):
+    """The toolchain written into a committed SVG's metadata, or None."""
+    import re
+
+    text = pathlib.Path(svg_path).read_text(encoding="utf-8")
+    found = re.search(r"<dc:description>" + re.escape(TOOLCHAIN_PREFIX) + r"(.*?)</dc:description>",
+                      text)
+    return found.group(1) if found else None
