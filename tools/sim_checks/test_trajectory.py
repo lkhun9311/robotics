@@ -7,8 +7,10 @@ from sim import CONTROLLER_STATE
 
 STEP = 0.2  # rad, single-joint move in the mapping check
 
-# The out-of-range goal moves wrist_3: from HOME it can reach its +6.28319 limit. The elbow
-# cannot reach +3.1415 from HOME: the arm contacts itself at about 2.89 rad (measured 2026-11-14).
+# The out-of-range goal moves wrist_3: from HOME it reaches within GOAL_TOLERANCE of its +6.28319
+# limit. The elbow does not: under the plugin it stopped at about 2.89 rad, short of +3.1415, and
+# a standalone MuJoCo 4.0.1 run of the same scene showed the elbow actuator at its force limit
+# and upper_arm_link touching wrist_3_link (measured 2026-11-14).
 OUT_OF_RANGE_JOINT = "wrist_3_joint"
 OUT_OF_RANGE_GOAL = 6.5  # rad, beyond RANGE (6.28319) and the actuator ctrlrange (6.2831)
 # Largest allowed gap between received MuJoCo samples while recording. It bounds this test's own

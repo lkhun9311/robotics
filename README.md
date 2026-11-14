@@ -21,9 +21,13 @@ A simulation-based robot system runtime, built in stages.
 
 E2 (in progress), measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e: a
 goal of 6.5 rad for `wrist_3_joint` was accepted, passed through unchanged as the controller
-output, and aborted with GOAL_TOLERANCE_VIOLATED (-5), while MuJoCo held the joint at or below
-its 6.28319 rad limit. From the home pose the elbow cannot reach its 3.1415 rad limit: the arm
-contacts itself at about 2.89 rad, and JTC then aborts the goal with GOAL_TOLERANCE_VIOLATED (-5).
+output, and aborted with GOAL_TOLERANCE_VIOLATED (-5), while the MuJoCo joint stayed at or below
+6.2815 rad. The actuator `ctrlrange` (6.2831) is below the joint `range` (6.28319), so this run
+does not show which of the two held the joint; the project HAL (E3) owns limit enforcement. A
+goal of 3.5 rad for `elbow_joint` from the home pose was also passed through and aborted with
+GOAL_TOLERANCE_VIOLATED (-5); the elbow stopped at about 2.89 rad, short of its 3.1415 rad limit.
+A standalone MuJoCo 4.0.1 run of the same scene showed the elbow actuator at its force limit and
+`upper_arm_link` touching `wrist_3_link`.
 
 ## What E1 proves today (logic time, no robot, no ROS)
 
