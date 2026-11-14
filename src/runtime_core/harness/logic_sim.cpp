@@ -557,6 +557,11 @@ int run_main(int argc, char** argv) {
     return 2;
   }
   const rc::Duration lease = rc::floor_to_period(*raw_lease, kPeriod);
+  if (lease.ns <= 0) {
+    // A raw lease shorter than one period floors to 0: every permit would expire on issue.
+    std::cerr << "lease floors to 0 at period " << kPeriod.ns << " ns\n";
+    return 2;
+  }
 
   std::ofstream out{out_path};
   if (!out) {
