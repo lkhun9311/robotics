@@ -170,6 +170,13 @@ def sdo_abort(node, index, sub, code):
                  {"index": index, "sub": sub, "abort_code": code})
 
 
+def sdo_client_abort(node, index, sub, code):
+    """An abort sent by the client (master) to the server, on the request identifier."""
+    return frame(f"sdo_client_abort_{code:08x}_{index:04x}_{sub:02x}_node{node}", node,
+                 SDO_REQUEST_BASE + node, [0x80] + _sdo_head(index, sub) + le(code, 32),
+                 {"index": index, "sub": sub, "abort_code": code})
+
+
 def pdo_frame(pdo, node, values, tag):
     data = []
     for field in pdo["fields"]:

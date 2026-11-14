@@ -14,6 +14,7 @@ namespace drive_core {
 
 // SDO abort codes (CiA 301) used by this drive.
 namespace sdo_abort {
+inline constexpr std::uint32_t kCommandSpecifier = 0x0504'0001;   // Unknown or unsupported cs.
 inline constexpr std::uint32_t kUnsupportedAccess = 0x0601'0000;  // E.g. a PDO-only write.
 inline constexpr std::uint32_t kWriteOnly = 0x0601'0001;          // Read of a write-only object.
 inline constexpr std::uint32_t kReadOnly = 0x0601'0002;           // Write of a read-only object.
@@ -56,8 +57,9 @@ class SdoServer {
 
   // Serves one decoded SDO request addressed to this node and returns the response, or nullopt
   // for a request that gets none (a client abort). Checks, in order: object (0x06020000), sub
-  // (0x06090011), access (0x06010001 / 0x06010002), size (0x06070010), limits (0x06090030);
-  // then the drive's ObjectAccess. Never throws.
+  // (0x06090011), access (0x06010001 / 0x06010002), size (0x06070010; a download of size 0,
+  // size unspecified, takes the entry's size if the bytes beyond it are zero), limits
+  // (0x06090030); then the drive's ObjectAccess. Never throws.
   static std::optional<canopen_codec::Sdo> handle(const canopen_codec::Sdo& request,
                                                   ObjectAccess& objects);
 };

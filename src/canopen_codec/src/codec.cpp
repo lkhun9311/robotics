@@ -22,6 +22,7 @@ constexpr std::uint8_t kMaxDlc = 8;
 constexpr std::uint8_t kSdoUploadRequest = 0x40;
 constexpr std::uint8_t kSdoUploadResponseExpedited = 0x43;   // scs 2, e = 1, s = 1, n in bits 2-3
 constexpr std::uint8_t kSdoDownloadRequestExpedited = 0x23;  // ccs 1, e = 1, s = 1, n in bits 2-3
+constexpr std::uint8_t kSdoDownloadRequestUnsized = 0x22;    // ccs 1, e = 1, s = 0, n = 0
 constexpr std::uint8_t kSdoDownloadResponse = 0x60;
 constexpr std::uint8_t kSdoAbort = 0x80;
 constexpr std::uint8_t kSdoSizeMask = 0x0C;
@@ -316,6 +317,9 @@ std::optional<Sdo> decode_sdo(NodeId node, const Frame& frame) {
       sdo.type = SdoType::kUploadRequest;
     } else if ((command & ~kSdoSizeMask) == kSdoDownloadRequestExpedited) {
       with_data(SdoType::kDownloadRequest);
+    } else if (command == kSdoDownloadRequestUnsized) {
+      sdo.type = SdoType::kDownloadRequest;  // Size unspecified: all four data bytes, size 0.
+      sdo.value = get_le<std::uint32_t>(frame.data, 4);
     } else if (command == kSdoAbort) {
       with_abort(SdoType::kAbortToServer);
     } else {

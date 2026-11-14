@@ -145,6 +145,22 @@ TEST(Codec, SdoRejectsWhatIsNotExpedited) {
   EXPECT_FALSE(cc::decode_sdo(n, with_cob(base, 0x581)).has_value());
 }
 
+TEST(Codec, SdoSizeUnspecifiedDownloadDecodes) {
+  // Expedited with the size indicator clear (e = 1, s = 0): size 0, all four data bytes.
+  const auto n = node(1);
+  const cc::Frame f{0x601, 8, {0x22, 0x60, 0x60, 0x00, 0x08, 0x00, 0x00, 0x01}};
+  const auto sdo = cc::decode_sdo(n, f);
+  ASSERT_TRUE(sdo.has_value());
+  EXPECT_EQ(sdo->type, cc::SdoType::kDownloadRequest);
+  EXPECT_EQ(sdo->address.index, 0x6060);
+  EXPECT_EQ(sdo->size, 0);
+  EXPECT_EQ(sdo->value, 0x0100'0008U);
+  // n is meaningful only with s = 1: e = 1, s = 0 with n set is not decoded.
+  cc::Frame with_n = f;
+  with_n.data[0] = 0x26;
+  EXPECT_FALSE(cc::decode_sdo(n, with_n).has_value());
+}
+
 TEST(Codec, SdoEncodeRefusesBadSize) {
   const auto n = node(1);
   EXPECT_FALSE(

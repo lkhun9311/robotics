@@ -12,6 +12,7 @@
 #include "canopen_codec/codec.hpp"
 #include "drive_core/drive.hpp"
 #include "drive_core/validity.hpp"
+#include "runtime_core/lease.hpp"
 #include "runtime_core/time.hpp"
 
 // The drive loop (contract D7-D13): SYNC timeline, guards, quick stop, policy latch, faults,
@@ -65,7 +66,7 @@ struct Loop {
   void cw(std::uint16_t value) { frame(cc::pack_rpdo3(kNode, od::Rpdo3{value})); }
   void nmt(cc::NmtCommand command) { frame(cc::encode_nmt({command, kNode})); }
   std::uint16_t commit() {
-    const auto t = drive.commit(1, 1, now());
+    const auto t = drive.commit_for_test(1, 1, now());
     EXPECT_TRUE(t.has_value());
     tag = t.value_or(0);
     return tag;
@@ -207,7 +208,7 @@ TEST(Sync, TpdoSampledAtSync) {
   // Five W at v_max since the actuation: 10 mrad.
   EXPECT_EQ(fb.t1.position_actual_value, 10'000);
   EXPECT_EQ(fb.t2.velocity_actual_value, 1'000'000);
-  EXPECT_EQ(fb.t1.statusword, l.drive.cia402().statusword());
+  EXPECT_EQ(fb.t1.statusword, l.drive.statusword());
   EXPECT_EQ(fb.t3.sample_time_us, to_wire_us(at));
   // The joint moves on after the SYNC; the sample stays the one taken at the SYNC.
   l.tick();
@@ -439,7 +440,7 @@ TEST(Integrity, LatchesOutsideOperationEnabled) {
   EXPECT_EQ(l.drive.issuer().current(), 0);
   l.cw(0x0F);
   EXPECT_EQ(l.state(), Cia402State::kSwitchedOn);
-  EXPECT_FALSE(l.drive.commit(2, 2, l.now()).has_value());
+  EXPECT_FALSE(l.drive.commit_for_test(2, 2, l.now()).has_value());
 }
 
 TEST(Stop, RampIsAchievedBothDirections) {
@@ -520,6 +521,9 @@ TEST(Stop, TotalTravelWithinBoundAcrossPhases) {
   std::printf("max travel over phases: %.6f rad (e_allow 0.100000)\n",
               static_cast<double>(max_travel) * 1e-9);
   ::testing::Test::RecordProperty("max_travel_nrad", std::to_string(max_travel));
+  // The value the README publishes: 24 ticks at v_max (0.048 rad) plus the semi-implicit brake
+  // from v_max (0.049 rad).
+  EXPECT_EQ(max_travel, 97'000'000);
 }
 
 TEST(Stop, ConfirmsAfterFiveQuietTicks) {
@@ -577,7 +581,7 @@ TEST(Stop, NewCommandDoesNotResume) {
   std::int64_t v = l.drive.joint().velocity_nrad_s;
   for (int i = 0; i < 20; ++i) {
     l.command(kFar);  // Old tag.
-    EXPECT_FALSE(l.drive.commit(9, 9, l.now()).has_value());
+    EXPECT_FALSE(l.drive.commit_for_test(9, 9, l.now()).has_value());
     l.cw(0x0F);
     for (int k = 0; k < 5; ++k) {
       l.tick();
@@ -590,6 +594,37 @@ TEST(Stop, NewCommandDoesNotResume) {
   EXPECT_EQ(l.count(DriveEventKind::kActuated), actuated);
   EXPECT_EQ(v, 0);
   EXPECT_TRUE(l.drive.stop_confirmed());
+}
+
+TEST(Stop, ReenableCancelsMonitor) {
+  // A controlword quick stop, then Enable Operation (transition 16) before the ramp ends and a
+  // new command stream: the abandoned stop's monitor must not judge the running joint.
+  Loop l;
+  l.run_at_vmax();
+  l.cw(0x02);
+  ASSERT_EQ(l.state(), Cia402State::kQuickStopActive);
+  l.tick();
+  l.cw(0x0F);
+  ASSERT_EQ(l.state(), Cia402State::kOperationEnabled);
+  l.commit();
+  l.sync();
+  l.command(kFar);
+  for (int i = 0; i < 20; ++i) {
+    l.period();
+  }
+  EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
+  EXPECT_EQ(l.drive.joint().velocity_nrad_s, kVMax);
+  EXPECT_FALSE(l.drive.stop_unconfirmed());
+  EXPECT_FALSE(l.drive.stop_confirmed());
+  EXPECT_EQ(l.count(DriveEventKind::kStopUnconfirmed), 0U);
+  EXPECT_EQ(l.drive.drive_flags(), 0U);
+  // A later stop gets a monitor of its own.
+  l.cw(0x02);
+  for (int i = 0; i < 200 && !l.drive.stop_confirmed(); ++i) {
+    l.tick();
+  }
+  EXPECT_TRUE(l.drive.stop_confirmed());
+  EXPECT_EQ(l.count(DriveEventKind::kStopUnconfirmed), 0U);
 }
 
 // Runs into a policy stop (command timeout) from v_max.
@@ -701,15 +736,92 @@ TEST(Latch, SurvivesResetCommunicationAndResetNode) {
   l.cw(0x0F);
   EXPECT_EQ(l.state(), Cia402State::kReadyToSwitchOn);
   l.clock.advance(milliseconds(100));  // Past the new boot's quarantine.
-  EXPECT_FALSE(l.drive.commit(3, 3, l.now()).has_value());
+  EXPECT_FALSE(l.drive.commit_for_test(3, 3, l.now()).has_value());
   // policy_reset after the (confirmed) stop clears it.
   until_confirmed(l);
   EXPECT_TRUE(l.drive.policy_reset(l.now()));
   l.cw(0x06);
   l.cw(0x07);
-  EXPECT_TRUE(l.drive.commit(3, 3, l.now()).has_value());
+  EXPECT_TRUE(l.drive.commit_for_test(3, 3, l.now()).has_value());
   l.cw(0x0F);
   EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
+}
+
+TEST(Integrity, RearmAfterViolationDoesNotStopAgain) {
+  // A violation with no SYNC until after the policy reset and the full rearm: the drive already
+  // acted on it, so the first SYNC of the new stream must not report it a second time.
+  Loop l;
+  l.run_at_vmax();
+  l.period(false);
+  l.tick();
+  ++l.seq;
+  l.rpdo1(l.seq, 5);
+  l.rpdo1(l.seq, 6);
+  until_confirmed(l);
+  ASSERT_EQ(l.stop_reason(), QuickStopReason::kIntegrity);
+  ASSERT_TRUE(l.drive.policy_reset(l.now()));
+  l.enable();
+  l.sync();
+  l.command(kFar);
+  for (int i = 0; i < 3; ++i) {
+    l.period();
+  }
+  EXPECT_EQ(l.count(DriveEventKind::kQuickStop), 1U);
+  EXPECT_EQ(l.count(DriveEventKind::kIntegrity), 1U);
+  EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
+  EXPECT_FALSE(l.drive.policy_latched());
+  EXPECT_EQ(l.drive.drive_flags(), 0U);
+  ASSERT_TRUE(l.drive.actuated().has_value());
+  EXPECT_EQ(l.drive.actuated()->exec_tag, l.tag);
+}
+
+TEST(Integrity, ResendOfPairDroppedWhileNotEnabledIsAccepted) {
+  // A complete pair evaluated while Switched On is dropped, not actuated. The master enables and
+  // sends the same seq again with a new deadline: that is a fresh command, not a second payload
+  // for an actuated seq.
+  Loop l;
+  l.cw(0x06);
+  l.cw(0x07);
+  l.commit();
+  l.sync();
+  l.command(kFar);
+  l.period(false);
+  ASSERT_EQ(l.dropped(DropReason::kNotEnabled), 1U);
+  l.cw(0x0F);
+  ASSERT_EQ(l.state(), Cia402State::kOperationEnabled);
+  l.ticks(1);
+  l.rpdo1(l.seq, kFar);
+  l.rpdo2(l.seq, to_wire_us(l.now() + milliseconds(48)));
+  EXPECT_EQ(l.count(DriveEventKind::kIntegrity), 0U);
+  l.ticks(4);
+  l.sync();
+  EXPECT_FALSE(l.drive.policy_latched());
+  EXPECT_EQ(l.state(), Cia402State::kOperationEnabled);
+  ASSERT_TRUE(l.drive.actuated().has_value());
+  EXPECT_EQ(l.drive.actuated()->command_seq, l.seq);
+}
+
+TEST(Lifetime, StreamPastTagLifetimeEndsInTimeoutStop) {
+  // D3: a tag lives at most 5 min, even while commands stream. Once it is revoked, every
+  // fragment is of another tag, nothing actuates and the command timeout stops the drive.
+  Loop l;
+  const MonoTime committed = l.now();  // enable() commits at this instant.
+  l.run_at_vmax();
+  long periods = 0;
+  while (l.state() == Cia402State::kOperationEnabled) {
+    ASSERT_LT(periods, 31'000) << "still Operation Enabled past the tag lifetime";
+    l.period();
+    ++periods;
+  }
+  EXPECT_GT(periods, 29'000);  // About 300 s of 10 ms periods streamed before the stop.
+  const MonoTime stopped = l.last(DriveEventKind::kQuickStop)->at;
+  EXPECT_GE(stopped - committed, drive_core::kTagLifetime);
+  EXPECT_LE((stopped - committed).ns,
+            drive_core::kTagLifetime.ns + drive_core::kCommandTimeout.ns + kW.ns);
+  EXPECT_EQ(l.stop_reason(), QuickStopReason::kTimeout);
+  EXPECT_EQ(l.state(), Cia402State::kQuickStopActive);
+  EXPECT_TRUE(l.drive.policy_latched());
+  EXPECT_EQ(l.drive.issuer().current(), 0);
 }
 
 TEST(Disable, NormalDisableNeedsNoReset) {
@@ -892,6 +1004,66 @@ TEST(Tpdo, JoinsBySampleSeq) {
     EXPECT_EQ(fb.t3.applied_tag, l.tag);
     EXPECT_EQ(fb.t3.sample_time_us, to_wire_us(at));
   }
+}
+
+TEST(Tpdo, StatuswordBit12WhileFollowingTheCommand) {
+  // CiA 402 CSP: statusword bit 12 = "drive follows the command value".
+  constexpr std::uint16_t kFollowing = 1U << 12U;
+  Loop l;
+  l.enable();
+  EXPECT_EQ(unpack(l.sync()).t1.statusword & kFollowing, 0U);  // Enabled, nothing actuated.
+  l.command(kFar);
+  l.ticks(5);
+  EXPECT_EQ(unpack(l.sync()).t1.statusword & kFollowing, kFollowing);
+  l.cw(0x07);  // Disable Operation: tracking stops.
+  l.ticks(5);
+  EXPECT_EQ(unpack(l.sync()).t1.statusword & kFollowing, 0U);
+}
+
+TEST(Sync, ResetForgetsThePreviousSync) {
+  // CiA 301 reset communication and reset node clear the communication state: the first SYNC
+  // after either is never judged against a SYNC from before it.
+  for (const auto command : {cc::NmtCommand::kResetCommunication, cc::NmtCommand::kResetNode}) {
+    SCOPED_TRACE(static_cast<int>(command));
+    Loop l;
+    l.sync();
+    l.nmt(command);
+    l.tick();  // 2 ms: sooner than T_bus / 2 after the SYNC before the reset.
+    l.sync();
+    EXPECT_EQ(l.drive.sync_duplicates(), 0U);
+  }
+}
+
+TEST(Fault, StuckJointFaultReactionEndsAtDeadline) {
+  // A fault reaction that cannot bring the joint to rest still ends: at the stop deadline the
+  // drive enters Fault and reports the stop unconfirmed.
+  Loop l;
+  l.run_at_vmax();
+  l.drive.inject_stuck_joint(true);
+  l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+  const MonoTime started = l.now();
+  while (l.now() - started < Duration{drive_core::kStopDeadline.ns - kW.ns}) {
+    l.tick();
+    ASSERT_EQ(l.state(), Cia402State::kFaultReactionActive);
+  }
+  l.tick();
+  EXPECT_EQ(l.state(), Cia402State::kFault);
+  EXPECT_TRUE(l.drive.stop_unconfirmed());
+  EXPECT_FALSE(l.drive.stop_confirmed());
+  EXPECT_EQ(l.count(DriveEventKind::kStopUnconfirmed), 1U);
+  EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+}
+
+TEST(Constants, LeaseIsTheE1Bound) {
+  // kLeaseUs is the E1 lease bound for v_max, a_stop, e_allow and one W of detection delay,
+  // computed by runtime_core and floored to whole W.
+  const auto lease = runtime_core::max_lease(1.0, 10.0, 0.1, kW);
+  ASSERT_TRUE(lease.has_value());
+  EXPECT_EQ(runtime_core::floor_to_period(*lease, kW).ns,
+            static_cast<std::int64_t>(drive_core::kLeaseUs) * 1'000);
+  EXPECT_EQ(drive_core::kLeaseUs, 48'000U);
+  EXPECT_EQ(kVMax, 1'000'000'000);
+  EXPECT_EQ(drive_core::kAStopNradS2, 10'000'000'000);
 }
 
 }  // namespace

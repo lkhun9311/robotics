@@ -137,12 +137,12 @@ SupportedObjects=25
 24=0x607A
 25=0x6085
 
-; D18: SYNC consumer (bit 30 clear) on 0x80.
+; D18: SYNC consumer (bit 30 clear) on 0x80. const: this drive does not reconfigure it at run time.
 [1005]
 ParameterName=COB-ID SYNC
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=0x00000080
 PDOMapping=0
 
@@ -155,15 +155,17 @@ AccessType=ro
 DefaultValue=$NODEID+0x80
 PDOMapping=0
 
+; The heartbeat period this drive's host produces (E3b); drive_core itself produces none. const.
 [1017]
 ParameterName=Producer heartbeat time
 ObjectType=0x7
 DataType=0x0006
-AccessType=rw
+AccessType=const
 DefaultValue=100
 PDOMapping=0
 
 ; D4/D7: RPDO1 and RPDO2 are synchronous (type 1), actuated at the next SYNC; RPDO3 is event-driven (type 255).
+; COB-IDs and transmission types are const: the PDO set is fixed (no PDO reconfiguration).
 [1400]
 ParameterName=RPDO1 communication parameter
 ObjectType=0x9
@@ -181,7 +183,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x200
 PDOMapping=0
 
@@ -189,7 +191,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=1
 PDOMapping=0
 
@@ -210,7 +212,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x300
 PDOMapping=0
 
@@ -218,7 +220,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=1
 PDOMapping=0
 
@@ -239,7 +241,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x400
 PDOMapping=0
 
@@ -247,7 +249,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=255
 PDOMapping=0
 
@@ -349,7 +351,7 @@ AccessType=ro
 DefaultValue=0x60400010
 PDOMapping=0
 
-; D7/D13: TPDO1-3 are synchronous (type 1), sampled at SYNC.
+; D7/D13: TPDO1-3 are synchronous (type 1), sampled at SYNC. COB-IDs and transmission types are const.
 [1800]
 ParameterName=TPDO1 communication parameter
 ObjectType=0x9
@@ -367,7 +369,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x180
 PDOMapping=0
 
@@ -375,7 +377,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=1
 PDOMapping=0
 
@@ -396,7 +398,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x280
 PDOMapping=0
 
@@ -404,7 +406,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=1
 PDOMapping=0
 
@@ -425,7 +427,7 @@ PDOMapping=0
 ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=$NODEID+0x380
 PDOMapping=0
 
@@ -433,7 +435,7 @@ PDOMapping=0
 ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
-AccessType=rw
+AccessType=const
 DefaultValue=1
 PDOMapping=0
 
@@ -552,6 +554,7 @@ DefaultValue=0x20300410
 PDOMapping=0
 
 ; CiA 402 objects. Units (D2): position in urad, velocity in urad/s.
+; rww for RPDO mapping; an SDO write is refused (0x06010000): commands enter by PDO only (D4).
 [6040]
 ParameterName=Controlword
 ObjectType=0x7
@@ -568,21 +571,21 @@ AccessType=ro
 DefaultValue=0
 PDOMapping=1
 
-; D10: 6 = decelerate on the quick-stop ramp and stay in Quick Stop Active.
+; D10: 6 = decelerate on the quick-stop ramp and stay in Quick Stop Active. const: the only option implemented.
 [605A]
 ParameterName=Quick stop option code
 ObjectType=0x7
 DataType=0x0003
-AccessType=rw
+AccessType=const
 DefaultValue=6
 PDOMapping=0
 
-; D11: 2 = quick-stop ramp on a recoverable fault.
+; D11: 2 = quick-stop ramp on a recoverable fault. const: the only option implemented.
 [605E]
 ParameterName=Fault reaction option code
 ObjectType=0x7
 DataType=0x0003
-AccessType=rw
+AccessType=const
 DefaultValue=2
 PDOMapping=0
 
@@ -621,6 +624,7 @@ AccessType=ro
 DefaultValue=0
 PDOMapping=1
 
+; rww for RPDO mapping; an SDO write is refused (0x06010000): commands enter by PDO only (D4).
 [607A]
 ParameterName=Target position
 ObjectType=0x7
@@ -629,12 +633,12 @@ AccessType=rww
 DefaultValue=0
 PDOMapping=1
 
-; D10: 10 rad/s^2 in urad/s^2.
+; D10: 10 rad/s^2 in urad/s^2. const: the ramp the stop bound (e_allow) is computed for.
 [6085]
 ParameterName=Quick stop deceleration
 ObjectType=0x7
 DataType=0x0007
-AccessType=rw
+AccessType=const
 DefaultValue=10000000
 PDOMapping=0
 
@@ -753,7 +757,8 @@ AccessType=ro
 DefaultValue=0
 PDOMapping=0
 
-; D4/D14: RPDO-mappable command fragment fields.
+; D4/D14: RPDO-mappable command fragment fields. rww for RPDO mapping; an SDO write to 0x2020 or
+; 0x2021 is refused (0x06010000): commands enter by PDO only.
 [2020]
 ParameterName=rpdo1_ext
 ObjectType=0x9
@@ -820,7 +825,9 @@ AccessType=rww
 DefaultValue=0
 PDOMapping=1
 
-; D13/D14: feedback fields; 05 drive_flags is SDO-only (bit 0 = policy latch, D11; full layout in drive_core drive_flag).
+; D13/D14: feedback fields; 05 drive_flags is SDO-only. drive_flags bits: 0x0001 policy latch set (D11),
+; 0x0002 drive unavailable (torque loss), 0x0004 integrity violation not yet reset (D8), 0x0008 latest stop
+; unconfirmed (D10); other bits 0.
 [2030]
 ParameterName=feedback_ext
 ObjectType=0x9

@@ -65,13 +65,18 @@ struct AssemblyResult {
 //   the oldest seq (the new one included) is dropped and counted as superseded.
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
-// - Separately, every violation stays pending until an on_sync reports it, even when the tag
-//   changes or reset() runs in between (a revoke or a lifetime expiry at the W tick must not
-//   erase a violation the drive has not acted on yet). It is reported in every on_sync while
-//   latched, and in exactly one more after the latch is cleared.
-// - At SYNC (on_sync) the newest complete pair (seq16_newer) is actuated if validity_open(until,
-//   now, lease), otherwise dropped as not_valid; older complete pairs are dropped as superseded.
-//   A lone half is an ordinary gap. The window then clears.
+// - Separately, every violation stays pending until an on_sync reports it or the owner
+//   acknowledges it (acknowledge_violation), even when the tag changes or reset() runs in between
+//   (a revoke or a lifetime expiry at the W tick must not erase a violation nobody has acted on).
+//   on_sync reports a violation while it is latched or pending: an unacknowledged violation is
+//   reported by at least one on_sync, and by exactly one if the latch was cleared before any
+//   on_sync ran. An acknowledged one is reported only while it is still latched.
+// - At SYNC (on_sync) the newest complete pair (seq16_newer) is the candidate if
+//   validity_open(until, now, lease), otherwise it is dropped as not_valid; older complete pairs
+//   are dropped as superseded. A lone half is an ordinary gap. The window then clears.
+// - The last actuated seq advances only through mark_actuated, which the owner calls when it
+//   actually actuates the candidate: a candidate the owner drops (e.g. not Operation Enabled)
+//   leaves no trace, so the same seq may be sent again with another payload.
 // Any change of the issuer's epoch (commit, revoke, expiry, reset communication, boot) clears
 // the window and the last actuated seq. The issuer must outlive the assembler.
 class CommandAssembler {
@@ -85,7 +90,14 @@ class CommandAssembler {
   OfferResult offer(const canopen_codec::od::Rpdo2& fragment);
   AssemblyResult on_sync(std::uint32_t now_us);
 
-  // True while a violation is latched for the current tag or not yet reported by on_sync.
+  // The owner actuated `command` (a candidate of the latest on_sync): its seq and payload become
+  // the last actuated. Ignored when `command` is not of the current tag.
+  void mark_actuated(const Command& command);
+  // The owner has acted on every violation detected so far; they are no longer pending.
+  void acknowledge_violation() { violation_pending_ = false; }
+
+  // True while a violation is latched for the current tag or pending (neither reported by
+  // on_sync nor acknowledged).
   bool integrity_violation() const { return violated_ || violation_pending_; }
   // NMT reset communication (D12): clears the window, last actuated seq and the latch; an
   // unreported violation stays pending.
@@ -118,7 +130,8 @@ class CommandAssembler {
   std::array<Slot, kWindowSlots> window_{};
   std::optional<Command> last_actuated_;
   bool violated_{false};
-  bool violation_pending_{false};  // Survives tag changes and reset(); cleared by on_sync.
+  // Survives tag changes and reset(); cleared by on_sync or acknowledge_violation.
+  bool violation_pending_{false};
   Counters dropped_;
 };
 

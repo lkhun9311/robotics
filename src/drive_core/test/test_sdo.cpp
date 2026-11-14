@@ -251,10 +251,91 @@ TEST(Sdo, RangeAborts) {
   EXPECT_EQ(w.value(od::addr::modes_of_operation_display), 8U);
   // 0x2015 policy_reset: 0..1.
   EXPECT_EQ(abort_of(w.write(od::addr::policy_reset, 2, 1)), abort_code::kRange);
-  // A parameter this drive does not change at run time takes only the value it has.
-  EXPECT_EQ(abort_of(w.write(od::addr::cob_id_sync, 0x81)), abort_code::kRange);
-  EXPECT_TRUE(is_ok(w.write(od::addr::cob_id_sync, 0x80)));
-  EXPECT_EQ(w.value(od::addr::cob_id_sync), 0x80U);
+}
+
+TEST(Sdo, FixedParametersAreConst) {
+  // Parameters this drive never changes at run time are `const` in the EDS, so the EDS does not
+  // advertise a write the drive would refuse: every write aborts as read-only, even the value
+  // the object already has, and the value stays.
+  Wire w;
+  for (const od::Address a :
+       {od::addr::cob_id_sync, od::addr::producer_heartbeat_time,
+        od::addr::rpdo1_communication_parameter_cob_id,
+        od::addr::rpdo1_communication_parameter_transmission_type,
+        od::addr::rpdo2_communication_parameter_cob_id,
+        od::addr::rpdo2_communication_parameter_transmission_type,
+        od::addr::rpdo3_communication_parameter_cob_id,
+        od::addr::rpdo3_communication_parameter_transmission_type,
+        od::addr::tpdo1_communication_parameter_cob_id,
+        od::addr::tpdo1_communication_parameter_transmission_type,
+        od::addr::tpdo2_communication_parameter_cob_id,
+        od::addr::tpdo2_communication_parameter_transmission_type,
+        od::addr::tpdo3_communication_parameter_cob_id,
+        od::addr::tpdo3_communication_parameter_transmission_type, od::addr::quick_stop_option_code,
+        od::addr::fault_reaction_option_code, od::addr::quick_stop_deceleration}) {
+    SCOPED_TRACE(a.index * 0x100 + a.sub);
+    const auto* entry = drive_core::SdoServer::find(a);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->access, od::Access::kConst);
+    const std::uint32_t before = w.value(a);
+    EXPECT_EQ(abort_of(w.write(a, before, entry->size)), abort_code::kReadOnly);
+    EXPECT_EQ(w.value(a), before);
+  }
+}
+
+TEST(Sdo, UnsupportedCommandSpecifierAborts) {
+  // Segmented and block transfers are not served. Every client command specifier this server
+  // does not serve is answered with abort 0x05040001; the multiplexer is echoed for the
+  // specifiers that carry one and is zero for segments. A client abort is never answered.
+  struct Case {
+    std::uint8_t command;
+    bool has_multiplexer;
+  };
+  Wire w;
+  for (const Case c : {Case{0x21, true}, Case{0x20, true}, Case{0x00, false}, Case{0x10, false},
+                       Case{0x60, false}, Case{0x70, false}, Case{0xA0, true}, Case{0xC1, true},
+                       Case{0xE0, false}, Case{0x41, true}}) {
+    SCOPED_TRACE(static_cast<int>(c.command));
+    const cc::Frame request{static_cast<std::uint16_t>(0x600 + kNode.value()),
+                            8,
+                            {c.command, 0x17, 0x10, 0x00, 0x64, 0x00, 0x00, 0x00}};
+    const auto out = w.send(request);
+    ASSERT_EQ(out.size(), 1U);
+    // CiA 301 abort, bytes as the independent wire encoder writes them (golden sdo.json holds
+    // abort 0x05040001 vectors, which the codec reproduces byte for byte).
+    const std::array<std::uint8_t, 8> expected =
+        c.has_multiplexer
+            ? std::array<std::uint8_t, 8>{0x80, 0x17, 0x10, 0x00, 0x01, 0x00, 0x04, 0x05}
+            : std::array<std::uint8_t, 8>{0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x05};
+    EXPECT_EQ(out[0].cob_id, 0x580 + kNode.value());
+    EXPECT_EQ(out[0].dlc, 8);
+    EXPECT_EQ(out[0].data, expected);
+  }
+  EXPECT_EQ(w.value(od::addr::producer_heartbeat_time), 100U);  // Nothing was written.
+  // A client abort with reserved bits set is still a client abort: no answer.
+  EXPECT_TRUE(
+      w.send({static_cast<std::uint16_t>(0x600 + kNode.value()), 8, {0x81, 0, 0x10, 0}}).empty());
+  // A frame with the wrong length is not an SDO request at all: no answer.
+  EXPECT_TRUE(
+      w.send({static_cast<std::uint16_t>(0x600 + kNode.value()), 7, {0x21, 0x17, 0x10}}).empty());
+}
+
+TEST(Sdo, SizeUnspecifiedExpeditedDownload) {
+  // Expedited with the size indicator clear (e = 1, s = 0): the server takes the entry's size;
+  // data bytes beyond it must be zero.
+  Wire w;
+  const auto download = [&w](std::array<std::uint8_t, 8> data) {
+    const auto out = w.send({static_cast<std::uint16_t>(0x600 + kNode.value()), 8, data});
+    EXPECT_EQ(out.size(), 1U);
+    return out.empty() ? cc::Sdo{} : cc::decode_sdo(kNode, out[0]).value_or(cc::Sdo{});
+  };
+  EXPECT_TRUE(is_ok(download({0x22, 0x60, 0x60, 0x00, 0x08, 0x00, 0x00, 0x00})));
+  EXPECT_TRUE(is_ok(download({0x22, 0x10, 0x20, 0x04, 0x05, 0x00, 0x00, 0x00})));
+  EXPECT_EQ(w.value(od::addr::exec_request_attempt_id), 5U);
+  EXPECT_EQ(abort_of(download({0x22, 0x60, 0x60, 0x00, 0x08, 0x01, 0x00, 0x00})),
+            abort_code::kLength);
+  EXPECT_EQ(abort_of(download({0x22, 0x60, 0x60, 0x00, 0x07, 0x00, 0x00, 0x00})),
+            abort_code::kRange);
 }
 
 TEST(Sdo, LengthMismatchAborts) {
@@ -587,7 +668,51 @@ TEST(Latch, PolicyResetOverSdo) {
   EXPECT_EQ(w.state(), Cia402State::kOperationEnabled);
 }
 
+TEST(Commit, RefusedWhileIntegrityStopPending) {
+  // Between the detection of a violation and the quick stop at the next W tick, no commit and
+  // no staging may start: a tag issued in that gap would outlive the violation it follows.
+  Wire w;
+  w.cw(0x06);
+  w.cw(0x07);
+  const std::uint16_t tag = w.adopt({1, 1, 0, 1});
+  ASSERT_NE(tag, 0);
+  const std::uint32_t crc = w.stage({2, 2, 0, 2});  // Fully staged before the violation.
+  w.send(cc::pack_rpdo1(kNode, od::Rpdo1{1, 1, tag}));
+  w.send(cc::pack_rpdo1(kNode, od::Rpdo1{2, 1, tag}));
+  ASSERT_FALSE(w.drive.policy_latched());  // Detected; the stop starts at the next tick.
+  EXPECT_EQ(abort_of(w.write(od::addr::exec_commit, crc)), abort_code::kDeviceState);
+  EXPECT_EQ(abort_of(w.write(od::addr::exec_request_attempt_id, 3)), abort_code::kDeviceState);
+  EXPECT_EQ(w.value(od::addr::committed_attempt), 1U);
+  EXPECT_EQ(w.value(od::addr::exec_commit), (CommitRequest{1, 1, 0, 1}.crc()));
+  w.tick();
+  EXPECT_TRUE(w.drive.policy_latched());
+  EXPECT_EQ(w.value(od::addr::exec_tag), 0U);
+}
+
+TEST(Commit, AbortedCommitWriteDoesNotChangeReadback) {
+  // 0x2011 reads back the value of the last successful write only.
+  Wire w;
+  w.cw(0x06);
+  w.cw(0x07);
+  const CommitRequest first{1, 1, 0, 1};
+  w.adopt(first);
+  EXPECT_EQ(w.value(od::addr::exec_commit), first.crc());
+  EXPECT_EQ(abort_of(w.write(od::addr::exec_commit, 0xDEAD'BEEF)), abort_code::kTransfer);
+  EXPECT_EQ(w.value(od::addr::exec_commit), first.crc());
+}
+
 // ---- 0x2030:05 drive_flags, one test per bit ----
+
+TEST(DriveFlags, BitValuesArePinned) {
+  // The wire layout of 0x2030:05 as the EDS comment states it; a master decodes these literals.
+  static_assert(flag::kPolicyLatched == 0x0001);
+  static_assert(flag::kDriveUnavailable == 0x0002);
+  static_assert(flag::kIntegrity == 0x0004);
+  static_assert(flag::kStopUnconfirmed == 0x0008);
+  Wire w;
+  w.drive.inject_torque_loss(w.now());
+  EXPECT_EQ(w.value(od::addr::feedback_ext_drive_flags), 0x0002U | 0x0008U);
+}
 
 TEST(DriveFlags, PolicyLatchBit) {
   Wire w;

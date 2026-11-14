@@ -44,6 +44,13 @@ def test_sdo_abort_object_does_not_exist():
     assert (f["cob_id"], f["data"]) == (0x584, [0x80, 0x34, 0x12, 0x56, 0x00, 0x00, 0x02, 0x06])
 
 
+def test_sdo_client_abort_goes_to_the_server():
+    f = wire.sdo_client_abort(9, 0x2011, 0, 0x08000020)
+    assert (f["cob_id"], f["dlc"], f["data"]) == (0x609, 8, [0x80, 0x11, 0x20, 0x00, 0x20, 0x00, 0x00, 0x08])
+    unsupported = wire.sdo_abort(3, 0x1017, 0, 0x05040001)
+    assert unsupported["data"] == [0x80, 0x17, 0x10, 0x00, 0x01, 0x00, 0x04, 0x05]
+
+
 def test_sdo_expedited_download_and_responses():
     assert wire.sdo_download_request(1, 0x1017, 0, 2, 100)["data"] == [0x2B, 0x17, 0x10, 0x00, 100, 0, 0, 0]
     assert wire.sdo_download_request(1, 0x6085, 0, 4, 10000000)["data"] == \

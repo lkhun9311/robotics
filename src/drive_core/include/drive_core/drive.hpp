@@ -25,7 +25,8 @@
 // transaction (D17).
 namespace drive_core {
 
-// 0x2030:05 drive_flags (D11, D14): the one definition of its bit layout.
+// 0x2030:05 drive_flags (D11, D14): the one definition of its bit layout. The EDS comment at
+// [2030sub5] lists the same four bits; DriveFlags.BitValuesArePinned pins the literals.
 namespace drive_flag {
 inline constexpr std::uint16_t kPolicyLatched = 1U << 0U;     // D11 policy latch is set.
 inline constexpr std::uint16_t kDriveUnavailable = 1U << 1U;  // Torque loss: no drive authority.
@@ -43,8 +44,17 @@ inline constexpr runtime_core::Duration kSyncMinInterval{5'000'000};  // T_bus /
 // stop_confirmed: |v| below this for kQuietTicks consecutive W ticks (D10).
 inline constexpr std::int64_t kQuietVelocityNradS = 10'000'000;  // 0.01 rad/s
 inline constexpr int kQuietTicks = 5;
-// v_max / a_stop + 6 W = 0.112 s; a stop not confirmed by then is stop_unconfirmed (D10).
+// v_max / a_stop + 6 W = 0.112 s; a stop not confirmed by then is stop_unconfirmed (D10). A fault
+// reaction that is not confirmed by then ends there too: the drive enters Fault.
 inline constexpr runtime_core::Duration kStopDeadline{112'000'000};
+
+// Behaviour this drive implements, stated in the EDS as fixed values; drive.cpp checks at compile
+// time that the EDS defaults equal these (and 0x2014 = kCommandTimeout, 0x6085 = a_stop).
+inline constexpr std::int16_t kQuickStopOptionCode = 6;      // 605Ah (D10)
+inline constexpr std::int16_t kFaultReactionOptionCode = 2;  // 605Eh (D11)
+// 1017h. drive_core produces no heartbeat itself; the process hosting the drive produces it at
+// this period (E3b).
+inline constexpr std::uint16_t kProducerHeartbeatMs = 100;
 
 // Error codes (603Fh / EMCY) of the injected faults. 0x8611 is CiA 402 "following error";
 // 0xFF01 is in the CiA 301 device-specific range, chosen by this project for torque loss.
@@ -109,7 +119,9 @@ std::optional<FrameKind> classify(canopen_codec::NodeId node, const canopen_code
 
 class Drive {
  public:
-  // boot_id (0x2013) of the first boot comes from the caller (the process draws it at start).
+  // boot_id (0x2013) of the first boot comes from the caller, which must supply entropy (the
+  // process draws it at start): a constant seed gives the same first tag on every process start.
+  // A reset node derives the next boot_id from the previous one.
   Drive(canopen_codec::NodeId node, std::uint32_t boot_id, runtime_core::MonoTime now);
   // The assembler refers to the issuer, so a Drive stays where it was made.
   Drive(const Drive&) = delete;
@@ -132,12 +144,12 @@ class Drive {
   // stop monitor (stop_confirmed / stop_unconfirmed, end of a fault reaction).
   void tick(runtime_core::MonoTime now);
 
-  // The tag allocation step of a commit, without the D17 staging. The SDO path (0x2011) calls it
-  // after its own checks (staging, CRC, CiA 402 state, idempotent repeat); tests of the drive
-  // loop call it directly. Refused (nullopt, the current tag untouched) while the policy latch
-  // is set.
-  std::optional<std::uint16_t> commit(std::uint64_t generation, std::uint32_t session,
-                                      runtime_core::MonoTime now);
+  // Test seam: a commit without the D17 staging and CRC, for tests of the drive loop. It skips
+  // the SDO path's CiA 402 state check and idempotent repeat; it is refused (nullopt, the current
+  // tag untouched) while the policy latch is set or an integrity stop is pending. Production
+  // commits go through 0x2011 only.
+  std::optional<std::uint16_t> commit_for_test(std::uint64_t generation, std::uint32_t session,
+                                               runtime_core::MonoTime now);
   // 0x2015 policy_reset = 1 (D11; the SDO write calls this). Accepted only while latched and
   // after the latest stop is confirmed; then the latch clears and the drive goes to Switch On
   // Disabled. Returns whether it was accepted.
@@ -157,6 +169,9 @@ class Drive {
   bool stop_confirmed() const { return stop_confirmed_; }
   bool stop_unconfirmed() const { return stop_unconfirmed_; }
   bool drive_unavailable() const { return drive_unavailable_; }
+  // 6041h as sent in TPDO1 and read by SDO: the CiA 402 statusword, plus bit 12 (CSP: drive
+  // follows the command value) while Operation Enabled and tracking an actuated command.
+  std::uint16_t statusword() const;
   // 0x2030:05 (bit layout in drive_flag).
   std::uint16_t drive_flags() const;
   // 0x2016: attempt_id of the last successful commit in this boot (D17).
@@ -169,9 +184,7 @@ class Drive {
   canopen_codec::NodeId node() const { return node_; }
   const NmtSlave& nmt() const { return nmt_; }
   const Cia402& cia402() const { return cia402_; }
-  Cia402& cia402() { return cia402_; }
   const ExecTagIssuer& issuer() const { return issuer_; }
-  ExecTagIssuer& issuer() { return issuer_; }
   const CommandAssembler& assembler() const { return assembler_; }
   const DispatchCounts& counts() const { return counts_; }
 
@@ -182,6 +195,8 @@ class Drive {
 
   std::vector<canopen_codec::Frame> on_sdo(const canopen_codec::Frame& frame,
                                            runtime_core::MonoTime now);
+  // A request frame the codec does not decode: abort 0x05040001, or nothing (DLC, client abort).
+  std::vector<canopen_codec::Frame> on_unsupported_sdo(const canopen_codec::Frame& frame);
   // 0x2010 and 0x2011 writes (D17); each returns 0 or an SDO abort code.
   std::uint32_t write_exec_request(std::uint8_t sub, std::uint32_t value,
                                    runtime_core::MonoTime now);
@@ -236,7 +251,7 @@ class Drive {
     std::uint64_t epoch{};
   };
   std::optional<LastCommit> last_commit_;
-  std::uint32_t exec_commit_written_{0};  // 0x2011 as last written.
+  std::uint32_t exec_commit_written_{0};  // 0x2011 as last successfully written.
   bool policy_latched_{false};
   bool drive_unavailable_{false};
   // Stop monitor of the latest stop (D10).

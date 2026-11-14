@@ -135,6 +135,18 @@ void check_pdo(const golden::Vector& v, Pack pack, Unpack unpack) {
 
 }  // namespace
 
+TEST(Golden, FamilyCountsArePinned) {
+  // tools/od/make_golden.py writes exactly this many vectors per family. A regeneration that
+  // silently yields fewer (or more) vectors fails here; change these numbers only together with
+  // the generator.
+  const std::map<std::string, std::size_t> expected{
+      {"nmt", 12}, {"heartbeat", 9}, {"sync", 1}, {"emcy", 7}, {"sdo", 60}, {"pdo", 182},
+  };
+  for (const auto& [family, count] : expected) {
+    EXPECT_EQ(golden::load(family).size(), count) << family;
+  }
+}
+
 TEST(Golden, Nmt) {
   const auto vectors = golden::load("nmt");
   ASSERT_FALSE(vectors.empty());
@@ -226,6 +238,7 @@ TEST(Golden, Sdo) {
       {"sdo_download_request_", cc::SdoType::kDownloadRequest},
       {"sdo_download_response_", cc::SdoType::kDownloadResponse},
       {"sdo_abort_", cc::SdoType::kAbortToClient},
+      {"sdo_client_abort_", cc::SdoType::kAbortToServer},
   };
   const auto vectors = golden::load("sdo");
   ASSERT_FALSE(vectors.empty());
@@ -258,7 +271,7 @@ TEST(Golden, Sdo) {
       in.size = static_cast<std::uint8_t>(field(v, "size"));
       in.value = static_cast<std::uint32_t>(field(v, "value"));
     }
-    if (*type == cc::SdoType::kAbortToClient) {
+    if (*type == cc::SdoType::kAbortToClient || *type == cc::SdoType::kAbortToServer) {
       got["abort_code"] = decoded->abort_code;
       in.abort_code = static_cast<std::uint32_t>(field(v, "abort_code"));
     }

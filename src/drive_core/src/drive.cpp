@@ -30,6 +30,35 @@ std::uint32_t next_boot_id(std::uint32_t previous) {
   return h != previous ? h : h + 1U;
 }
 
+// The COB-ID of a PDO for `node`, by the same rule as the codec: node-relative only when the
+// EDS default is written $NODEID+...
+template <class Pdo>
+std::uint16_t pdo_cob(cc::NodeId node) {
+  return Pdo::kCobIdAddsNodeId ? static_cast<std::uint16_t>(Pdo::kCobIdBase + node.value())
+                               : Pdo::kCobIdBase;
+}
+
+// The EDS default of an object, at compile time (od::kEntries is constexpr); -1 if absent.
+constexpr std::int64_t eds_default(cc::od::Address a) {
+  for (const cc::od::EntryInfo& e : cc::od::kEntries) {
+    if (e.index == a.index && e.sub == a.sub) {
+      return e.default_value;
+    }
+  }
+  return -1;
+}
+
+// The EDS states these values; the drive implements them. A change on either side alone fails
+// the build.
+constexpr std::int64_t kNsPerMs = 1'000'000;
+constexpr std::int64_t kNradPerUrad = 1'000;
+static_assert(eds_default(cc::od::addr::command_timeout_ms) == kCommandTimeout.ns / kNsPerMs);
+static_assert(eds_default(cc::od::addr::quick_stop_deceleration) == kAStopNradS2 / kNradPerUrad);
+static_assert(eds_default(cc::od::addr::quick_stop_option_code) == kQuickStopOptionCode);
+static_assert(eds_default(cc::od::addr::fault_reaction_option_code) == kFaultReactionOptionCode);
+static_assert(eds_default(cc::od::addr::producer_heartbeat_time) == kProducerHeartbeatMs);
+static_assert(eds_default(cc::od::addr::cob_id_sync) == cc::od::kSyncCobId);
+
 }  // namespace
 
 std::optional<FrameKind> classify(cc::NodeId node, const cc::Frame& frame) {
@@ -54,8 +83,8 @@ std::optional<FrameKind> classify(cc::NodeId node, const cc::Frame& frame) {
   if (cob == own(kCobSdoRequestBase)) {
     return FrameKind::kSdo;
   }
-  if (cob == own(cc::od::Rpdo1::kCobIdBase) || cob == own(cc::od::Rpdo2::kCobIdBase) ||
-      cob == own(cc::od::Rpdo3::kCobIdBase)) {
+  if (cob == pdo_cob<cc::od::Rpdo1>(node) || cob == pdo_cob<cc::od::Rpdo2>(node) ||
+      cob == pdo_cob<cc::od::Rpdo3>(node)) {
     return FrameKind::kPdo;
   }
   return std::nullopt;
@@ -152,6 +181,7 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       actuated_.reset();
       applied_seq_ = 0;
       applied_tag_ = 0;
+      last_sync_.reset();  // The next SYNC is not judged against one from before the reset.
       break;
     case NmtAction::kResetNode: {
       // D3: a new boot with a new boot_id, a new tag start and a new quarantine. The policy
@@ -166,6 +196,7 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       actuated_.reset();
       applied_seq_ = 0;
       applied_tag_ = 0;
+      last_sync_.reset();
       cia402_ = Cia402{};
       cia402_.complete_initialisation();
       apply_inhibit();
@@ -200,8 +231,6 @@ void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
 }
 
 namespace {
-
-constexpr std::int64_t kNradPerUrad = 1'000;
 
 // µrad (or µrad/s) on the wire from the model's nrad, truncated and saturated to int32.
 std::int32_t to_wire_micro(std::int64_t nano) {
@@ -271,6 +300,11 @@ void Drive::after_transition(Cia402State before, runtime_core::MonoTime now) {
     // The guards count from the entry; without a tag the command timeout still runs.
     sync_ref_ = now;
     command_ref_ = now;
+    // Re-entry (transition 16 after a controlword quick stop) abandons the stop: its monitor
+    // must not judge the joint that now moves again.
+    stop_active_ = false;
+    stop_confirmed_ = false;
+    stop_unconfirmed_ = false;
   }
   if (after == Cia402State::kQuickStopActive || after == Cia402State::kFaultReactionActive) {
     start_stop_monitor(now);
@@ -301,6 +335,9 @@ void Drive::note_integrity(runtime_core::MonoTime now) {
   actuated_.reset();
   integrity_pending_ = true;
   integrity_flag_ = true;
+  // The drive acts on it (quick stop at the next W tick), so the assembler must not report the
+  // same violation again at a later SYNC, e.g. the first SYNC after a full rearm.
+  assembler_.acknowledge_violation();
   emit(DriveEvent{DriveEventKind::kIntegrity, now});
 }
 
@@ -338,6 +375,7 @@ std::vector<cc::Frame> Drive::on_sync(runtime_core::MonoTime now) {
       emit(e);
     } else {
       actuated_ = cmd;
+      assembler_.mark_actuated(cmd);  // Only an actuated command advances the last seq (D8).
       command_ref_ = now;
       applied_seq_ = cmd.command_seq;
       applied_tag_ = cmd.exec_tag;
@@ -358,8 +396,8 @@ std::vector<cc::Frame> Drive::sample_tpdos(runtime_core::MonoTime now) {
   sample_time_us_ = to_wire_us(now);
   const JointState& joint = joint_.state();
   return {
-      cc::pack_tpdo1(node_, cc::od::Tpdo1{cia402_.statusword(), to_wire_micro(joint.position_nrad),
-                                          sample_seq_}),
+      cc::pack_tpdo1(node_,
+                     cc::od::Tpdo1{statusword(), to_wire_micro(joint.position_nrad), sample_seq_}),
       cc::pack_tpdo2(
           node_, cc::od::Tpdo2{to_wire_micro(joint.velocity_nrad_s), sample_seq_, applied_seq_}),
       cc::pack_tpdo3(node_, cc::od::Tpdo3{sample_time_us_, sample_seq_, applied_tag_}),
@@ -405,13 +443,20 @@ void Drive::tick(runtime_core::MonoTime now) {
     } else if (!stop_unconfirmed_ && now - stop_started_ >= kStopDeadline) {
       stop_unconfirmed_ = true;  // The monitor keeps watching; a later rest is still reported.
       emit(DriveEvent{DriveEventKind::kStopUnconfirmed, now});
+      if (cia402_.state() == Cia402State::kFaultReactionActive) {
+        // The reaction cannot bring the joint to rest (e.g. a stuck joint): it ends here, and
+        // Fault reports the stop as unconfirmed instead of waiting forever.
+        const Cia402State before = cia402_.state();
+        cia402_.fault_reaction_done();
+        after_transition(before, now);
+      }
     }
   }
 }
 
-std::optional<std::uint16_t> Drive::commit(std::uint64_t generation, std::uint32_t session,
-                                           runtime_core::MonoTime now) {
-  if (policy_latched_) {
+std::optional<std::uint16_t> Drive::commit_for_test(std::uint64_t generation, std::uint32_t session,
+                                                    runtime_core::MonoTime now) {
+  if (policy_latched_ || integrity_pending_) {
     return std::nullopt;  // D11: refused while latched; the (already revoked) tag stays dead.
   }
   return issuer_.commit(generation, session, now);
@@ -423,6 +468,7 @@ bool Drive::policy_reset(runtime_core::MonoTime now) {
   }
   policy_latched_ = false;
   integrity_flag_ = false;
+  assembler_.acknowledge_violation();  // Every violation so far was acted on by this stop.
   apply_inhibit();
   const Cia402State before = cia402_.state();
   switch (before) {
@@ -471,6 +517,12 @@ void Drive::inject_torque_loss(runtime_core::MonoTime now) {
   fault.fault_code = kErrorTorqueLoss;
   emit(fault);
   emit(DriveEvent{DriveEventKind::kStopUnconfirmed, now});
+}
+
+std::uint16_t Drive::statusword() const {
+  constexpr std::uint16_t kFollowsCommand = 1U << 12U;  // CSP statusword bit 12 (CiA 402).
+  const bool following = cia402_.state() == Cia402State::kOperationEnabled && actuated_;
+  return static_cast<std::uint16_t>(cia402_.statusword() | (following ? kFollowsCommand : 0U));
 }
 
 std::uint16_t Drive::drive_flags() const {
@@ -537,10 +589,10 @@ class Drive::Objects final : public ObjectAccess {
     if (pdo_only(e)) {
       return sdo_abort::kUnsupportedAccess;
     }
-    // Every other writable object holds a value this drive does not change at run time (COB-IDs,
-    // transmission types, heartbeat time, option codes, quick-stop deceleration): writing the
-    // value it has is accepted, any other value is an invalid value for the parameter.
-    return v == value(e) ? 0U : sdo_abort::kRange;
+    // Every writable object of the EDS is handled above; values this drive never changes are
+    // `const` there and never reach this point. A writable object added to the EDS without a
+    // handler here is refused rather than silently accepted.
+    return sdo_abort::kUnsupportedAccess;
   }
 
  private:
@@ -557,7 +609,7 @@ class Drive::Objects final : public ObjectAccess {
       return d.controlword_;
     }
     if (at(e, addr::statusword)) {
-      return d.cia402_.statusword();
+      return d.statusword();
     }
     if (at(e, addr::modes_of_operation) || at(e, addr::modes_of_operation_display)) {
       return static_cast<std::uint8_t>(d.cia402_.mode_display());
@@ -622,8 +674,7 @@ class Drive::Objects final : public ObjectAccess {
 std::vector<cc::Frame> Drive::on_sdo(const cc::Frame& frame, runtime_core::MonoTime now) {
   const std::optional<cc::Sdo> request = cc::decode_sdo(node_, frame);
   if (!request) {
-    ++counts_.malformed;
-    return {};
+    return on_unsupported_sdo(frame);
   }
   ++counts_.sdo;
   Objects objects(*this, now);
@@ -637,8 +688,41 @@ std::vector<cc::Frame> Drive::on_sdo(const cc::Frame& frame, runtime_core::MonoT
   return {};  // Unreachable: the server answers with the entry's own size.
 }
 
+std::vector<cc::Frame> Drive::on_unsupported_sdo(const cc::Frame& frame) {
+  // CiA 301: a request with a client command specifier this server does not serve (segmented or
+  // block transfer, or reserved bits set) is answered with abort 0x05040001. The multiplexer is
+  // echoed for the specifiers that carry one (initiate download 1, initiate upload 2, block
+  // upload 5, block download 6) and is zero for segments (0, 3) and the invalid specifier 7. A
+  // client abort (4) is never answered; a frame whose DLC is not 8 is not an SDO request.
+  constexpr unsigned kCcsShift = 5U;
+  constexpr unsigned kCcsAbort = 4U;
+  const unsigned ccs = static_cast<unsigned>(frame.data[0]) >> kCcsShift;
+  if (frame.dlc != 8U || ccs == kCcsAbort) {
+    ++counts_.malformed;
+    return {};
+  }
+  ++counts_.sdo;
+  const bool has_multiplexer = ccs == 1U || ccs == 2U || ccs == 5U || ccs == 6U;
+  cc::Sdo abort{};
+  abort.type = cc::SdoType::kAbortToClient;
+  if (has_multiplexer) {
+    abort.address.index =
+        static_cast<std::uint16_t>(frame.data[1] | static_cast<unsigned>(frame.data[2] << 8U));
+    abort.address.sub = frame.data[3];
+  }
+  abort.abort_code = sdo_abort::kCommandSpecifier;
+  if (const std::optional<cc::Frame> out = cc::encode_sdo(node_, abort)) {
+    return {*out};
+  }
+  return {};  // Unreachable: an abort always encodes.
+}
+
 std::uint32_t Drive::write_exec_request(std::uint8_t sub, std::uint32_t value,
                                         runtime_core::MonoTime now) {
+  // D8: between an integrity violation and its quick stop no new staging starts.
+  if (integrity_pending_) {
+    return sdo_abort::kDeviceState;
+  }
   // 0x2010 is writable only outside Operation Enabled with an active command: a running command
   // stream is never re-staged under it.
   if (cia402_.state() == Cia402State::kOperationEnabled && actuated_) {
@@ -652,12 +736,18 @@ std::uint32_t Drive::write_exec_request(std::uint8_t sub, std::uint32_t value,
 }
 
 std::uint32_t Drive::write_exec_commit(std::uint32_t crc, runtime_core::MonoTime now) {
-  exec_commit_written_ = crc;
+  // D8: between an integrity violation and its quick stop no tag is handed out, not even the
+  // current one again (it dies at the next W tick).
+  if (integrity_pending_) {
+    staging_.clear();
+    return sdo_abort::kDeviceState;
+  }
   // D17 idempotent repeat, decided before any allocation (ExecTagIssuer::commit always allocates):
   // the value of the latest successful commit again, while its tag is still the current one,
   // answers success with that same tag. Staging in progress for a newer attempt is untouched.
   if (last_commit_ && crc == last_commit_->request.crc() &&
       issuer_.epoch() == last_commit_->epoch && issuer_.current() == last_commit_->tag) {
+    exec_commit_written_ = crc;
     return 0U;
   }
   const Cia402State state = cia402_.state();
@@ -679,6 +769,7 @@ std::uint32_t Drive::write_exec_commit(std::uint32_t crc, runtime_core::MonoTime
   }
   staging_.committed(*request);
   last_commit_ = LastCommit{*request, *outcome.tag, issuer_.epoch()};
+  exec_commit_written_ = crc;  // 0x2011 reads back the last successful write only.
   return 0U;
 }
 

@@ -157,6 +157,13 @@ OfferResult CommandAssembler::offer(const Rpdo2& fragment) {
   return OfferResult::kAccepted;
 }
 
+void CommandAssembler::mark_actuated(const Command& command) {
+  follow_issuer();
+  if (command.exec_tag != 0 && command.exec_tag == issuer_.current()) {
+    last_actuated_ = command;
+  }
+}
+
 AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {
   follow_issuer();
   AssemblyResult result;
@@ -185,7 +192,6 @@ AssemblyResult CommandAssembler::on_sync(std::uint32_t now_us) {
       if (validity_open(newest->rpdo2.valid_until_us, now_us, lease_us_)) {
         result.command = Command{newest->rpdo1.target_position, newest->rpdo2.valid_until_us,
                                  newest->seq, newest->rpdo2.exec_tag};
-        last_actuated_ = result.command;
       } else {
         ++dropped_.not_valid;
       }

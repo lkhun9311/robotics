@@ -98,7 +98,12 @@ Frame encode_emcy(const Emcy& emcy);
 std::optional<Emcy> decode_emcy(const Frame& frame);
 
 // ---- Expedited SDO (request 0x600 + node, response 0x580 + node, DLC 8) ----
-// Segmented and block transfers are not part of this drive's contract and do not decode.
+// Segmented and block transfers are not part of this drive's contract and do not decode; the
+// drive answers such a request with abort 0x05040001 itself (drive_core).
+//
+// Frames reach the codec from a SocketCAN adapter (E3b). That adapter must drop remote (RTR)
+// frames, extended (29-bit) frames and error frames before calling the codec: Frame carries an
+// 11-bit identifier only and has no flag that could tell them apart.
 
 enum class SdoType : std::uint8_t {
   kUploadRequest,     // client -> server
@@ -112,8 +117,11 @@ enum class SdoType : std::uint8_t {
 struct Sdo {
   SdoType type{};
   od::Address address{};
-  std::uint8_t size{};         // 1..4 for kUploadResponse and kDownloadRequest, otherwise 0.
-  std::uint32_t value{};       // The `size` low bytes; zero-extended.
+  // 1..4 for kUploadResponse and kDownloadRequest, otherwise 0. A decoded kDownloadRequest may
+  // also have size 0: expedited with the size indicator clear (e = 1, s = 0, command byte 0x22),
+  // size unspecified; `value` then holds all four data bytes. encode_sdo never writes size 0.
+  std::uint8_t size{};
+  std::uint32_t value{};       // The `size` low bytes; zero-extended (all four for size 0).
   std::uint32_t abort_code{};  // Only for the abort types.
 };
 

@@ -48,7 +48,7 @@ class ExecTagIssuer {
                 runtime_core::Duration lifetime = kTagLifetime,
                 runtime_core::Duration quarantine = kBootQuarantine);
 
-  // Issues the next tag, or refuses (abort 0x08000022 at the SDO layer, Task 8). A refused
+  // Issues the next tag, or refuses (abort 0x08000022 at the SDO layer, D3). A refused
   // commit also revokes the current tag: the host asked to leave it, and an exhausted drive must
   // not keep running on its last tag. generation and session are recorded with the tag.
   struct CommitOutcome {

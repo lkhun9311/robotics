@@ -14,7 +14,8 @@ import wire
 GOLDEN_DIR = pathlib.Path(__file__).resolve().parents[2] / "src" / "canopen_codec" / "test" / "golden"
 NODES = (1, 6)
 ABORTS = ((0x06020000, "object does not exist"), (0x06010002, "write to read-only object"),
-          (0x06090030, "value out of range"))
+          (0x06090030, "value out of range"),
+          (0x05040001, "command specifier not valid or unknown (segmented and block requests)"))
 
 
 def families(eds):
@@ -44,6 +45,7 @@ def families(eds):
             sdo.append(wire.sdo_download_response(n, index, sub))
         for code, _ in ABORTS:
             sdo.append(wire.sdo_abort(n, 0x6040, 0, code))
+        sdo.append(wire.sdo_client_abort(n, 0x2011, 0, 0x08000020))
     sdo.append(wire.sdo_upload_request(127, 0x1000, 0))
     sdo.append(wire.sdo_abort(127, 0x1000, 0, 0x06020000))
 

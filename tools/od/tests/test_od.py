@@ -20,9 +20,9 @@ NODE = "node"  # marks a default written relative to $NODEID
 EXPECTED = {
     0x1000: {0: (U32, "ro", 0x00020192, False)},
     0x1001: {0: (U8, "ro", 0, False)},
-    0x1005: {0: (U32, "rw", 0x80, False)},
+    0x1005: {0: (U32, "const", 0x80, False)},
     0x1014: {0: (U32, "ro", (0x80, NODE), False)},
-    0x1017: {0: (U16, "rw", 100, False)},
+    0x1017: {0: (U16, "const", 100, False)},
     0x1018: {
         0: (U8, "ro", 4, False),
         1: (U32, "ro", 0, False),
@@ -30,9 +30,9 @@ EXPECTED = {
         3: (U32, "ro", 0, False),
         4: (U32, "ro", 0, False),
     },
-    0x1400: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x200, NODE), False), 2: (U8, "rw", 1, False)},
-    0x1401: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x300, NODE), False), 2: (U8, "rw", 1, False)},
-    0x1402: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x400, NODE), False), 2: (U8, "rw", 255, False)},
+    0x1400: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x200, NODE), False), 2: (U8, "const", 1, False)},
+    0x1401: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x300, NODE), False), 2: (U8, "const", 1, False)},
+    0x1402: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x400, NODE), False), 2: (U8, "const", 255, False)},
     0x1600: {
         0: (U8, "ro", 3, False),
         1: (U32, "ro", 0x607A0020, False),
@@ -46,9 +46,9 @@ EXPECTED = {
         3: (U32, "ro", 0x20210310, False),
     },
     0x1602: {0: (U8, "ro", 1, False), 1: (U32, "ro", 0x60400010, False)},
-    0x1800: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x180, NODE), False), 2: (U8, "rw", 1, False)},
-    0x1801: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x280, NODE), False), 2: (U8, "rw", 1, False)},
-    0x1802: {0: (U8, "ro", 2, False), 1: (U32, "rw", (0x380, NODE), False), 2: (U8, "rw", 1, False)},
+    0x1800: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x180, NODE), False), 2: (U8, "const", 1, False)},
+    0x1801: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x280, NODE), False), 2: (U8, "const", 1, False)},
+    0x1802: {0: (U8, "ro", 2, False), 1: (U32, "const", (0x380, NODE), False), 2: (U8, "const", 1, False)},
     0x1A00: {
         0: (U8, "ro", 3, False),
         1: (U32, "ro", 0x60410010, False),
@@ -99,14 +99,14 @@ EXPECTED = {
     # CiA 402; D2 units, D10/D11 stop values
     0x6040: {0: (U16, "rww", 0, True)},
     0x6041: {0: (U16, "ro", 0, True)},
-    0x605A: {0: (I16, "rw", 6, False)},
-    0x605E: {0: (I16, "rw", 2, False)},
+    0x605A: {0: (I16, "const", 6, False)},
+    0x605E: {0: (I16, "const", 2, False)},
     0x6060: {0: (I8, "rw", 8, False)},
     0x6061: {0: (I8, "ro", 8, False)},
     0x6064: {0: (I32, "ro", 0, True)},
     0x606C: {0: (I32, "ro", 0, True)},
     0x607A: {0: (I32, "rww", 0, True)},
-    0x6085: {0: (U32, "rw", 10_000_000, False)},
+    0x6085: {0: (U32, "const", 10_000_000, False)},
 }
 
 # Value limits (LowLimit, HighLimit) the drive enforces on SDO writes; every other entry has

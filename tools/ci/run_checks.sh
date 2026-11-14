@@ -42,8 +42,8 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=184
-PYTEST_FLOOR=218
+GTEST_FLOOR=203
+PYTEST_FLOOR=219
 INTEGRATION_FLOOR=11
 SIM_FLOOR=30
 
@@ -119,7 +119,7 @@ echo "== simulation checks (release install, headless) =="
 )
 require_at_least "simulation checks" "$(junit_count artifacts/pytest-sim.xml)" "$SIM_FLOOR"
 
-echo "== clang-tidy (every package's src and harness; tests excluded, see plan) =="
+echo "== clang-tidy (every package's src and harness; tests are not linted) =="
 # A package with sources but no compile database cannot be checked, which is a failure, not a skip.
 tidied=0
 for pkg_dir in src/*/; do

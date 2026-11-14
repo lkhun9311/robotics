@@ -136,7 +136,7 @@ TEST(Dispatch, NoSelfStartAfterBootUp) {
 
 TEST(Dispatch, ResetCommunicationClearsTagSessionGeneration) {
   Fixture d;
-  const auto first = d.drive.issuer().commit(7, 9, kReady);
+  const auto first = d.drive.commit_for_test(7, 9, kReady);
   ASSERT_TRUE(first.has_value());
   d.send(nmt(cc::NmtCommand::kStart));
   d.send(controlword(0x06));
@@ -156,14 +156,14 @@ TEST(Dispatch, ResetCommunicationClearsTagSessionGeneration) {
   EXPECT_EQ(d.drive.cia402().state(), Cia402State::kReadyToSwitchOn);
 
   // The allocator survives: the next tag follows the revoked one, no quarantine restarts.
-  const auto second = d.drive.issuer().commit(8, 10, kReady);
+  const auto second = d.drive.commit_for_test(8, 10, kReady);
   ASSERT_TRUE(second.has_value());
   EXPECT_EQ(*second, static_cast<std::uint16_t>(*first + 1));
 }
 
 TEST(Dispatch, ResetNodeStartsNewBoot) {
   Fixture d;
-  const auto tag = d.drive.issuer().commit(7, 9, kReady);
+  const auto tag = d.drive.commit_for_test(7, 9, kReady);
   ASSERT_TRUE(tag.has_value());
   d.send(nmt(cc::NmtCommand::kStart));
   d.send(controlword(0x06));
@@ -178,8 +178,8 @@ TEST(Dispatch, ResetNodeStartsNewBoot) {
   EXPECT_EQ(d.drive.cia402().state(), Cia402State::kSwitchOnDisabled);
   EXPECT_EQ(d.drive.assembler().held_fragments(), 0U);
   // A new boot starts a new quarantine.
-  EXPECT_FALSE(d.drive.issuer().commit(1, 1, kReady).has_value());
-  EXPECT_TRUE(d.drive.issuer().commit(1, 1, kReady + milliseconds(100)).has_value());
+  EXPECT_FALSE(d.drive.commit_for_test(1, 1, kReady).has_value());
+  EXPECT_TRUE(d.drive.commit_for_test(1, 1, kReady + milliseconds(100)).has_value());
 }
 
 TEST(Dispatch, ForeignAndMalformedFramesAreIgnored) {
