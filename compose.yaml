@@ -1,18 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
+x-dev-build: &dev-build
+  context: .
+  dockerfile: docker/Dockerfile
+  target: dev
+  args:
+    ROS_IMAGE: ${ROS_IMAGE:?set ROS_IMAGE in .env}
+    RUNTIME_IMAGE: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE in .env}
+    ROS_SNAPSHOT: ${ROS_SNAPSHOT:?set ROS_SNAPSHOT in .env}
+    MENAGERIE_COMMIT: ${MENAGERIE_COMMIT:?set MENAGERIE_COMMIT in .env}
+
 services:
+  # Owns the network namespace of the bus (B12): vcan_host and vcan_device live here, and dev and
+  # peer join it. It stays up even when vcan_up.sh cannot make the links (exit 3, NOT_RUN), so the
+  # vcan stage in dev runs vcan_up.sh again and reports NOT_RUN itself instead of not starting.
+  robot:
+    build: *dev-build
+    image: robotics-dev:local
+    init: true
+    working_dir: /ws
+    volumes:
+      - ./:/ws:ro
+    cap_add: [NET_ADMIN]
+    command: ["bash", "-c", "tools/bus/vcan_up.sh; touch /tmp/vcan_up.done; exec sleep infinity"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/vcan_up.done"]
+      interval: 1s
+      retries: 30
   dev:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: dev
-      args:
-        ROS_IMAGE: ${ROS_IMAGE:?set ROS_IMAGE in .env}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE in .env}
-        ROS_SNAPSHOT: ${ROS_SNAPSHOT:?set ROS_SNAPSHOT in .env}
-        MENAGERIE_COMMIT: ${MENAGERIE_COMMIT:?set MENAGERIE_COMMIT in .env}
+    build: *dev-build
     image: robotics-dev:local
     working_dir: /ws
     init: true
+    network_mode: service:robot
+    depends_on:
+      robot:
+        condition: service_healthy
     volumes:
       - ./:/ws
       - build:/ws/build
@@ -24,6 +46,20 @@ services:
       memlock:
         soft: -1
         hard: -1
+  # The Lely master side of the interop tests, in the same namespace as robot and dev. Started
+  # on demand: docker compose --profile peer run --rm peer <command>.
+  peer:
+    image: robotics-dev:local
+    profiles: [peer]
+    working_dir: /ws
+    init: true
+    network_mode: service:robot
+    depends_on:
+      robot:
+        condition: service_healthy
+    volumes:
+      - ./:/ws:ro
+      - install:/ws/install:ro
 volumes:
   build: {}
   install: {}
