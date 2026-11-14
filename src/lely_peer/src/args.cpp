@@ -60,6 +60,20 @@ Number parse_number(std::string_view text, std::uint64_t low, std::uint64_t high
   return out;
 }
 
+StatuswordOption parse_statusword_source(std::string_view text) {
+  StatuswordOption out;
+  if (text == "tpdo") {
+    out.source = StatuswordSource::kTpdo;
+  } else if (text == "sdo") {
+    out.source = StatuswordSource::kSdo;
+  } else {
+    out.error = "expected tpdo or sdo, got '" + std::string(text) + "'";
+    return out;
+  }
+  out.ok = true;
+  return out;
+}
+
 NodeList parse_nodes(std::string_view text) {
   NodeList out;
   std::set<std::uint8_t> nodes;

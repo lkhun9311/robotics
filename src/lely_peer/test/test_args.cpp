@@ -15,6 +15,8 @@ using lely_peer::parse_console;
 using lely_peer::parse_nodes;
 using lely_peer::parse_number;
 using lely_peer::parse_options;
+using lely_peer::parse_statusword_source;
+using lely_peer::StatuswordSource;
 
 TEST(ParseNodes, RangeListAndSingle) {
   EXPECT_EQ(parse_nodes("1-6").nodes, (std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6}));
@@ -40,6 +42,23 @@ TEST(ParseNumber, BoundsAndSyntax) {
   EXPECT_FALSE(parse_number("-1", 0, 10).ok);
   EXPECT_FALSE(parse_number("1x", 0, 10).ok);
   EXPECT_FALSE(parse_number("", 0, 10).ok);
+}
+
+TEST(StatuswordSource, TpdoAndSdo) {
+  const auto tpdo = parse_statusword_source("tpdo");
+  EXPECT_TRUE(tpdo.ok);
+  EXPECT_EQ(tpdo.source, StatuswordSource::kTpdo);
+  const auto sdo = parse_statusword_source("sdo");
+  EXPECT_TRUE(sdo.ok);
+  EXPECT_EQ(sdo.source, StatuswordSource::kSdo);
+}
+
+TEST(StatuswordSource, RejectsOtherWords) {
+  for (const std::string_view word : {"", "SDO", "tpdo1", "rpdo"}) {
+    const auto parsed = parse_statusword_source(word);
+    EXPECT_FALSE(parsed.ok) << word;
+    EXPECT_FALSE(parsed.error.empty()) << word;
+  }
 }
 
 TEST(ParseOptions, AcceptsKnownPairs) {

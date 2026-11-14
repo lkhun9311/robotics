@@ -25,6 +25,9 @@
 //   scenario_failed {scenario, reason}    a step could not be performed; exit 1
 //   exit   {}                             last line
 //   lely_peer --if IF --dcf PATH --scenario NAME [--node N] [--count K] [--duration-ms MS]
+//             [--statusword tpdo|sdo]
+//   (--statusword: where the node scenarios read 6041h while waiting for a CiA 402 state; tpdo,
+//   the default, is Lely's TPDO1 values, sdo is an SDO upload, for a bus that loses TPDO1)
 //   (console: --node is optional and only selects the node whose TPDO values are reported)
 // Scenarios (the node scenarios start when Lely reports node N booted; --duration-ms is their
 // deadline, default 15 s, after which they fail):
@@ -147,6 +150,7 @@ struct Run {
   std::string scenario;
   std::uint8_t node = 0;
   std::uint32_t count = 0;
+  lely_peer::StatuswordSource statusword = lely_peer::StatuswordSource::kTpdo;
   bool finished = false;
   std::uint64_t emcy = 0;
   // Scenario fibers still running and SDO requests still pending in Lely's client: the master
@@ -317,6 +321,19 @@ class PeerDriver : public canopen::FiberDriver {
   }
 
   bool WaitStatus(std::uint16_t state, int ms) {
+    if (run_.statusword == lely_peer::StatuswordSource::kSdo) {
+      // --statusword sdo: one upload of 6041h at a time until the state shows or `ms` pass.
+      const double deadline = now_s() + (static_cast<double>(ms) / 1000.0);
+      while (!run_.finished && now_s() < deadline) {
+        const auto sw = SdoRead<std::uint16_t>(kStatusword, 0);
+        if (sw && (*sw & kStateMask) == state) {
+          return true;
+        }
+        std::error_code ec;
+        USleep(2000, ec);
+      }
+      return false;
+    }
     return WaitFor(
         [this, state]() {
           for (const auto sw : statuswords_) {
@@ -849,6 +866,14 @@ int run(const lely_peer::Options& opts) {
   }
   run.node = static_cast<std::uint8_t>(node);
   run.count = static_cast<std::uint32_t>(count);
+  if (const auto it = opts.values.find("statusword"); it != opts.values.end()) {
+    const auto parsed = lely_peer::parse_statusword_source(it->second);
+    if (!parsed.ok) {
+      std::fprintf(stderr, "lely_peer: --statusword: %s\n", parsed.error.c_str());
+      return 2;
+    }
+    run.statusword = parsed.source;
+  }
   if (node_scenario && duration_ms == 0) {
     duration_ms = 15000;  // the node scenarios' deadline
   }
@@ -1033,11 +1058,12 @@ int run(const lely_peer::Options& opts) {
 int main(int argc, char** argv) {
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   const auto opts = lely_peer::parse_options(
-      args, {"if", "dcf", "scenario", "node", "count", "duration-ms"}, {"if", "dcf", "scenario"});
+      args, {"if", "dcf", "scenario", "node", "count", "duration-ms", "statusword"},
+      {"if", "dcf", "scenario"});
   if (!opts.ok) {
     std::fprintf(stderr,
                  "lely_peer: %s\nusage: lely_peer --if IF --dcf PATH --scenario NAME [--node N] "
-                 "[--count K] [--duration-ms MS]\n",
+                 "[--count K] [--duration-ms MS] [--statusword tpdo|sdo]\n",
                  opts.error.c_str());
     return 2;
   }

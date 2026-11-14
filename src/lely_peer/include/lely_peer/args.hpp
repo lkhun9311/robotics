@@ -43,6 +43,20 @@ struct Number {
 // Parses a decimal number in [low, high].
 Number parse_number(std::string_view text, std::uint64_t low, std::uint64_t high);
 
+// Where the node scenarios read the drive's statusword (6041h) while they wait for a CiA 402
+// state: from the TPDO1 values Lely decodes (tpdo, the default), or by SDO upload (sdo), for a
+// bus on which TPDO1 does not reach the master.
+enum class StatuswordSource : std::uint8_t { kTpdo, kSdo };
+
+struct StatuswordOption {
+  bool ok = false;
+  std::string error;
+  StatuswordSource source = StatuswordSource::kTpdo;
+};
+
+// Parses the value of --statusword: "tpdo" or "sdo".
+StatuswordOption parse_statusword_source(std::string_view text);
+
 // One line of the `console` scenario (stdin), parsed in full before anything is done:
 //   nmt <node> <cs>                              NMT command specifier cs (0..255) to node
 //   cw <node> <value>                            controlword (0..0xFFFF) by RPDO3
