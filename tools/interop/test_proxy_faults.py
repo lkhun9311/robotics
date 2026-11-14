@@ -8,6 +8,7 @@ after the stream, stops everything and hands the observation to its judge in jud
 (F1-F6). The restart row (R1) replays frames of a killed bank's tag into its successor; the
 cost row publishes the proxy's normal-path cost (a measurement, no threshold).
 """
+import json
 import os
 import shutil
 import subprocess
@@ -261,4 +262,5 @@ def test_proxy_cost_recorded(start_bank, start_proxy, start_peer):
     out = ARTIFACTS / "proxy-cost.json"
     assert proxy_cost.main([str(proxy.trace.path), "--out", str(out),
                             "--commit", commit_sha() or "unknown"]) == 0
-    print(f"proxy cost: {out.read_text()}")
+    written = json.loads(out.read_text())
+    print(f"proxy cost: {json.dumps({k: v for k, v in written.items() if k != 'dist'})}")

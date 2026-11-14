@@ -7,7 +7,8 @@
 // proxy. The trace (JSON lines) has a `start` record once both sockets are open and an `exit`
 // record on SIGTERM or SIGINT with the forwarding counts, the per-rule counts, the socket counters
 // and the forwarding cost of the normal path (B10: CLOCK_MONOTONIC right after recvmsg to right
-// after write returns; a measurement, not a gate). Frames still held at exit are not written and
+// after write returns; a measurement, not a gate), with its distribution as [value, count] pairs
+// ("dist", ascending, summing to "samples"). Frames still held at exit are not written and
 // are reported as dropped_at_exit. Exit 2: bad arguments or rules (the line is named), or an
 // interface or the trace cannot be opened.
 #include <linux/can.h>
@@ -36,6 +37,7 @@
 #include <string_view>
 #include <vector>
 
+#include "bus_fault_proxy/cost.hpp"
 #include "bus_fault_proxy/engine.hpp"
 #include "bus_fault_proxy/rules.hpp"
 #include "socketcan_io/socket.hpp"
@@ -205,7 +207,12 @@ class Proxy {
       << R"(},"dropped_at_exit":)" << dropped_at_exit << R"(,"cost_ns":{"count":)"
       << costs_.size() + costs_uncounted_ << R"(,"samples":)" << costs_.size() << R"(,"p50":)"
       << percentile(costs_, 50) << R"(,"p99":)" << percentile(costs_, 99) << R"(,"max":)"
-      << (costs_.empty() ? 0 : costs_.back()) << R"(},"rules":[)";
+      << (costs_.empty() ? 0 : costs_.back()) << R"(,"dist":[)";
+    const std::vector<bus_fault_proxy::ValueCount> dist = bus_fault_proxy::run_lengths(costs_);
+    for (std::size_t i = 0; i < dist.size(); ++i) {
+      o << (i == 0 ? "[" : ",[") << dist[i].value << ',' << dist[i].count << ']';
+    }
+    o << R"(]},"rules":[)";
     const std::vector<bus_fault_proxy::RuleCounts>& counts = engine_.counts();
     for (std::size_t i = 0; i < counts.size(); ++i) {
       const bus_fault_proxy::RuleCounts& c = counts[i];

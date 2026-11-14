@@ -4,8 +4,9 @@
 
 The proxy measures each frame it forwards on the normal path (nothing held, no rule acting):
 CLOCK_MONOTONIC right after recvmsg to right after write returns, in ns, and writes the
-summary (count, p50, p99, max; nearest rank) into its exit record. This reads that record. It
-is a published measurement, not a threshold.
+summary (count, p50, p99, max; nearest rank) and the exact distribution (`dist`: every distinct
+value with its count, ascending) into its exit record. This reads that record. It is a published
+measurement, not a threshold; tools/evidence/proxy_cost_histogram.py draws the distribution.
 """
 from __future__ import annotations
 
@@ -27,9 +28,14 @@ def summarize(trace: Path) -> dict:
     if last.get("trace_overflow") != 0:
         raise ValueError(f"{trace}: trace_overflow = {last.get('trace_overflow')}")
     cost = last["cost_ns"]
+    dist = cost.get("dist")
+    values = [v for v, _ in dist or []]
+    if dist is None or sum(n for _, n in dist) != cost["samples"] or values != sorted(set(values)):
+        raise ValueError(f"{trace}: cost dist does not hold the {cost['samples']} samples once each "
+                         "in ascending order")
     return {"definition": DEFINITION, "unit": "ns", "count": cost["count"],
             "samples": cost["samples"], "p50": cost["p50"], "p99": cost["p99"],
-            "max": cost["max"]}
+            "max": cost["max"], "dist": dist}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     out["host"] = args.host or socket.gethostname()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2) + "\n")
-    print(json.dumps(out))
+    print(json.dumps({k: v for k, v in out.items() if k != "dist"}))
     return 0
 
 
