@@ -18,7 +18,7 @@ A simulation-based robot system runtime, built in stages.
 
 | Stage | State |
 |---|---|
-| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, and the MuJoCo plugin and Menagerie model done; CANopen peers, supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
+| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, the MuJoCo plugin and Menagerie model, and the Lely CANopen peer in the dev image done; the CANopenNode peer (E3c), supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
 | E1 command and permit contracts, independent judge | done |
 | E2 official plugin baseline | done: stock JTC baseline; no permit/generation guarantee |
 | E3 | in progress: E3a wire contract and drive core done; E3b bus processes, fault proxy and Lely interop done; E3c-E3d planned |
@@ -370,8 +370,9 @@ run's `pytest-vcan.xml`:
 | R1 | bank restart, old-tag replay | `test_proxy_faults.py::test_restart_rejects_captured_old_tag_frames` | PASS |
 
 How a row is judged: each test captures both interfaces with `AF_CAN` sockets (what Lely saw
-on `vcan_host`, what the drives saw on `vcan_device`) and reads Lely's own decoded events, the
-bank trace and the proxy's exit record. Expectations come from CiA 301 tables written from the
+on `vcan_host`, what the drives saw on `vcan_device`), each frame stamped with its kernel
+receive time (`SO_TIMESTAMPNS`, mapped to `CLOCK_MONOTONIC`), and reads Lely's own decoded
+events, the bank trace and the proxy's exit record. Expectations come from CiA 301 tables written from the
 standard (`tools/interop/cia301.py`), the independent wire encoder (`tools/od/wire.py`) and the
 EDS defaults, never from the C++ under test. Every row asserts its preconditions first (processes
 ready, traces complete with no overflow, proxy rule match counts exact, the declared commands on
@@ -389,7 +390,7 @@ What each row shows, and what it does not:
 | Row | Shows (from `rejudge.py`) | Does not show |
 |---|---|---|
 | M1 | Node 3 through Start, Stop, Pre-operational, Reset Communication, Reset Node: the heartbeat byte on the wire and Lely's state agree after each; boot-up after both resets; no SDO answer and no TPDO in Stopped; SDO but no TPDO in Pre-operational; TPDO1-3 after every SYNC in Operational | Other nodes than 3; how fast a command takes effect (only order and presence are judged) |
-| M2 | A node whose first heartbeat never comes: Lely's boot reports `K` for node 2 only and nothing restarts it; a running heartbeat that stops: Lely reports the timeout 0.250 s after the last heartbeat (bound 1 s); the bank killed: Lely reports all six | Heartbeat-consumer timing accuracy (the bound is broad on purpose); the loss of one node alone by a crash, since six nodes share one process |
+| M2 | A node whose first heartbeat never comes: Lely's boot reports `K` for node 2 only and nothing restarts it; a running heartbeat that stops: Lely reports the timeout 0.196 s after the mute (bound 1 s from the mute; 0.250 s after the last heartbeat); the bank killed: Lely reports all six | Heartbeat-consumer timing accuracy (the bound is broad on purpose); the loss of one node alone by a crash, since six nodes share one process |
 | M3 | Uploads of 0x1000, 0x1017, 0x1018:01 equal the EDS defaults; a download of 0x6060 = 8 completes with CiA 301 expedited bytes; five aborts (0x06020000, 0x06010002 twice, 0x06090030, 0x06070010) on the wire and in Lely | A mutation (the closed profile has no multi-valued standard writable object); segmented or block transfers |
 | M4 | 69 frames of each TPDO1-3, DLC 8, each byte-equal to `wire.py` encoding the values Lely decoded; Lely's RPDO1/2 (DLC 8) and RPDO3 (DLC 2) equal `wire.py`; a DLC 7 RPDO1 raises `malformed` by one and actuates nothing, while a well-formed control pair does actuate | That the EDS itself is right: Lely and our slave both read our EDS, so a shared misreading passes |
 | M5 | Over 49 commands, RPDO1/2 of seq k between SYNC j and j+1 first appear as TPDO2 `applied_seq` = k after SYNC j+1, never after SYNC j; `sample_seq` +1 per SYNC | CAN arbitration timing (vcan has none); more than one streamed node |
@@ -401,7 +402,7 @@ What each row shows, and what it does not:
 | F4 | RPDO1 released behind RPDO2 inside one SYNC window: all 60 seqs still pair and actuate | Reordering across a SYNC |
 | F5 | One RPDO1 forwarded, then a copy with one target bit flipped: integrity violation at the copy, quick stop `integrity`, latch and integrity flags set (0x0005), nothing after seq 26 actuated | Which frame the rule hits is timing-dependent; if it hits no stream frame the row is INCONCLUSIVE, not PASS |
 | F6 | Every TPDO1 dropped toward the master: Lely decodes none, the drive actuates every seq | How a master should react to missing feedback (the peer reads the statusword by SDO instead) |
-| R1 | The bank killed and restarted with new boot IDs and a new tag; 44 captured old-tag RPDO1/2 replayed: each dropped as other tag, nothing actuated; a live new-tag control frame proves the new tag was current; a new stream then actuates 10 | Replay while the drive is in Operation Enabled (it is in Switched On, where no guard runs); a tag collision across the restart (the branch exists, never triggered) |
+| R1 | The bank killed and restarted with new boot IDs and a new tag; 44 captured old-tag RPDO1/2 replayed: each dropped as other tag, nothing actuated; a live new-tag control frame proves the new tag was current; a new stream then actuates 10 | Replay while the drive is in Operation Enabled (it is in Switched On, where the command-timeout and SYNC-loss guards do not run); a tag collision across the restart (the branch exists, never triggered) |
 
 The drive's policy latch and integrity bits (F1, F5) are read by one SDO upload of 0x2030:05 on
 `vcan_host` after each stream, a standard-part observable.
@@ -473,9 +474,10 @@ image's, the check asks for a regeneration instead of comparing bytes.
 5. The drive extension (tags, leases, commit) is checked only against our own drive, never by
    Lely.
 6. Lely 2.3.5 sends one NMT reset communication (`82 00`, broadcast) at master start. Its
-   `reset_communication: false` option does not remove it but sends 126 single resets instead,
-   so the broadcast is accepted and asserted to be the only NMT command no scenario asked for
-   (B15).
+   `reset_communication: false` option does not remove it but sends Reset Communication to
+   each node-ID one by one instead (seen while calibrating the peer and recorded in
+   `config/interop/bus.yml`; no test reproduces it), so the broadcast is accepted and asserted
+   to be the only NMT command no scenario asked for (B15).
 7. Lely 2.3.5's `FiberDriver::Wait` on an SDO future crashed (SIGSEGV) on the first SDO
    abort; the peer uses Lely's confirmation callbacks instead and polls for them in the fiber.
 8. Lely transmits its synchronous TPDOs (our RPDO1/RPDO2) on every SYNC, also for nodes it does
@@ -483,7 +485,8 @@ image's, the check asks for a regeneration instead of comparing bytes.
    these as other-tag fragments or do not process them outside Operational; the rows account for
    them.
 9. Lely reports the values of a synchronous TPDO it receives at its next SYNC, one SYNC late.
-   M1 judges Lely's PDO lines from Lely's first SYNC after a command.
+   M1 judges Lely's PDO lines from Lely's second SYNC after a command, by the order of
+   Lely's own lines rather than a time window.
 10. The drive classifies a fragment's tag before its deadline (D8), so in F1 no late RPDO2 is a
     not-valid drop: each one that a SYNC closes on is an other-tag drop, and those after the
     bus's last SYNC are only named as trailing (`python3 tools/evidence/rejudge.py f1`). The
@@ -514,7 +517,7 @@ image's, the check asks for a regeneration instead of comparing bytes.
 - `src/socketcan_io` raw CAN socket with receive classification; `src/vdrive_bank` six drives as one process on vcan; `src/bus_fault_proxy` the forwarding and fault-rule proxy; `src/lely_peer` the Lely master test peer
 - `config/interop` Lely bus description and the fault rule files; `tools/bus` vcan links and the compose topology smoke
 - `tools/interop` vcan tests: processes, the Lely matrix, proxy faults, judges and recorded observations
-- `tools/evidence` scripts that make the E2, E3a and E3b images, the replay render, the frame trace and the tables from committed inputs
+- `tools/evidence` scripts that make the E2, E3a and E3b images, the replay render, the frame trace and the tables; all from committed inputs except the interop matrix table, which is generated from a CI run's `pytest-vcan.xml` artifact
 - `src/ur5e_description` UR5e model, scene and ros2_control description
 - `src/robot_bringup` launch file and controller and plugin configuration
 - `models/` checksums of the pinned Menagerie model; `tools/models` fetch and verify
