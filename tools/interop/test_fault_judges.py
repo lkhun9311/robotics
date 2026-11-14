@@ -125,9 +125,29 @@ def test_integrity_where_none_is_allowed_fails(row):
 
 def test_f2_lost_seq_actuated_fails():
     obs = load("F2")
-    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=4, tag=stream_tag(obs)))
+    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=5, tag=stream_tag(obs)))
     status, text = verdict(obs)
-    assert status == "FAIL" and "actuated minus expected [4]" in text, f"{status}: {text}"
+    assert status == "FAIL" and "actuated minus expected [5]" in text, f"{status}: {text}"
+
+
+@pytest.mark.parametrize("row", ("F2", "F7"))
+def test_gap_row_streamed_with_the_default_validity_is_inconclusive(row):
+    obs = load(row)
+    for e in obs["peer"]:
+        if e.get("event") == "stream":
+            e["valid_until"] = (e["valid_until"] - 8000) % 2**32  # now + 40 ms
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "lands on the expiry" in text, f"{status}: {text}"
+
+
+def test_f2_first_seq_lost_is_inconclusive():
+    obs = load("F2")
+    tag = stream_tag(obs).to_bytes(2, "little")
+    first = next(f for f in obs["device"] if f[1] == 0x203 and bytes.fromhex(f[2])[4:8] ==
+                 (1).to_bytes(2, "little") + tag)
+    obs["device"].remove(first)
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "seq 1 lost" in text, f"{status}: {text}"
 
 
 def test_f3_actuated_set_differs_from_no_rule_run_fails():

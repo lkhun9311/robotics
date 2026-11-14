@@ -1,3 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# Every third RPDO1 of node 3 lost: an ordinary gap, never an integrity violation.
-h2d 0x203/0x7FF every 3 drop
+# Every third RPDO1 of node 3 lost: an ordinary gap, never an integrity violation. The 15 RPDO1
+# Lely sends during the commit count as matches, so the stream loses seqs 2, 5, 8, ...: seq 1 is
+# kept, and the first actuation is 10 ms inside the command timeout after Enable Operation. The
+# row streams with valid_until = now + 48 ms, so the previous command outlasts each lost update
+# by 8 ms.
+h2d 0x203/0x7FF every 3 offset 1 drop

@@ -29,6 +29,9 @@ ARTIFACTS = ROOT / "artifacts"
 COST_FRAMES = 5000  # B10 sample size; fewer is INCONCLUSIVE.
 COST_LIMIT_S = 60
 CONTROL_SEQ = 1000  # R1: the control fragment's seq, one no stream reaches.
+# F7 and F2 lose single updates: their streams are valid for the drive's whole lease, so the
+# previous command outlasts a lost update by 8 ms (judges.GAP_VALIDITY_MIN_US).
+GAP_VALIDITY_MS = 48
 
 
 def rules_text(name):
@@ -65,7 +68,7 @@ def stream_through(row, rules, capture, start_bank, start_proxy, start_peer, pee
 
 def test_late_rpdo2_is_dropped_not_valid(capture, start_bank, start_proxy, start_peer, peer):
     judge(stream_through("F7", rules_text("delay_some_rpdo2.rules"), capture, start_bank,
-                         start_proxy, start_peer, peer))
+                         start_proxy, start_peer, peer, validity_ms=GAP_VALIDITY_MS))
 
 
 def test_all_late_rpdo2_times_out_to_quick_stop(capture, start_bank, start_proxy, start_peer,
@@ -77,7 +80,7 @@ def test_all_late_rpdo2_times_out_to_quick_stop(capture, start_bank, start_proxy
 def test_drop_every_third_rpdo1_is_an_ordinary_gap(capture, start_bank, start_proxy, start_peer,
                                                     peer):
     judge(stream_through("F2", rules_text("drop_every_third_rpdo1.rules"), capture, start_bank,
-                         start_proxy, start_peer, peer))
+                         start_proxy, start_peer, peer, validity_ms=GAP_VALIDITY_MS))
 
 
 def test_duplicate_fragments_change_nothing(capture, start_bank, start_proxy, start_peer, peer):

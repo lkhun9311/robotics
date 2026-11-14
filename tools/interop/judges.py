@@ -965,12 +965,32 @@ def applied_matches(obs, act):
                           f"the actuated seqs")
 
 
+# A lost update is an ordinary gap only while the previous command outlasts it. Lely sends a
+# write at the next SYNC and the drive actuates it at the one after, so after one lost update
+# the next command is actuated 4 T_bus = 40 ms after the previous write: a validity of 40 ms
+# expires at that instant, and whether the drive stops depends on which comes first in its loop.
+# The rows with a gap need a validity longer by at least 3 W (the lease allows 48 ms), and the
+# first update must not be lost: Enable Operation goes out with it, and the guards count from
+# the entry, so losing it puts the first actuation on the 30 ms command timeout.
+GAP_VALIDITY_MIN_US = 40_000 + 3 * 2_000
+
+
+def gap_margins(obs, lost):
+    """Preconditions of a row whose stream has gaps (F2, F7); `lost` the seqs not actuated."""
+    short = [e["seq"] for e in events(obs, "stream", node=NODE)
+             if (e["valid_until"] - int(e["t"] * 1e6)) % 2**32 < GAP_VALIDITY_MIN_US]
+    need(not short, f"stream seqs {short[:3]}.. valid for less than "
+                    f"{GAP_VALIDITY_MIN_US // 1000} ms: a lost update lands on the expiry")
+    need(1 not in lost, "seq 1 lost: the first actuation lands on the command timeout")
+
+
 def judge_f2(obs):
     """Every third RPDO1 lost: ordinary gaps, no integrity violation."""
     tag, seqs, rules, matched = stream_preconditions(obs)
     reached = {s for _, s, _ in rpdo_seqs(obs, "device", 1, tag)}
     lost = [s for s in seqs if s not in reached]
     need(len(lost) >= len(seqs) // 3 - 1, f"only {len(lost)} stream RPDO1 lost: {lost}")
+    gap_margins(obs, lost)
     no_integrity(obs)
     act = actuated_once(obs, tag)
     last = seqs[-1]
@@ -1227,6 +1247,7 @@ def judge_f7(obs):
     delayed_seqs = {s for s, d in first_rpdo2.items() if d in delayed}
     need(len(delayed_seqs - {last}) >= len(seqs) // rules[0]["every"] - 1,
          f"only {len(delayed_seqs)} stream seqs had their RPDO2 delayed")
+    gap_margins(obs, delayed_seqs)
     on_device = [(t, s) for t, s, d in rpdo_seqs(obs, "device", 2, tag) if d in delayed]
     need(len(on_device) == len(delayed), f"{len(delayed)} RPDO2 delayed, {len(on_device)} on "
                                          f"vcan_device")
