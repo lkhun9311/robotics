@@ -102,6 +102,9 @@ def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
 
     active: dict | None = None
     max_session = max_generation = 0
+    # Sessions and generations are global, not per manager instance (runtime_core ids.hpp,
+    # and the backwards check below already compares across managers): once closed, a value
+    # stays closed for every later manager instance, including one after a restart.
     closed_sessions: set = set()
     closed_generations: set = set()
     faults: list[dict] = []
@@ -115,8 +118,8 @@ def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
         # its session and generation may not be used again.
         nonlocal active
         if active is not None:
-            closed_sessions.add((active["manager"], active["session"]))
-            closed_generations.add((active["manager"], active["generation"]))
+            closed_sessions.add(active["session"])
+            closed_generations.add(active["generation"])
             active = None
         ob = {"t": t, "latched_t": t if latched else None, "reset": False, "recovered": False,
               "requested": False, "enable": False}
@@ -127,7 +130,7 @@ def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
         kind, t = e["kind"], e["t_ns"]
         if kind == "permit_issued":
             m, ses, gen = e["manager"], e["session"], e["generation"]
-            if (m, ses) in closed_sessions or (m, gen) in closed_generations:
+            if ses in closed_sessions or gen in closed_generations:
                 fails.append(f"t={t}: permit reuses a closed session/generation {ses}/{gen}")
             if e["expires_ns"] - t > begin["lease_ns"]:
                 fails.append(f"t={t}: permit lasts {e['expires_ns'] - t} ns, longer than the lease {begin['lease_ns']} ns")
@@ -137,14 +140,14 @@ def judge(events: list, *, allow_unit_scenario: bool = False) -> Verdict:
             if ses < max_session or gen < max_generation:
                 fails.append(f"t={t}: session/generation goes backwards to {ses}/{gen}")
             if active is not None and active["generation"] != gen:
-                closed_generations.add((active["manager"], active["generation"]))
+                closed_generations.add(active["generation"])
             max_session, max_generation = max(max_session, ses), max(max_generation, gen)
             active = {"manager": m, "session": ses, "generation": gen, "expires_ns": e["expires_ns"]}
         elif kind == "permit_revoked":
             key = (e["manager"], e["session"], e["generation"])
-            closed_generations.add((key[0], key[2]))
+            closed_generations.add(key[2])
             if active is not None and key == (active["manager"], active["session"], active["generation"]):
-                closed_sessions.add((key[0], key[1]))
+                closed_sessions.add(key[1])
                 active = None
         elif kind == "fault_injected" and e["name"] not in KNOWN_FAULTS:
             incomplete.append(f"t={t}: unknown fault {e['name']!r} has no obligation")
