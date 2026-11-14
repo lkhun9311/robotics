@@ -12,8 +12,10 @@
 // interface or the trace cannot be opened.
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <net/if.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -47,6 +49,10 @@ constexpr const char* kUsage =
     "usage: bus_fault_proxy --host IF --device IF [--rules FILE] --trace PATH\n";
 constexpr int kRxBudget = 64;                       // Frames read per socket per wake.
 constexpr std::size_t kMaxCostSamples = 1U << 20U;  // Beyond this, samples are counted only.
+constexpr std::int64_t kSnapshotPeriodNs = 1'000'000'000;
+// Wakes in a row with a receive error on a socket whose interface is still up: then the error is
+// persistent and the proxy stops rather than poll it forever.
+constexpr int kMaxErrorWakes = 100;
 
 MonoTime mono_now() {
   timespec ts{};
@@ -98,7 +104,7 @@ Args parse_args(int argc, char** argv) {
   return a;
 }
 
-std::string io_json(const socketcan_io::IoCounts& c) {
+std::string io_json_of(const socketcan_io::IoCounts& c) {
   using socketcan_io::RxClass;
   const auto rej = [&c](RxClass k) { return c.rx_rejected[static_cast<std::size_t>(k)]; };
   std::ostringstream o;
@@ -134,6 +140,16 @@ std::int64_t percentile(const std::vector<std::int64_t>& sorted, std::size_t p) 
   return sorted[rank - 1];
 }
 
+// Whether the interface `ifname` is administratively up, asked through socket `fd`.
+bool interface_up(int fd, const std::string& ifname) {
+  ifreq req{};
+  std::memcpy(req.ifr_name, ifname.c_str(), std::min(ifname.size(), sizeof req.ifr_name - 1));
+  if (::ioctl(fd, SIOCGIFFLAGS, &req) < 0) {
+    return false;  // Gone (ENODEV) counts as down.
+  }
+  return (static_cast<unsigned>(req.ifr_flags) & IFF_UP) != 0U;
+}
+
 class Proxy {
  public:
   Proxy(socketcan_io::CanSocket host, socketcan_io::CanSocket device,
@@ -167,6 +183,15 @@ class Proxy {
     }
   }
 
+  // Periodic counters (B7-style snapshot): both sockets and the forwarding counts.
+  std::string io_json(MonoTime at) const {
+    std::ostringstream o;
+    o << R"({"event":"io","t_ns":)" << at.ns << R"(,"host":)" << io_json_of(host_.counts())
+      << R"(,"device":)" << io_json_of(device_.counts()) << R"(,"forwarded":{"h2d":)"
+      << forwarded_[0] << R"(,"d2h":)" << forwarded_[1] << R"(},"trace_overflow":0})";
+    return o.str();
+  }
+
   std::size_t drop_held() {
     return engine_.poll(MonoTime{std::numeric_limits<std::int64_t>::max()}).size();
   }
@@ -189,8 +214,8 @@ class Proxy {
         << R"(,"corrupted":)" << c.corrupted << R"(,"reordered":)" << c.reordered
         << R"(,"flushed":)" << c.flushed << '}';
     }
-    o << R"(],"io":{"host":)" << io_json(host_.counts()) << R"(,"device":)"
-      << io_json(device_.counts()) << "}}";
+    o << R"(],"io":{"host":)" << io_json_of(host_.counts()) << R"(,"device":)"
+      << io_json_of(device_.counts()) << "}}";
     return o.str();
   }
 
@@ -300,19 +325,24 @@ int run(const Args& args) {
 
   int signo = 0;
   int rc = 0;
-  while (signo == 0) {
+  std::string fatal;  // Why the proxy stops on its own; empty while it runs.
+  MonoTime next_snapshot{epoch.ns + kSnapshotPeriodNs};
+  std::array<int, 2> error_wakes{};  // Per source: wakes in a row with a new receive error.
+  const std::array<const std::string*, 2> names{&args.host, &args.device};
+  while (signo == 0 && fatal.empty()) {
     std::array<pollfd, 3> fds{
         {{proxy.host().fd(), POLLIN, 0}, {proxy.device().fd(), POLLIN, 0}, {signal_fd, POLLIN, 0}}};
-    // Wake for the next held frame (a delay, a reorder hold, or a `delay 0` frame).
-    timespec timeout{};
-    const timespec* timeout_ptr = nullptr;
+    // Wake for the next held frame (a delay, a reorder hold, or a `delay 0` frame) and for the
+    // next snapshot.
+    MonoTime wake = next_snapshot;
     if (const std::optional<MonoTime> due = proxy.engine().next_due()) {
-      const std::int64_t left = std::max<std::int64_t>(0, (*due - mono_now()).ns);
-      timeout.tv_sec = static_cast<time_t>(left / 1'000'000'000);
-      timeout.tv_nsec = static_cast<long>(left % 1'000'000'000);
-      timeout_ptr = &timeout;
+      wake = std::min(wake, *due);
     }
-    if (::ppoll(fds.data(), fds.size(), timeout_ptr, nullptr) < 0) {
+    const std::int64_t left = std::max<std::int64_t>(0, (wake - mono_now()).ns);
+    timespec timeout{};
+    timeout.tv_sec = static_cast<time_t>(left / 1'000'000'000);
+    timeout.tv_nsec = static_cast<long>(left % 1'000'000'000);
+    if (::ppoll(fds.data(), fds.size(), &timeout, nullptr) < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -328,13 +358,44 @@ int run(const Args& args) {
       break;
     }
     proxy.poll(mono_now());
-    if ((fds[0].revents & POLLIN) != 0) {
-      proxy.drain(Dir::kH2D);
+    // POLLERR/POLLHUP are drained too: read_one consumes and counts the socket error (rx_error);
+    // left unread, a pending error makes ppoll return at once forever.
+    constexpr short kReadable = POLLIN | POLLERR | POLLHUP;
+    for (std::size_t i = 0; i < 2; ++i) {
+      if ((fds[i].revents & kReadable) == 0) {
+        continue;
+      }
+      socketcan_io::CanSocket& sock = i == 0 ? proxy.host() : proxy.device();
+      const std::uint64_t errors_before = sock.counts().rx_error;
+      proxy.drain(i == 0 ? Dir::kH2D : Dir::kD2H);
+      if (sock.counts().rx_error == errors_before) {
+        error_wakes[i] = 0;
+        continue;
+      }
+      const std::string what =
+          *names[i] + ": receive error: " + std::strerror(sock.last_rx_errno());
+      if (!interface_up(sock.fd(), *names[i])) {
+        fatal = what + "; the interface is down";
+      } else if (++error_wakes[i] >= kMaxErrorWakes) {
+        fatal = what + "; persistent (" + std::to_string(kMaxErrorWakes) + " wakes in a row)";
+      }
     }
-    if ((fds[1].revents & POLLIN) != 0) {
-      proxy.drain(Dir::kD2H);
+    const MonoTime now = mono_now();
+    if (now >= next_snapshot) {
+      std::fprintf(trace, "%s\n", proxy.io_json(now).c_str());
+      std::fflush(trace);
+      next_snapshot =
+          MonoTime{next_snapshot.ns +
+                   ((now - next_snapshot).ns / kSnapshotPeriodNs + 1) * kSnapshotPeriodNs};
     }
   }
+  if (!fatal.empty()) {
+    std::fprintf(stderr, "bus_fault_proxy: %s\n", fatal.c_str());
+    std::fprintf(trace, "{\"event\":\"error\",\"t_ns\":%lld,\"reason\":%s}\n",
+                 static_cast<long long>(mono_now().ns), json_string(fatal).c_str());
+    rc = 1;
+  }
+  std::fprintf(trace, "%s\n", proxy.io_json(mono_now()).c_str());
 
   const std::size_t dropped = proxy.drop_held();
   const std::string exit_line = proxy.exit_json(mono_now(), signo, dropped);

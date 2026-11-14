@@ -348,6 +348,18 @@ class TracedProc:
             time.sleep(0.01)
         return self
 
+    def wait_exit(self, timeout):
+        """Exit status of a process that ends by itself (an error exit); its trace is not judged
+        here and teardown does not stop it again. Fails INCONCLUSIVE if it is still running."""
+        try:
+            rc = self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            inconclusive(f"{self.name} still running {timeout} s later")
+        self._err.join(timeout=2)
+        self.trace.poll()
+        self.exit = {"event": "ended", "exit_status": rc}
+        return rc
+
     def stop(self, timeout=5):
         """SIGTERM, then the completeness contract (B7). Returns the exit record."""
         if self.exit is not None:

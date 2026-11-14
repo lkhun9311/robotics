@@ -169,3 +169,29 @@ def test_vcan_unavailable_is_not_run(tmp_path):
     # A fixture failure is reported as an error; either way it is red, never skipped.
     assert re.search(r"\b1 (failed|error)\b", nested.stdout), nested.stdout[-2000:]
     assert "skipped" not in nested.stdout, nested.stdout[-2000:]
+
+
+def test_proxy_reports_a_dead_interface_without_spinning(proxy):
+    """A socket error (the interface goes down) is read, counted and reported; the proxy exits
+    non-zero with the reason instead of polling the pending error forever."""
+    t_down = time.monotonic()
+    down = subprocess.run(["ip", "link", "set", "dev", DEVICE_IF, "down"], capture_output=True,
+                          text=True)
+    try:
+        assert down.returncode == 0, f"INCONCLUSIVE: cannot take {DEVICE_IF} down: {down.stderr}"
+        rc = proxy.wait_exit(2.0)
+        elapsed = time.monotonic() - t_down
+    finally:
+        up = subprocess.run(["ip", "link", "set", "dev", DEVICE_IF, "up"], capture_output=True,
+                            text=True)
+        assert up.returncode == 0, up.stderr
+    assert rc != 0, "the proxy kept running with its device interface down"
+    records = proxy.trace.records
+    errors = [r for r in records if r["event"] == "error"]
+    assert errors and DEVICE_IF in errors[-1]["reason"], records[-3:]
+    snapshots = [r for r in records if r["event"] == "io"]
+    # One snapshot per second plus the final one: a spinning loop would not change this count, but
+    # the counted receive error shows the error was read, not polled forever.
+    assert len(snapshots) <= 3, f"{len(snapshots)} snapshots in {elapsed:.2f} s"
+    assert snapshots and snapshots[-1]["device"]["rx_error"] >= 1, snapshots[-1:]
+    print(f"proxy ended {elapsed * 1000:.0f} ms after the link went down: {errors[-1]}")
