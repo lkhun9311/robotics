@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# The 11th, 41st, ... RPDO1 of node 3 forwarded, then a copy with byte 0 (target) XOR 0x01:
+# two payloads of the same seq.
+h2d 0x203/0x7FF every 30 offset 10 dup_corrupt 0 0x01

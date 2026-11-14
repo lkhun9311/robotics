@@ -258,8 +258,9 @@ def start_probe(vcan, procs, probe_eds):
 
 @pytest.fixture
 def start_peer(vcan, procs, dcf_dir):
-    def start(scenario="idle", duration_ms=None, node=None, count=None):
-        """console: stdin is a pipe (Proc.send, Proc.command)."""
+    def start(scenario="idle", duration_ms=None, node=None, count=None, statusword=None):
+        """console: stdin is a pipe (Proc.send, Proc.command). statusword="sdo": the scenario
+        reads 0x6041 by SDO instead of waiting for TPDO1."""
         assert LELY_PEER_BIN.exists(), f"NOT_RUN: {LELY_PEER_BIN} not built"
         argv = [LELY_PEER_BIN, "--if", vcan, "--dcf", dcf_dir / "master.dcf",
                 "--scenario", scenario]
@@ -269,6 +270,8 @@ def start_peer(vcan, procs, dcf_dir):
             argv += ["--node", node]
         if count is not None:
             argv += ["--count", count]
+        if statusword is not None:
+            argv += ["--statusword", statusword]
         # cwd = the DCF directory: a concise DCF (UploadFile=<name>.bin, relative) would be found
         # and downloaded, so a configuration write cannot hide behind a missing file.
         p = Proc("lely_peer", argv, cwd=dcf_dir, stdin=scenario == "console")

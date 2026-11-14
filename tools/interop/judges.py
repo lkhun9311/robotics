@@ -664,3 +664,505 @@ def verdict(obs):
     except Failure as e:
         return "FAIL", str(e)
     return "PASS", "; ".join(notes)
+
+
+# ---- Proxy faults through to the drive (E3b Task 7) ----
+#
+# Rows F1-F6 run pdo_stream --node 3 --count 60 through one rule file of config/interop/faults;
+# R1 is the restart row. Preconditions first: the scenario finished, each rule's match count in
+# the proxy's exit record equals the frames the rule selects in the capture of its source
+# interface (B8 replayed here from the rule text), the 60 seqs are on vcan_host, the traces are
+# complete. Then the verdict from the bank trace and the TPDO2 applied_seq on vcan_host.
+
+STREAM_COUNT = 60
+# Encodings of the vdrive_bank trace's `drive` records (drive_core DropReason, QuickStopReason).
+DROP_OTHER_TAG, DROP_STALE_SEQ, DROP_NOT_VALID, DROP_MISSING_HALF = 0, 1, 2, 3
+QS_TIMEOUT, QS_INTEGRITY, QS_EXPIRY = 1, 3, 4
+QS_NAMES = {0: "controlword", 1: "timeout", 2: "sync_loss", 3: "integrity", 4: "expiry",
+            5: "comm_state"}
+QUICK_STOP_ACTIVE = 0x07  # CiA 402 statusword, mask 0x6F
+# 0x2030:05 drive_flags (EDS [2030sub5]): bit 0 policy latched, bit 2 integrity.
+DRIVE_FLAGS = (0x2030, 5)
+FLAG_POLICY_LATCHED = 0x01
+FLAG_INTEGRITY = 0x04
+# B8 directions: a rule sees the frames read on its source interface. The capture of an
+# interface also holds what the proxy wrote there, so the source frames are taken by producer:
+# the master produces NMT, SYNC, RPDOs and SDO requests; the drives the rest.
+MASTER_COBS = {"nmt": (0x000, 0x000), "sync": (0x080, 0x080), "rpdo": (0x201, 0x47F),
+               "sdo_rx": (0x601, 0x67F)}
+
+
+def master_produced(cob):
+    return any(lo <= cob <= hi for lo, hi in MASTER_COBS.values()) and \
+        not 0x280 <= cob <= 0x2FF and not 0x380 <= cob <= 0x3FF
+
+
+def parse_rules(text):
+    """B8 rule text -> [{dir, id, mask, every, offset, action}] (the predicates this judge
+    replays; a window predicate is not used by these rows and is refused)."""
+    rules = []
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()
+        if not words:
+            continue
+        rule = {"dir": words[0], "every": 1, "offset": 0}
+        ident, mask = words[1].split("/")
+        rule["id"], rule["mask"] = int(ident, 0), int(mask, 0)
+        rest = words[2:]
+        if rest[0] == "every":
+            rule["every"] = int(rest[1])
+            rest = rest[2:]
+            if rest[0] == "offset":
+                rule["offset"] = int(rest[1])
+                rest = rest[2:]
+        need(rest[0] != "window", "a window predicate is not replayed by this judge")
+        rule["action"] = rest[0]
+        rule["args"] = rest[1:]
+        rules.append(rule)
+    return rules
+
+
+def source_frames(obs, direction):
+    """The frames a rule of `direction` saw: what the master wrote on vcan_host (h2d), what the
+    drives wrote on vcan_device (d2h)."""
+    if direction == "h2d":
+        return [f for f in frames(obs, "host") if master_produced(f[1])]
+    return [f for f in frames(obs, "device") if not master_produced(f[1])]
+
+
+def expected_matches(obs, rules):
+    """Per rule, the frames it acted on: first rule whose identifier and occurrence predicate
+    hold wins (B8); a rule counts the occurrences of its identifier among the frames that reach
+    it. Returns [[(t, cob, data), ...] per rule]."""
+    matched = [[] for _ in rules]
+    for direction in ("h2d", "d2h"):
+        seen = [0] * len(rules)
+        for f in source_frames(obs, direction):
+            for i, r in enumerate(rules):
+                if r["dir"] != direction or f[1] & r["mask"] != r["id"] & r["mask"]:
+                    continue
+                n = seen[i]
+                seen[i] += 1
+                if n % r["every"] == r["offset"]:
+                    matched[i].append(f)
+                    break
+    return matched
+
+
+def decode(label, data):
+    """Field values of one PDO frame by the EDS mapping (wire.py's layout)."""
+    layout = pdo_layout(label)
+    need(len(data) == layout["length"], f"{label} frame of {len(data)} bytes")
+    out = {}
+    for f in layout["fields"]:
+        raw = data[f["offset"]:f["offset"] + f["bits"] // 8]
+        out[f["name"]] = int.from_bytes(raw, "little", signed=f["signed"])
+    return out
+
+
+def rpdo_seqs(obs, side, n, tag, t0=None, t1=None):
+    """[(t, seq, data)] of RPDOn of node 3 with `tag` on `side`."""
+    out = []
+    for t, _, d in frames(obs, side, cia301.RPDO_BASE[n] + NODE, t0, t1):
+        if len(d) == 8:
+            v = decode(f"RPDO{n}", d)
+            if v["exec_tag"] == tag:
+                out.append((t, v["command_seq"], d))
+    return out
+
+
+def drive_records(obs, kind=None, node=NODE, t0=None, t1=None, bank="bank"):
+    return [r for r in obs[bank] if r.get("event") == "drive" and r.get("node") == node and
+            (kind is None or r.get("kind") == kind) and
+            (t0 is None or r["t_ns"] / 1e9 > t0) and (t1 is None or r["t_ns"] / 1e9 < t1)]
+
+
+def dropped(obs, reason, **kw):
+    return sum(r["count"] for r in drive_records(obs, "dropped", **kw) if r["drop"] == reason)
+
+
+def applied_on_host(obs, t0=None, t1=None):
+    return [decode("TPDO2", d)["applied_seq"]
+            for _, _, d in frames(obs, "host", cia301.TPDO_BASE[2] + NODE, t0, t1) if len(d) == 8]
+
+
+def drive_flags(obs):
+    """0x2030:05 from the harness's SDO upload on vcan_host after the stream (Inconclusive if
+    the drive did not answer it)."""
+    t = obs["harness"].get("t_flags")
+    need(t is not None, "the harness did not read drive_flags")
+    index, sub = DRIVE_FLAGS
+    for _, _, d in frames(obs, "host", cia301.SDO_TX_BASE + NODE, t):
+        if len(d) == 8 and cia301.multiplexer(d) == (index, sub) and d[0] >> 5 == \
+                cia301.SCS_UPLOAD_INITIATE:
+            return int.from_bytes(d[4:6], "little")
+    raise Inconclusive("no SDO upload response for 0x2030:05 on vcan_host")
+
+
+def last_statusword(obs):
+    tpdo1 = [d for _, _, d in frames(obs, "host", cia301.TPDO_BASE[1] + NODE) if len(d) == 8]
+    need(tpdo1, "no TPDO1 of node 3 on vcan_host")
+    return decode("TPDO1", tpdo1[-1])["statusword"]
+
+
+def stream_preconditions(obs, bank_obs=None):
+    """The shared preconditions of F1-F6; returns (tag, seqs, rules, matched frames)."""
+    done = complete(obs, "pdo_stream")
+    master_traffic(obs)
+    h = obs["harness"]
+    tag = done["tag"]
+    stream = events(obs, "stream", node=NODE)
+    seqs = [e["seq"] for e in stream]
+    need(done["sent"] == h["count"] and seqs == list(range(1, h["count"] + 1)) and
+         all(e["tag"] == tag for e in stream) and tag != 0,
+         f"the stream did not run as declared: {done}, seqs {seqs[:3]}..{seqs[-3:]}")
+    rules = parse_rules(h["rules"])
+    want = expected_matches(obs, rules)
+    got = [r["matched"] for r in obs["proxy_exit"]["rules"]]
+    need(got == [len(m) for m in want],
+         f"proxy rule match counts {got}, the captures of the source interfaces select "
+         f"{[len(m) for m in want]}")
+    for n in (1, 2):
+        on_host = {s for _, s, _ in rpdo_seqs(obs, "host", n, tag)}
+        missing = [s for s in seqs if s not in on_host]
+        need(not missing, f"RPDO{n} of seqs {missing} not on vcan_host")
+    need(obs["proxy_exit"].get("send_failed") == {"h2d": 0, "d2h": 0},
+         f"the proxy failed to send: {obs['proxy_exit'].get('send_failed')}")
+    return tag, seqs, rules, want
+
+
+def device_syncs(obs):
+    return [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB)]
+
+
+def drops_by_sync(obs, reason, syncs):
+    """{SYNC index: count} of the bank's drop records of `reason` for node 3. A drop record is
+    written at the SYNC that ends its interval; it is matched to the nearest SYNC on vcan_device
+    (the two clocks are one CLOCK_MONOTONIC; the capture stamps within a millisecond or two of the
+    bank, a SYNC period is 10 ms)."""
+    out = {}
+    for r in drive_records(obs, "dropped"):
+        if r["drop"] != reason:
+            continue
+        t = r["t_ns"] / 1e9
+        i = bisect.bisect_left(syncs, t)
+        near = min((j for j in (i - 1, i) if 0 <= j < len(syncs)), key=lambda j: abs(syncs[j] - t))
+        need(abs(syncs[near] - t) < 0.004, f"drop record at {t:.4f} is not at a SYNC")
+        out[near] = out.get(near, 0) + r["count"]
+    return out
+
+
+def other_tag_after(obs, t_stop):
+    """Checks, for every SYNC interval that opens 5 ms or more after t_stop, that the other-tag
+    drops at its closing SYNC equal the RPDO1/RPDO2 frames of node 3 inside it. Returns (a
+    predicate telling whether a device time lies in a judged interval, the frames judged)."""
+    syncs = device_syncs(obs)
+    drops = drops_by_sync(obs, DROP_OTHER_TAG, syncs)
+    cobs = (cia301.RPDO_BASE[1] + NODE, cia301.RPDO_BASE[2] + NODE)
+    judged = [i for i in range(len(syncs) - 1) if syncs[i] >= t_stop + 0.005]
+    need(len(judged) >= 10, f"only {len(judged)} SYNC intervals after the stop")
+    total = 0
+    for i in judged:
+        n = len(frames(obs, "device", cobs, syncs[i], syncs[i + 1]))
+        check(drops.get(i + 1, 0) == n, f"SYNC interval {i}: {n} RPDO1/RPDO2 of node 3, "
+                                        f"{drops.get(i + 1, 0)} other-tag drops at its SYNC")
+        total += n
+    lo, hi = syncs[judged[0]], syncs[judged[-1] + 1]
+    return (lambda t: lo < t < hi), total
+
+
+def actuated_seqs(obs, tag, **kw):
+    return [r["seq"] for r in drive_records(obs, "actuated", **kw) if r["tag"] == tag]
+
+
+def judge_f1(obs):
+    """Delay past the deadline: dropped, never actuated; Quick Stop Active, latched."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    delayed = [decode("RPDO2", d)["command_seq"] for _, _, d in matched[0]
+               if decode("RPDO2", d)["exec_tag"] == tag]
+    need(sorted(set(delayed)) == seqs, f"delayed RPDO2 seqs {sorted(set(delayed))[:5]}...")
+    act = actuated_seqs(obs, tag)
+    check(not act, f"delayed seqs actuated: {act}")
+    stops = drive_records(obs, "quick_stop")
+    check(stops and stops[0]["reason"] in (QS_TIMEOUT, QS_EXPIRY),
+          f"first quick stop {[(QS_NAMES[r['reason']]) for r in stops]}, expected timeout or "
+          f"expiry")
+    t_stop = stops[0]["t_ns"] / 1e9
+    on_device = rpdo_seqs(obs, "device", 2, tag)
+    live = [s for t, s, _ in on_device if t < t_stop]
+    not_valid = dropped(obs, DROP_NOT_VALID)
+    # A delayed RPDO2 reaching the drive while its tag is current is a not-valid drop at
+    # receipt (D5). After the stop revoked the tag, D8 classifies the tag first: every RPDO1 and
+    # RPDO2 of node 3 between two SYNCs is then one other-tag drop at the second SYNC, exactly.
+    check(not_valid >= len(live), f"{len(live)} delayed RPDO2 before the stop, {not_valid} "
+                                  f"not-valid drops")
+    accounted, late = other_tag_after(obs, t_stop)
+    covered = [s for t, s, _ in on_device if accounted(t)]
+    need(len(set(covered)) >= len(seqs) - 10,
+         f"only {len(set(covered))} delayed seqs reached the drive inside a judged SYNC interval")
+    sw = last_statusword(obs)
+    check(sw & 0x6F == QUICK_STOP_ACTIVE, f"last statusword 0x{sw:04X}, not Quick Stop Active")
+    flags = drive_flags(obs)
+    check(flags & FLAG_POLICY_LATCHED, f"drive_flags 0x{flags:04X}: policy latch not set")
+    applied = set(applied_on_host(obs)) - {0}
+    check(not applied, f"TPDO2 applied_seq on vcan_host {sorted(applied)}")
+    return [f"{len(delayed)} RPDO2 delayed 60 ms ({len(live)} reached the drive before the stop: "
+            f"{not_valid} not-valid drops; {len(set(covered))} seqs after it among {late} "
+            f"RPDO1/RPDO2, each one other-tag drop at its SYNC); none actuated; quick stop "
+            f"{QS_NAMES[stops[0]['reason']]}; statusword 0x{sw:04X}; drive_flags 0x{flags:04X}; "
+            f"TPDO2 applied_seq stayed 0"]
+
+
+JUDGES["F1"] = judge_f1
+
+
+def no_integrity(obs, **kw):
+    integrity = drive_records(obs, "integrity", **kw)
+    check(not integrity, f"kIntegrity for node 3 at {[r['t_ns'] for r in integrity]}")
+
+
+def actuated_once(obs, tag, **kw):
+    act = actuated_seqs(obs, tag, **kw)
+    check(len(act) == len(set(act)), f"a seq actuated twice: {act}")
+    return set(act)
+
+
+def applied_matches(obs, act):
+    applied = set(applied_on_host(obs)) - {0}
+    check(applied == act, f"TPDO2 applied_seq on vcan_host {sorted(applied ^ act)} differ from "
+                          f"the actuated seqs")
+
+
+def judge_f2(obs):
+    """Every third RPDO1 lost: ordinary gaps, no integrity violation."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    reached = {s for _, s, _ in rpdo_seqs(obs, "device", 1, tag)}
+    lost = [s for s in seqs if s not in reached]
+    need(len(lost) >= len(seqs) // 3 - 1, f"only {len(lost)} stream RPDO1 lost: {lost}")
+    no_integrity(obs)
+    act = actuated_once(obs, tag)
+    last = seqs[-1]
+    expected = set(seqs) - set(lost)
+    check(act - {last} == expected - {last},
+          f"actuated minus expected {sorted(act - expected)}, expected minus actuated "
+          f"{sorted(expected - act)}")
+    gaps = dropped(obs, DROP_MISSING_HALF)
+    check(gaps >= len(set(lost) - {last}),
+          f"{len(lost)} lost RPDO1, only {gaps} missing-half drops (an ordinary gap)")
+    applied_matches(obs, act)
+    t_last = max(r["t_ns"] for r in drive_records(obs, "actuated") if r["tag"] == tag) / 1e9
+    stops = drive_records(obs, "quick_stop", t1=t_last)
+    check(not stops, f"quick stop during the stream: {stops}")
+    return [f"{len(lost)} of {len(seqs)} stream RPDO1 lost ({lost[:6]}...): {gaps} missing-half "
+            f"drops, no kIntegrity, no quick stop while streaming; actuated = the other "
+            f"{len(act)} seqs; TPDO2 applied_seq on vcan_host the same set"]
+
+
+def pdo_frames_to_node(obs):
+    cobs = tuple(cia301.RPDO_BASE[n] + NODE for n in (1, 2, 3))
+    return len(frames(obs, "device", cobs))
+
+
+def last_dispatch(obs):
+    snaps = [r for r in obs["bank"] if r.get("event") == "dispatch" and r.get("node") == NODE]
+    need(snaps, "no dispatch snapshot of node 3")
+    return snaps[-1]
+
+
+def judge_f3(obs):
+    """Identical duplicates of RPDO1 and RPDO2 change nothing; each is counted."""
+    base = obs["baseline"]
+    tag_b, seqs_b, _, _ = stream_preconditions(base)
+    act_b = actuated_once(base, tag_b)
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    need([r["action"] for r in rules] == ["dup", "dup"], "the rule file is not two dup rules")
+    act = actuated_once(obs, tag)
+    need(len(act_b) >= 50, f"the no-rule run actuated only {len(act_b)} seqs")
+    check(act == act_b, f"actuated seqs differ from the no-rule run: {sorted(act ^ act_b)}")
+    no_integrity(obs)
+    counts = obs["proxy_exit"]["rules"]
+    for i, n in enumerate((1, 2)):
+        cob = cia301.RPDO_BASE[n] + NODE
+        check(counts[i]["duplicated"] == counts[i]["matched"],
+              f"rule {i}: {counts[i]['duplicated']} duplicated of {counts[i]['matched']} matched")
+        on_host = [d for _, c, d in source_frames(obs, "h2d") if c == cob]
+        on_device = [d for _, _, d in frames(obs, "device", cob)]
+        check(on_device == [d for d in on_host for _ in (0, 1)],
+              f"RPDO{n}: {len(on_device)} frames on vcan_device for {len(on_host)} on vcan_host, "
+              f"not each twice in order")
+    snap = last_dispatch(obs)
+    check(snap["event"] == "dispatch" and
+          snap["pdo"] + snap["gated"] + snap["malformed"] == pdo_frames_to_node(obs),
+          f"node 3 dispatch counts {snap}, {pdo_frames_to_node(obs)} RPDO frames on vcan_device")
+    applied_matches(obs, act)
+    return [f"{counts[0]['matched']} RPDO1 and {counts[1]['matched']} RPDO2 each forwarded twice; "
+            f"node 3 counted all {pdo_frames_to_node(obs)} RPDO frames (pdo {snap['pdo']}, gated "
+            f"{snap['gated']}); actuated {len(act)} seqs = the no-rule run's; no kIntegrity"]
+
+
+def judge_f4(obs):
+    """RPDO1 released behind its RPDO2 inside the same SYNC window still pairs."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    reordered = obs["proxy_exit"]["rules"][0]["reordered"]
+    need(reordered >= 50, f"only {reordered} frames reordered")
+    syncs = device_syncs(obs)
+    first = {}
+    for n in (1, 2):
+        for t, s, _ in rpdo_seqs(obs, "device", n, tag):
+            first.setdefault((n, s), t)
+    swapped = 0
+    for s in seqs:
+        need((1, s) in first and (2, s) in first, f"seq {s}: RPDO1/RPDO2 not on vcan_device")
+        t1, t2 = first[(1, s)], first[(2, s)]
+        j1, j2 = bisect.bisect_left(syncs, t1), bisect.bisect_left(syncs, t2)
+        check(j1 == j2, f"seq {s}: RPDO1 and RPDO2 in different SYNC windows")
+        swapped += t2 < t1
+    need(swapped >= 50, f"only {swapped} seqs reached the drive RPDO2 first")
+    no_integrity(obs)
+    act = actuated_once(obs, tag)
+    check(act == set(seqs), f"seqs not actuated: {sorted(set(seqs) - act)}")
+    applied_matches(obs, act)
+    return [f"{reordered} reordered by the proxy; {swapped} of {len(seqs)} seqs reached the drive "
+            f"RPDO2 first, each pair inside one SYNC window; every seq actuated, no kIntegrity"]
+
+
+def judge_f5(obs):
+    """A conflicting copy of an RPDO1 (same seq, other target) is an integrity stop."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    rule = rules[0]
+    byte, mask = int(rule["args"][0], 0), int(rule["args"][1], 0)
+    hits = [d for _, _, d in matched[0] if decode("RPDO1", d)["exec_tag"] == tag]
+    need(hits, f"no matched RPDO1 carries the stream's tag ({len(matched[0])} matched)")
+    original = hits[0]
+    copy = bytearray(original)
+    copy[byte] ^= mask
+    copy = bytes(copy)
+    seq = decode("RPDO1", original)["command_seq"]
+    device = frames(obs, "device", cia301.RPDO_BASE[1] + NODE)
+    at = [i for i, (_, _, d) in enumerate(device) if d == original]
+    check(at and at[0] + 1 < len(device) and device[at[0] + 1][2] == copy,
+          f"seq {seq}: the original {original.hex()} and its copy {copy.hex()} are not "
+          f"consecutive on vcan_device")
+    t_copy = device[at[0] + 1][0]
+    integrity = drive_records(obs, "integrity")
+    check(integrity and abs(integrity[0]["t_ns"] / 1e9 - t_copy) < 0.005,
+          f"kIntegrity {[r['t_ns'] for r in integrity]} not at the copy ({t_copy:.4f})")
+    stops = drive_records(obs, "quick_stop")
+    check(stops and stops[0]["reason"] == QS_INTEGRITY,
+          f"quick stops {[QS_NAMES[r['reason']] for r in stops]}, expected integrity first")
+    act = actuated_once(obs, tag)
+    check(seq not in act and all(s < seq for s in act),
+          f"seq {seq} or a later one was actuated: {sorted(s for s in act if s >= seq)}")
+    sw = last_statusword(obs)
+    check(sw & 0x6F == QUICK_STOP_ACTIVE, f"last statusword 0x{sw:04X}, not Quick Stop Active")
+    flags = drive_flags(obs)
+    check(flags & FLAG_POLICY_LATCHED and flags & FLAG_INTEGRITY,
+          f"drive_flags 0x{flags:04X}: policy latch and integrity bits not both set")
+    applied = set(applied_on_host(obs)) - {0}
+    check(applied <= act, f"TPDO2 applied_seq {sorted(applied - act)} never actuated")
+    return [f"seq {seq}: {original.hex()} then {copy.hex()} on vcan_device; kIntegrity at the "
+            f"copy; quick stop integrity; drive_flags 0x{flags:04X}; statusword 0x{sw:04X}; "
+            f"actuated {len(act)} seqs, all before {seq}; {len(matched[0]) - len(hits)} matches "
+            f"of another tag before the stream"]
+
+
+def judge_f6(obs):
+    """TPDO1 of node 3 lost on the way to the master: feedback hidden, the drive unaffected."""
+    tag, seqs, rules, matched = stream_preconditions(obs)
+    tpdo1 = cia301.TPDO_BASE[1] + NODE
+    need(len(matched[0]) >= len(seqs), f"only {len(matched[0])} TPDO1 dropped")
+    on_host = frames(obs, "host", tpdo1)
+    check(not on_host, f"TPDO1 of node 3 on vcan_host: {hexes(on_host[:3])}")
+    lely = [e for e in events(obs, "rpdo", node=NODE) if e["index"] in (0x6041, 0x6064)]
+    check(not lely, f"Lely decoded TPDO1 entries: {lely[:3]}")
+    polled = events(obs, "sdo_ok", node=NODE, index=0x6041)
+    need(polled, "the peer did not read the statusword by SDO")
+    act = actuated_once(obs, tag)
+    check(act == set(seqs), f"seqs not actuated: {sorted(set(seqs) - act)}")
+    applied_matches(obs, act)
+    return [f"{len(matched[0])} TPDO1 dropped: none on vcan_host, Lely decoded no TPDO1 entry (the "
+            f"peer read the statusword {len(polled)} times by SDO); every seq actuated, TPDO2 "
+            f"applied_seq on vcan_host the same set"]
+
+
+JUDGES.update({"F2": judge_f2, "F3": judge_f3, "F4": judge_f4, "F5": judge_f5, "F6": judge_f6})
+
+
+# ---- R1: restart rejects captured old-tag frames ----
+
+def view(obs, peer, bank):
+    """One process pair of a multi-run observation, in the shape the helpers above read."""
+    return {"row": obs["row"], "host": obs["host"], "device": obs["device"],
+            "peer": obs["peers"][peer], "bank": obs["banks"][bank],
+            "proxy_exit": obs["proxy_exit"], "harness": obs["harness"]}
+
+
+def judge_r1(obs):
+    h = obs["harness"]
+    first, last = view(obs, 0, 0), view(obs, -1, -1)
+    for v in (first, last):
+        overflow = [r for r in v["bank"] if r.get("trace_overflow", 0) != 0]
+        need(not overflow, "vdrive_bank trace incomplete: trace_overflow != 0")
+    need(h["bank_killed"][0].get("event") == "killed", f"no killed record: {h['bank_killed']}")
+    need(last["bank"][-1].get("event") == "exit", "the restarted bank's trace has no exit record")
+    need(obs["proxy_exit"].get("event") == "exit" and obs["proxy_exit"]["trace_overflow"] == 0,
+         f"bus_fault_proxy trace incomplete: {obs['proxy_exit']}")
+    done = [events(view(obs, i, -1), "scenario_done") for i in range(len(obs["peers"]))]
+    need(all(len(d) == 1 for d in done) and not any(
+        events(view(obs, i, -1), "scenario_failed") for i in range(len(obs["peers"]))),
+         f"a peer scenario did not finish: {done}")
+    old_tag, new_tag, stream_tag = done[0][0]["tag"], h["new_tag"], done[-1][0]["tag"]
+    need(done[0][0]["sent"] == h["count_first"] and done[-1][0]["sent"] == h["count_second"],
+         f"the streams did not run as declared: {done[0]} {done[-1]}")
+    reads = [e["value"] for e in obs["peers"][-2] if e.get("event") == "sdo_ok" and
+             e.get("index") == 0x2012]
+    need(reads and reads[-1] == new_tag, f"the new tag {new_tag} is not the 0x2012 upload {reads}")
+    need(len(h["collisions"]) == len(obs["banks"]) - 2,
+         f"{len(obs['banks'])} banks for {len(h['collisions'])} recorded collisions")
+    check(new_tag != old_tag, f"the restarted drive committed the old tag {old_tag}")
+    boot_first = [r for r in first["bank"] if r.get("event") == "start"][0]["boot_ids"]
+    boot_last = [r for r in last["bank"] if r.get("event") == "start"][0]["boot_ids"]
+    need(boot_first != boot_last, "the restarted bank drew the same boot_ids")
+    replay = [bytes.fromhex(d) for _, _, d in h["replay"]]
+    need(len(replay) >= 2 * h["count_first"], f"only {len(replay)} old frames captured")
+    need(all(len(d) == 8 and d[6:8] == old_tag.to_bytes(2, "little") for d in replay),
+         "a replayed frame does not carry the old tag")
+    t_sync, t_next = h["t_sync"], h["t_second_stream"]
+    t_replay = h["replay"][0][0]
+    syncs = frames(obs, "device", cia301.SYNC_COB, t_replay - 0.001, t_next)
+    need(len(syncs) == 1 and syncs[0][0] >= t_sync, f"SYNCs around the replay: {hexes(syncs)}")
+    # Every RPDO1/RPDO2 of node 3 since the SYNC before the replay is dropped at the next SYNC:
+    # the replayed frames, and any frame the console's master sent after its own last SYNC.
+    cobs = (cia301.RPDO_BASE[1] + NODE, cia301.RPDO_BASE[2] + NODE)
+    t_prev = frames(obs, "device", cia301.SYNC_COB, None, t_replay)[-1][0]
+    on_device = [d for _, _, d in frames(obs, "device", cobs, t_prev, t_sync)]
+    need(on_device[len(on_device) - len(replay):] == replay,
+         f"the {len(replay)} replayed frames are not the last RPDO1/RPDO2 on vcan_device before "
+         f"the SYNC")
+    extra = on_device[:len(on_device) - len(replay)]
+    need(all(d[6:8] != new_tag.to_bytes(2, "little") for d in extra),
+         f"a frame of the new tag before the replay SYNC: {[d.hex() for d in extra]}")
+    drops = drive_records(last, "dropped", t0=t_sync, t1=t_next)
+    other = sum(r["count"] for r in drops if r["drop"] == DROP_OTHER_TAG)
+    rest = [r for r in drops if r["drop"] != DROP_OTHER_TAG]
+    check(other == len(on_device) and not rest,
+          f"{len(replay)} old-tag frames replayed after {len(extra)} of the master's, {other} "
+          f"other-tag drops at the SYNC; other drops {rest}")
+    act_old = [r for r in drive_records(last, "actuated") if r["tag"] == old_tag]
+    check(not act_old, f"old-tag seqs actuated after the restart: {[r['seq'] for r in act_old]}")
+    check(not drive_records(last, "actuated", t1=t_next), "a command actuated before the stream")
+    no_integrity(last)
+    applied = applied_on_host(obs, t_sync, t_next)
+    need(applied, "no TPDO2 of node 3 on vcan_host after the replay SYNC")
+    check(set(applied) == {0}, f"TPDO2 applied_seq after the replay {applied}")
+    act = actuated_once(last, stream_tag, t0=t_next)
+    check(len(act) >= 8, f"the stream after the restart actuated only {sorted(act)}")
+    return [f"tag {old_tag} before the kill, {new_tag} after the restart ({len(h['collisions'])} "
+            f"collision(s)); {len(replay)} old-tag RPDO1/RPDO2 replayed on vcan_device (after "
+            f"{len(extra)} tag-{[int.from_bytes(d[6:8], 'little') for d in extra]} frames of the "
+            f"console's master): {other} other-tag drops at the next SYNC, none actuated, TPDO2 "
+            f"applied_seq 0; then "
+            f"pdo_stream --count {h['count_second']} actuated {len(act)}"]
+
+
+JUDGES["R1"] = judge_r1

@@ -33,16 +33,17 @@ def observe(row, host, device, peer, bank, proxy, harness):
            "device": [[t, c, d.hex()] for t, c, d in device.stop()],
            "peer": [{k: v for k, v in e.items() if k != "t_rx"} for e in peer.events],
            "bank": bank.trace.poll(), "proxy_exit": proxy_exit, "harness": harness}
-    record_dir = os.environ.get("INTEROP_RECORD_DIR")
-    if record_dir:
-        path = pathlib.Path(record_dir) / f"{row.lower()}.json.gz"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(path, "wt", encoding="utf-8") as f:
-            json.dump(obs, f, separators=(",", ":"))
     return obs
 
 
 def judge(obs):
+    """Judges the observation; with INTEROP_RECORD_DIR set, records it there first."""
+    record_dir = os.environ.get("INTEROP_RECORD_DIR")
+    if record_dir:
+        path = pathlib.Path(record_dir) / f"{obs['row'].lower()}.json.gz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            json.dump(obs, f, separators=(",", ":"))
     status, text = judges.verdict(obs)
     print(f"{obs['row']} {status}: {text}")
     if status == "INCONCLUSIVE":

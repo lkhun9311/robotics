@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every third RPDO1 of node 3 lost: an ordinary gap, never an integrity violation.
+h2d 0x203/0x7FF every 3 drop

@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every RPDO1 and RPDO2 of node 3 forwarded twice, identical.
+h2d 0x203/0x7FF dup
+h2d 0x303/0x7FF dup
