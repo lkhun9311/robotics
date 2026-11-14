@@ -5,8 +5,11 @@ project(bus_fault_proxy LANGUAGES CXX)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/robotics_flags.cmake)
 find_package(runtime_core REQUIRED)
 find_package(canopen_codec REQUIRED)
+find_package(socketcan_io REQUIRED)
 
+# The library is the rule engine: every source but the process entry point (main.cpp).
 file(GLOB BUS_FAULT_PROXY_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+list(REMOVE_ITEM BUS_FAULT_PROXY_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 add_library(bus_fault_proxy ${BUS_FAULT_PROXY_SOURCES})
 add_library(bus_fault_proxy::bus_fault_proxy ALIAS bus_fault_proxy)
 robotics_apply_flags(bus_fault_proxy)
@@ -17,6 +20,13 @@ target_include_directories(bus_fault_proxy PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(bus_fault_proxy PUBLIC
   runtime_core::runtime_core canopen_codec::canopen_codec)
+
+# The process: bus_fault_proxy --host IF --device IF [--rules FILE] --trace PATH.
+add_executable(bus_fault_proxy_exe src/main.cpp)
+set_target_properties(bus_fault_proxy_exe PROPERTIES OUTPUT_NAME bus_fault_proxy)
+robotics_apply_flags(bus_fault_proxy_exe)
+target_link_libraries(bus_fault_proxy_exe PRIVATE bus_fault_proxy socketcan_io::socketcan_io)
+install(TARGETS bus_fault_proxy_exe RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 # Consumable package: find_package(bus_fault_proxy REQUIRED) -> bus_fault_proxy::bus_fault_proxy.
 install(TARGETS bus_fault_proxy EXPORT bus_fault_proxyTargets ARCHIVE DESTINATION lib)

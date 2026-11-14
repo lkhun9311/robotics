@@ -6,8 +6,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/robotics_flags.cmake)
 find_package(runtime_core REQUIRED)
 find_package(canopen_codec REQUIRED)
 find_package(drive_core REQUIRED)
+find_package(socketcan_io REQUIRED)
+find_package(Threads REQUIRED)
 
+# The library is every source but the process entry point (main.cpp).
 file(GLOB VDRIVE_BANK_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+list(REMOVE_ITEM VDRIVE_BANK_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 add_library(vdrive_bank ${VDRIVE_BANK_SOURCES})
 add_library(vdrive_bank::vdrive_bank ALIAS vdrive_bank)
 robotics_apply_flags(vdrive_bank)
@@ -17,7 +21,15 @@ target_include_directories(vdrive_bank PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(vdrive_bank PUBLIC
-  runtime_core::runtime_core canopen_codec::canopen_codec drive_core::drive_core)
+  runtime_core::runtime_core canopen_codec::canopen_codec drive_core::drive_core
+  socketcan_io::socketcan_io Threads::Threads)
+
+# The process: vdrive_bank --if IF --trace PATH [--inject PATH].
+add_executable(vdrive_bank_exe src/main.cpp)
+set_target_properties(vdrive_bank_exe PROPERTIES OUTPUT_NAME vdrive_bank)
+robotics_apply_flags(vdrive_bank_exe)
+target_link_libraries(vdrive_bank_exe PRIVATE vdrive_bank)
+install(TARGETS vdrive_bank_exe RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 # Consumable package: find_package(vdrive_bank REQUIRED) -> vdrive_bank::vdrive_bank.
 install(TARGETS vdrive_bank EXPORT vdrive_bankTargets ARCHIVE DESTINATION lib)

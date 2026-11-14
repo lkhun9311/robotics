@@ -1,0 +1,272 @@
+// SPDX-License-Identifier: Apache-2.0
+// The vdrive_bank process: six virtual drives (node IDs 1..6) on one CAN interface.
+//   vdrive_bank --if IF --trace PATH [--inject PATH]
+// One control thread waits in ppoll on the release timerfd (absolute CLOCK_MONOTONIC, period W),
+// the CAN socket, the inject socket and a signalfd, and runs BankLoop::run_once on every wake
+// (B1). A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX
+// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". SIGTERM or
+// SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
+// Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
+// is on stderr). Exit 1: a failure while running.
+#include <poll.h>
+#include <pthread.h>
+#include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/timerfd.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <array>
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <exception>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "socketcan_io/socket.hpp"
+#include "vdrive_bank/bank.hpp"
+#include "vdrive_bank/entropy.hpp"
+#include "vdrive_bank/loop.hpp"
+#include "vdrive_bank/trace_ring.hpp"
+
+namespace {
+
+using runtime_core::MonoTime;
+
+constexpr const char* kUsage = "usage: vdrive_bank --if IF --trace PATH [--inject PATH]\n";
+
+MonoTime mono_now() {
+  timespec ts{};
+  ::clock_gettime(CLOCK_MONOTONIC, &ts);
+  return MonoTime{static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec};
+}
+
+timespec to_timespec(MonoTime t) {
+  timespec ts{};
+  ts.tv_sec = static_cast<time_t>(t.ns / 1'000'000'000);
+  ts.tv_nsec = static_cast<long>(t.ns % 1'000'000'000);
+  return ts;
+}
+
+struct Args {
+  std::string ifname;
+  std::string trace;
+  std::string inject;
+  bool help{false};
+  std::string error;  // Empty when the arguments are usable.
+};
+
+Args parse_args(int argc, char** argv) {
+  Args a;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg = argv[i];
+    if (arg == "--help" || arg == "-h") {
+      a.help = true;
+      return a;
+    }
+    std::string* target = nullptr;
+    if (arg == "--if") {
+      target = &a.ifname;
+    } else if (arg == "--trace") {
+      target = &a.trace;
+    } else if (arg == "--inject") {
+      target = &a.inject;
+    } else {
+      a.error = "unknown argument '" + std::string(arg) + "'";
+      return a;
+    }
+    if (i + 1 >= argc) {
+      a.error = std::string(arg) + " needs a value";
+      return a;
+    }
+    *target = argv[++i];
+  }
+  if (a.ifname.empty()) {
+    a.error = "--if is required";
+  } else if (a.trace.empty()) {
+    a.error = "--trace is required";
+  }
+  return a;
+}
+
+// A bound, non-blocking UNIX datagram socket at `path` (an old socket file is replaced).
+int bind_inject(const std::string& path, std::string* error) {
+  sockaddr_un addr{};
+  if (path.size() >= sizeof addr.sun_path) {
+    *error = "path too long";
+    return -1;
+  }
+  const int fd = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    *error = std::string("socket: ") + std::strerror(errno);
+    return -1;
+  }
+  addr.sun_family = AF_UNIX;
+  std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+  ::unlink(path.c_str());
+  if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof addr) < 0) {
+    *error = std::string("bind: ") + std::strerror(errno);
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+// Every datagram waiting on the inject socket: applied in order, each answered to its sender.
+void serve_inject(int fd, vdrive_bank::BankLoop& loop) {
+  for (;;) {
+    std::array<char, 128> buf{};
+    sockaddr_un peer{};
+    socklen_t peer_len = sizeof peer;
+    const ssize_t n =
+        ::recvfrom(fd, buf.data(), buf.size(), 0, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    if (n < 0) {
+      return;  // EAGAIN: nothing more. Other errors: the next wake tries again.
+    }
+    std::string_view command(buf.data(), static_cast<std::size_t>(n));
+    while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
+      command.remove_suffix(1);
+    }
+    const vdrive_bank::Bank::InjectResult res = loop.inject(command);
+    const std::string reply = res.ok ? std::string("ok") : "err " + res.error;
+    if (peer_len > sizeof(sa_family_t)) {  // An unbound sender cannot be answered.
+      ::sendto(fd, reply.data(), reply.size(), MSG_DONTWAIT,
+               reinterpret_cast<const sockaddr*>(&peer), peer_len);
+    }
+  }
+}
+
+int run(const Args& args) {
+  std::string error;
+  std::optional<socketcan_io::CanSocket> sock = socketcan_io::CanSocket::open(args.ifname, &error);
+  if (!sock) {
+    std::fprintf(stderr, "vdrive_bank: --if %s: %s\n", args.ifname.c_str(), error.c_str());
+    return 2;
+  }
+  std::FILE* trace = std::fopen(args.trace.c_str(), "w");
+  if (trace == nullptr) {
+    std::fprintf(stderr, "vdrive_bank: --trace %s: %s\n", args.trace.c_str(), std::strerror(errno));
+    return 2;
+  }
+  int inject_fd = -1;
+  if (!args.inject.empty()) {
+    inject_fd = bind_inject(args.inject, &error);
+    if (inject_fd < 0) {
+      std::fprintf(stderr, "vdrive_bank: --inject %s: %s\n", args.inject.c_str(), error.c_str());
+      std::fclose(trace);
+      return 2;
+    }
+  }
+  // Blocked before the writer thread starts, so only the signalfd ever sees them.
+  sigset_t signals;
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGTERM);
+  sigaddset(&signals, SIGINT);
+  pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+  const int signal_fd = ::signalfd(-1, &signals, SFD_NONBLOCK | SFD_CLOEXEC);
+  const int timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (signal_fd < 0 || timer_fd < 0) {
+    std::fprintf(stderr, "vdrive_bank: signalfd/timerfd: %s\n", std::strerror(errno));
+    return 1;
+  }
+
+  vdrive_bank::GetrandomEntropy entropy;
+  const std::array<std::uint32_t, vdrive_bank::kNodeCount> boot_ids =
+      vdrive_bank::draw_boot_ids(entropy);
+  const MonoTime t0 = mono_now();
+  vdrive_bank::Bank bank(boot_ids, t0);
+  vdrive_bank::TraceRing ring;
+  vdrive_bank::BankLoop loop(bank, *sock, ring, mono_now, t0);
+  const auto write_record = [trace](const vdrive_bank::TraceRecord& r) {
+    std::string line = vdrive_bank::to_json(r);
+    line += '\n';
+    std::fwrite(line.data(), 1, line.size(), trace);
+  };
+  vdrive_bank::TraceWriter writer(ring, write_record, [trace] { std::fflush(trace); });
+  writer.start();
+  loop.start(boot_ids);
+
+  // Release k at t0 + k W: absolute, so the timer keeps the phase whatever the loop does.
+  itimerspec spec{};
+  spec.it_value = to_timespec(loop.next_release());
+  spec.it_interval = to_timespec(MonoTime{vdrive_bank::kReleasePeriod.ns});
+  if (::timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &spec, nullptr) < 0) {
+    std::fprintf(stderr, "vdrive_bank: timerfd_settime: %s\n", std::strerror(errno));
+    return 1;
+  }
+
+  int signo = 0;
+  int rc = 0;
+  while (signo == 0) {
+    std::array<pollfd, 4> fds{{{timer_fd, POLLIN, 0},
+                               {sock->fd(), POLLIN, 0},
+                               {signal_fd, POLLIN, 0},
+                               {inject_fd, POLLIN, 0}}};
+    const nfds_t count = inject_fd >= 0 ? 4 : 3;
+    if (::ppoll(fds.data(), count, nullptr, nullptr) < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      std::fprintf(stderr, "vdrive_bank: ppoll: %s\n", std::strerror(errno));
+      rc = 1;
+      break;
+    }
+    if ((fds[2].revents & POLLIN) != 0) {
+      signalfd_siginfo info{};
+      if (::read(signal_fd, &info, sizeof info) == static_cast<ssize_t>(sizeof info)) {
+        signo = static_cast<int>(info.ssi_signo);
+      }
+      break;
+    }
+    if ((fds[0].revents & POLLIN) != 0) {
+      std::uint64_t expirations = 0;
+      // The count is not used: releases are counted from the clock (B1).
+      [[maybe_unused]] const ssize_t n = ::read(timer_fd, &expirations, sizeof expirations);
+    }
+    if (inject_fd >= 0 && (fds[3].revents & POLLIN) != 0) {
+      serve_inject(inject_fd, loop);
+    }
+    loop.run_once();
+  }
+
+  writer.stop();
+  const MonoTime end = mono_now();
+  for (const vdrive_bank::TraceRecord& r : loop.snapshot(end)) {
+    write_record(r);
+  }
+  write_record(loop.exit_record(end, signo));
+  if (std::fflush(trace) != 0 || std::ferror(trace) != 0) {
+    std::fprintf(stderr, "vdrive_bank: writing %s failed\n", args.trace.c_str());
+    rc = 1;
+  }
+  std::fclose(trace);
+  if (inject_fd >= 0) {
+    ::close(inject_fd);
+    ::unlink(args.inject.c_str());
+  }
+  return rc;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  const Args args = parse_args(argc, argv);
+  if (args.help) {
+    std::fputs(kUsage, stdout);
+    return 0;
+  }
+  if (!args.error.empty()) {
+    std::fprintf(stderr, "vdrive_bank: %s\n%s", args.error.c_str(), kUsage);
+    return 2;
+  }
+  try {
+    return run(args);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "vdrive_bank: %s\n", e.what());
+    return 1;
+  }
+}

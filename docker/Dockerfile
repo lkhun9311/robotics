@@ -69,4 +69,7 @@ RUN source /opt/ros/jazzy/setup.bash \
 # Runtime: the pinned ros-core image (no compilers, no colcon) plus the installed artifacts.
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=build /ws/install/release /opt/robotics
+# The bus processes ship too: each must load and start in this image (--help exits 0).
+RUN /opt/robotics/vdrive_bank/lib/vdrive_bank/vdrive_bank --help \
+ && /opt/robotics/bus_fault_proxy/lib/bus_fault_proxy/bus_fault_proxy --help
 ENTRYPOINT ["/opt/robotics/runtime_core/lib/runtime_core/logic_sim"]
