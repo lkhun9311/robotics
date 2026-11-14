@@ -1,4 +1,7 @@
-.git
+# Only the project tree goes into the image. Dot-directories hold repository or local state.
+.*
+!.clang-format
+!.clang-tidy
 build
 install
 log
