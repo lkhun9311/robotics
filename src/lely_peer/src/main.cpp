@@ -25,7 +25,8 @@
 //   emcy_watch         like idle, counting EMCY; scenario_done also on SIGTERM/SIGINT
 //   nmt_sequence       Start, Stop, Enter Pre-operational, Start, Reset Communication, Reset
 //                      Node to node N, each awaited in Lely's reported state or boot
-//   sdo_suite          SDO uploads and downloads to node N with expected successes and aborts
+//   sdo_suite          SDO uploads and downloads to node N, each with its expected success or
+//                      abort code (M3); any mismatch fails the scenario
 //   commit_and_enable  NMT Start; controlwords 0x06, 0x07 by RPDO3; the drive extension's commit
 //                      transaction through Lely's SDO client; controlword 0x0F
 //   pdo_stream         commit_and_enable, then K updates of RPDO1/RPDO2 (one per SYNC, seq + 1,
@@ -55,6 +56,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <vector>
 
 #include "lely_peer/args.hpp"
@@ -91,6 +93,18 @@ std::string num(const char* key, std::int64_t value) {
   return std::string(",\"") + key + "\":" + std::to_string(value);
 }
 
+// The value of an SDO transfer as a JSON integer. An INTEGER8 goes through its unsigned byte, so
+// the sign is restored explicitly rather than by a signed-char widening.
+template <typename T>
+std::int64_t widen(T value) {
+  if constexpr (std::is_same_v<T, std::int8_t>) {
+    const auto byte = static_cast<std::uint8_t>(value);
+    return byte >= 0x80U ? static_cast<std::int64_t>(byte) - 0x100 : byte;
+  } else {
+    return static_cast<std::int64_t>(value);
+  }
+}
+
 // Objects of our EDS the scenarios use (the remote-mapped PDO entries and SDO targets).
 constexpr std::uint16_t kControlword = 0x6040;
 constexpr std::uint16_t kStatusword = 0x6041;
@@ -118,6 +132,11 @@ struct Run {
   std::uint32_t count = 0;
   bool finished = false;
   std::uint64_t emcy = 0;
+  // Scenario fibers still running and SDO requests still pending in Lely's client: the master
+  // is stopped only once both are zero (or after a grace period), because a fiber suspended or
+  // a request pending at shutdown kept the process from exiting.
+  int fibers = 0;
+  int sdo_pending = 0;
   // Prints scenario_done (ok) or scenario_failed and stops the master; only the first call counts.
   std::function<void(bool ok, const std::string& fields)> finish;
 };
@@ -155,7 +174,11 @@ class PeerDriver : public canopen::FiberDriver {
     }
     // A task on the driver's executor runs as a fiber, so it may suspend (USleep) while it
     // waits for SDO confirmations and decoded TPDOs.
-    GetExecutor().post([this]() { Scenario(); });
+    ++run_.fibers;
+    GetExecutor().post([this]() {
+      Scenario();
+      --run_.fibers;
+    });
   }
 
   void OnHeartbeat(bool occurred) noexcept override {
@@ -224,18 +247,18 @@ class PeerDriver : public canopen::FiberDriver {
 
   // ---- steps, called from the scenario fiber ----
 
+  // Polls `done` every millisecond until it holds or `ms` of CLOCK_MONOTONIC time have passed.
+  // Returns false early, without waiting further, once the run has finished.
   bool WaitFor(const std::function<bool()>& done, int ms) {
-    for (int i = 0; i < ms; ++i) {
-      if (done()) {
-        return true;
-      }
-      if (run_.finished) {
+    const double deadline = now_s() + (static_cast<double>(ms) / 1000.0);
+    while (!done()) {
+      if (run_.finished || now_s() >= deadline) {
         return false;
       }
       std::error_code ec;
       USleep(1000, ec);
     }
-    return done();
+    return true;
   }
 
   bool WaitStatus(std::uint16_t state, int ms) {
@@ -277,14 +300,23 @@ class PeerDriver : public canopen::FiberDriver {
     return true;
   }
 
+  // How the last SDO transfer of this driver ended, for the scenario that checks it.
+  struct SdoResult {
+    enum class Kind { kOk, kAbort, kTimeout, kCancelled } kind = Kind::kCancelled;
+    std::uint32_t code = 0;
+    std::int64_t value = 0;
+  };
+
   void SdoError(const char* op, std::uint16_t idx, std::uint8_t sub, const std::error_code& ec) {
     const std::string where =
         node_field(id()) + ",\"op\":\"" + op + "\"" + num("index", idx) + num("sub", sub);
     if (ec == canopen::SdoErrc::TIMEOUT) {
       ++sdo_timeout_;
+      last_sdo_ = {SdoResult::Kind::kTimeout, 0, 0};
       emit("sdo_timeout", where);
     } else {
       ++sdo_abort_;
+      last_sdo_ = {SdoResult::Kind::kAbort, static_cast<std::uint32_t>(ec.value()), 0};
       emit("sdo_abort", where + num("code", static_cast<std::uint32_t>(ec.value())));
     }
   }
@@ -302,60 +334,105 @@ class PeerDriver : public canopen::FiberDriver {
   // __cxa_begin_catch) on the first SDO abort; its error path also has no return statement in
   // a non-void function. The transfers therefore use Lely's confirmation callbacks (no
   // exception) and the fiber polls for them.
+  // kOk when Lely confirmed the transfer (successfully or not); kCancelled when the run
+  // finished first (nothing is reported then); kTimeout when no confirmation came within the
+  // budget, which is longer than Lely's own SDO timeout.
   template <typename T>
-  bool AwaitOutcome(const std::shared_ptr<Outcome<T>>& outcome) {
+  typename SdoResult::Kind AwaitOutcome(const std::shared_ptr<Outcome<T>>& outcome) {
     const int budget_ms = static_cast<int>(kSdoTimeout.count()) + 500;
-    return WaitFor([&outcome]() { return outcome->done; }, budget_ms);
+    if (WaitFor([&outcome]() { return outcome->done; }, budget_ms)) {
+      return SdoResult::Kind::kOk;
+    }
+    return run_.finished ? SdoResult::Kind::kCancelled : SdoResult::Kind::kTimeout;
+  }
+
+  // Submits nothing once the run has finished; false then, with last_sdo_ = kCancelled.
+  bool MaySubmit() {
+    if (run_.finished) {
+      last_sdo_ = SdoResult{};
+      return false;
+    }
+    return true;
+  }
+
+  // The common end of a read or a write after the submit call.
+  template <typename T>
+  bool Confirmed(const char* op, std::uint16_t idx, std::uint8_t sub, const std::error_code& submit,
+                 const std::shared_ptr<Outcome<T>>& outcome) {
+    if (submit) {
+      --run_.sdo_pending;  // Not queued: no confirmation will come.
+      SdoError(op, idx, sub, submit);
+      return false;
+    }
+    switch (AwaitOutcome(outcome)) {
+      case SdoResult::Kind::kOk:
+        break;
+      case SdoResult::Kind::kTimeout:
+        SdoError(op, idx, sub, canopen::make_error_code(canopen::SdoErrc::TIMEOUT));
+        return false;
+      default:
+        last_sdo_ = SdoResult{};  // The run finished first: no result to report.
+        return false;
+    }
+    if (outcome->ec) {
+      SdoError(op, idx, sub, outcome->ec);
+      return false;
+    }
+    return true;
   }
 
   template <typename T>
   std::optional<T> SdoRead(std::uint16_t idx, std::uint8_t sub) {
+    if (!MaySubmit()) {
+      return std::nullopt;
+    }
     auto outcome = std::make_shared<Outcome<T>>();
     std::error_code ec;
+    ++run_.sdo_pending;
     SubmitRead<T>(
         idx, sub,
-        [outcome](std::uint8_t, std::uint16_t, std::uint8_t, std::error_code result, T value) {
+        [outcome, &run = run_](std::uint8_t, std::uint16_t, std::uint8_t, std::error_code result,
+                               T value) {
+          --run.sdo_pending;
           outcome->ec = result;
           outcome->value = value;
           outcome->done = true;
         },
         kSdoTimeout, ec);
-    if (ec || !AwaitOutcome(outcome)) {
-      SdoError("read", idx, sub, ec ? ec : canopen::make_error_code(canopen::SdoErrc::TIMEOUT));
+    if (!Confirmed("read", idx, sub, ec, outcome)) {
       return std::nullopt;
     }
-    if (outcome->ec) {
-      SdoError("read", idx, sub, outcome->ec);
-      return std::nullopt;
-    }
+    const std::int64_t value = widen(outcome->value);
     ++sdo_ok_;
+    last_sdo_ = {SdoResult::Kind::kOk, 0, value};
     emit("sdo_ok", node_field(id()) + ",\"op\":\"read\"" + num("index", idx) + num("sub", sub) +
-                       num("value", static_cast<std::int64_t>(outcome->value)));
+                       num("value", value));
     return outcome->value;
   }
 
   template <typename T>
   bool SdoWrite(std::uint16_t idx, std::uint8_t sub, T value) {
+    if (!MaySubmit()) {
+      return false;
+    }
     auto outcome = std::make_shared<Outcome<bool>>();
     std::error_code ec;
+    ++run_.sdo_pending;
     SubmitWrite(
         idx, sub, T{value},
-        [outcome](std::uint8_t, std::uint16_t, std::uint8_t, std::error_code result) {
+        [outcome, &run = run_](std::uint8_t, std::uint16_t, std::uint8_t, std::error_code result) {
+          --run.sdo_pending;
           outcome->ec = result;
           outcome->done = true;
         },
         kSdoTimeout, ec);
-    if (ec || !AwaitOutcome(outcome)) {
-      SdoError("write", idx, sub, ec ? ec : canopen::make_error_code(canopen::SdoErrc::TIMEOUT));
-      return false;
-    }
-    if (outcome->ec) {
-      SdoError("write", idx, sub, outcome->ec);
+    if (!Confirmed("write", idx, sub, ec, outcome)) {
       return false;
     }
     ++sdo_ok_;
+    last_sdo_ = {SdoResult::Kind::kOk, 0, widen(value)};
     emit("sdo_ok", node_field(id()) + ",\"op\":\"write\"" + num("index", idx) + num("sub", sub) +
-                       num("value", static_cast<std::int64_t>(value)));
+                       num("value", widen(value)));
     return true;
   }
 
@@ -409,25 +486,61 @@ class PeerDriver : public canopen::FiberDriver {
                           num("boots", static_cast<std::int64_t>(boots_)));
   }
 
+  // Every step has its expected outcome: success (with the EDS value where the drive's answer
+  // is fixed) or the CiA 301 abort code of the M3 list. Every step runs and is reported; any
+  // mismatch makes the scenario fail and is named in the reason.
   void SdoSuite() {
-    // Uploads the drive answers (CiA 301 and CiA 402 objects, the extension's read-only ones).
-    SdoRead<std::uint32_t>(0x1000, 0);  // device type
-    SdoRead<std::uint8_t>(0x1001, 0);   // error register
-    SdoRead<std::uint16_t>(0x1017, 0);  // producer heartbeat time
+    std::string mismatches;
+    const auto check = [&](const std::string& step, std::optional<std::uint32_t> abort_code,
+                           std::optional<std::int64_t> value = std::nullopt) {
+      if (run_.finished) {
+        return;
+      }
+      const SdoResult r = last_sdo_;
+      const bool ok = abort_code
+                          ? (r.kind == SdoResult::Kind::kAbort && r.code == *abort_code)
+                          : (r.kind == SdoResult::Kind::kOk && (!value || r.value == *value));
+      if (!ok) {
+        mismatches += (mismatches.empty() ? "" : "; ") + step;
+      }
+    };
+    using Abort = std::optional<std::uint32_t>;
+    const Abort success;
+    // Uploads the drive answers.
+    SdoRead<std::uint32_t>(0x1000, 0);
+    check("read 0x1000 (device type 0x00020192)", success, 0x0002'0192);
+    SdoRead<std::uint8_t>(0x1001, 0);
+    check("read 0x1001 (error register)", success);
+    SdoRead<std::uint16_t>(0x1017, 0);
+    check("read 0x1017 (heartbeat 100)", success, 100);
     for (std::uint8_t sub = 1; sub <= 4; ++sub) {
-      SdoRead<std::uint32_t>(0x1018, sub);  // identity
+      SdoRead<std::uint32_t>(0x1018, sub);
+      check("read 0x1018:" + std::to_string(sub) + " (identity)", success);
     }
-    SdoRead<std::uint32_t>(0x2013, 0);  // boot_id
-    SdoRead<std::uint16_t>(0x2014, 0);  // command_timeout_ms
-    SdoRead<std::int8_t>(0x6061, 0);    // modes of operation display
+    SdoRead<std::uint32_t>(0x2013, 0);
+    check("read 0x2013 (boot_id)", success);
+    SdoRead<std::uint16_t>(0x2014, 0);
+    check("read 0x2014 (command timeout 30)", success, 30);
+    SdoRead<std::int8_t>(0x6061, 0);
+    check("read 0x6061 (mode display 8)", success, 8);
     // A download the drive accepts: modes of operation = 8 (its only mode).
     SdoWrite<std::int8_t>(0x6060, 0, 8);
-    // Transfers the drive must refuse, each with its own abort code.
-    SdoRead<std::uint32_t>(0x5000, 0);            // no such object
-    SdoRead<std::uint32_t>(0x1000, 1);            // no such sub-index
-    SdoWrite<std::uint32_t>(0x2013, 0, 1);        // read-only
-    SdoWrite<std::int8_t>(0x6060, 0, 7);          // value out of range
-    SdoWrite<std::uint16_t>(kControlword, 0, 0);  // PDO-only object
+    check("write 0x6060 = 8", success);
+    // The M3 refusals.
+    SdoRead<std::uint32_t>(0x2FFF, 0);
+    check("read 0x2FFF (0x06020000)", 0x0602'0000U);
+    SdoWrite<std::uint32_t>(0x1000, 0, 0);
+    check("write 0x1000 (0x06010002)", 0x0601'0002U);
+    SdoWrite<std::uint16_t>(0x1017, 0, 100);
+    check("write 0x1017 (0x06010002)", 0x0601'0002U);
+    SdoWrite<std::int8_t>(0x6060, 0, 9);
+    check("write 0x6060 = 9 (0x06090030)", 0x0609'0030U);
+    SdoWrite<std::int32_t>(0x6060, 0, 8);
+    check("4-byte write 0x6060 (0x06070010)", 0x0607'0010U);
+    if (!mismatches.empty()) {
+      run_.finish(false, "unexpected SDO results: " + mismatches);
+      return;
+    }
     run_.finish(true, num("ok", sdo_ok_) + num("abort", sdo_abort_) + num("timeout", sdo_timeout_));
   }
 
@@ -523,6 +636,7 @@ class PeerDriver : public canopen::FiberDriver {
   std::int64_t sdo_ok_ = 0;
   std::int64_t sdo_abort_ = 0;
   std::int64_t sdo_timeout_ = 0;
+  SdoResult last_sdo_;
   bool streaming_ = false;
   bool enable_pending_ = false;
   std::uint16_t tag_ = 0;
@@ -662,6 +776,19 @@ int run(const lely_peer::Options& opts) {
     stopping = true;
     master.AsyncDeconfig().submit(exec, [&]() { ctx.shutdown(); });
   };
+  // A finished scenario's fiber returns within a millisecond (WaitFor sees run.finished); a
+  // request it left in Lely's client ends with Lely's SDO timeout. Stop after both, at most
+  // kSdoTimeout + 1 s later.
+  io::Timer drain(poll, exec, CLOCK_MONOTONIC);
+  double drain_until = 0;
+  std::function<void()> stop_when_idle = [&]() {
+    if ((run.fibers == 0 && run.sdo_pending == 0) || now_s() >= drain_until) {
+      stop();
+      return;
+    }
+    drain.settime(std::chrono::milliseconds(1));
+    drain.submit_wait([&](int, std::error_code) { stop_when_idle(); });
+  };
   io::SignalSet sigset(poll, exec);
   io::Timer deadline(poll, exec, CLOCK_MONOTONIC);
   int status = 0;
@@ -681,7 +808,8 @@ int run(const lely_peer::Options& opts) {
     }
     sigset.clear();
     // Not from inside a driver callback or a scenario fiber: the loop stops the master.
-    exec.post([&]() { stop(); });
+    drain_until = now_s() + static_cast<double>(kSdoTimeout.count()) / 1000.0 + 1.0;
+    exec.post([&]() { stop_when_idle(); });
   };
   const auto counters = [&]() {
     return run.scenario == "emcy_watch" ? num("emcy", static_cast<std::int64_t>(run.emcy))
@@ -694,6 +822,8 @@ int run(const lely_peer::Options& opts) {
     sigset.clear();
     if (run.scenario == "emcy_watch") {
       run.finish(true, counters());
+    } else if (node_scenario) {
+      run.finish(false, "stopped by a signal before the scenario ended");
     } else {
       stop();
     }

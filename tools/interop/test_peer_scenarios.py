@@ -13,9 +13,20 @@ from conftest import DEVICE_IF, NODES, inconclusive
 
 NODE = 3
 OPERATIONAL, STOPPED, PRE_OPERATIONAL = 5, 4, 127  # Lely NmtState values in `state` events.
+# The M3 refusals sdo_suite performs, in order: (op, index, sub, CiA 301 abort code).
+SDO_SUITE_ABORTS = [
+    ("read", 0x2FFF, 0, 0x06020000),   # object does not exist
+    ("write", 0x1000, 0, 0x06010002),  # read-only
+    ("write", 0x1017, 0, 0x06010002),  # const (read-only for SDO)
+    ("write", 0x6060, 0, 0x06090030),  # 9: value above the EDS limit 8
+    ("write", 0x6060, 0, 0x06070010),  # a 4-byte write to an INTEGER8: length mismatch
+]
+# The peer's own deadline for the node scenarios is 15 s; the test waits longer, so a hung
+# scenario ends with the peer's scenario_failed reason, not a harness timeout.
+PEER_DEADLINE_S = 15
 
 
-def run_scenario(start_peer, scenario, timeout=10, **kwargs):
+def run_scenario(start_peer, scenario, timeout=PEER_DEADLINE_S + 5, **kwargs):
     """Starts the peer, waits for it to end by itself; returns (peer, scenario_done event)."""
     peer = start_peer(scenario, **kwargs)
     peer.wait_for(lambda e: e.get("event") in ("scenario_done", "scenario_failed"), timeout,
@@ -57,12 +68,15 @@ def test_peer_scenarios_run(scenario, start_bank, proxy, start_peer, inject_clie
 
     elif scenario == "sdo_suite":
         peer, done = run_scenario(start_peer, "sdo_suite", node=NODE)
-        assert done["timeout"] == 0, done
-        assert done["ok"] >= 7 and done["abort"] >= 5, done
-        assert done["ok"] == len(peer.of("sdo_ok", node=NODE)), done
-        assert done["abort"] == len(peer.of("sdo_abort", node=NODE)), done
-        device_type = peer.of("sdo_ok", node=NODE, index=0x1000, sub=0)
-        assert device_type and device_type[0]["value"] == 0x00020192, device_type
+        assert (done["ok"], done["abort"], done["timeout"]) == (11, 5, 0), done
+        assert len(peer.of("sdo_ok", node=NODE)) == 11, peer.of("sdo_ok")
+        aborts = [(e["op"], e["index"], e["sub"], e["code"]) for e in peer.of("sdo_abort")]
+        assert aborts == SDO_SUITE_ABORTS, aborts
+        assert not peer.of("sdo_timeout")
+        for index, sub, value in ((0x1000, 0, 0x00020192), (0x1017, 0, 100), (0x2014, 0, 30),
+                                  (0x6061, 0, 8)):
+            got = peer.of("sdo_ok", node=NODE, op="read", index=index, sub=sub)
+            assert [e["value"] for e in got] == [value], (hex(index), got)
 
     elif scenario == "commit_and_enable":
         peer, done = run_scenario(start_peer, "commit_and_enable", node=NODE)
@@ -123,3 +137,29 @@ def test_peer_scenario_failure_is_reported(start_peer):
     assert len(failed) == 1 and "node 9" in failed[0]["reason"], failed
     assert not peer.of("scenario_done")
     assert not peer.of("sdo_ok") and not peer.of("sdo_abort")
+
+
+def test_peer_scenario_cut_off_reports_no_late_result(start_bank, start_proxy, start_peer):
+    """A scenario ended by its deadline while an SDO request is pending reports no sdo_timeout
+    for that request afterwards, and the peer still exits. The proxy drops the first SDO
+    request of the scenario (occurrence 1 of 0x603; occurrence 0 is Lely's boot upload of
+    0x1000), so Lely's 1 s SDO timeout outlasts the 800 ms deadline."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    proxy = start_proxy(rules=f"h2d 0x{0x600 + NODE:03X}/0x7FF every 1000 offset 1 drop\n")
+    peer = start_peer("sdo_suite", node=NODE, duration_ms=800)
+    peer.wait_for(lambda e: e.get("event") == "boot" and e.get("node") == NODE, 2,
+                  f"boot of node {NODE}")
+    peer.wait_for(lambda e: e.get("event") == "scenario_failed", 3, "the deadline")
+    assert peer.wait_exit(timeout=3) == 1, "the peer did not exit after its deadline"
+    failed = peer.of("scenario_failed")
+    assert len(failed) == 1 and "deadline" in failed[0]["reason"], failed
+    assert peer.of("exit"), "no exit line"
+    t_failed = failed[0]["t"]
+    late = [e for e in peer.events
+            if e.get("event", "").startswith("sdo_") and e["t"] >= t_failed]
+    assert not late, f"results reported after the scenario ended: {late}"
+    assert not peer.of("sdo_ok") and not peer.of("sdo_timeout"), peer.events[-5:]
+    exit_record = proxy.stop()
+    if [r["dropped"] for r in exit_record["rules"]] != [1]:
+        inconclusive(f"the rule did not drop exactly one request: {exit_record['rules']}")
