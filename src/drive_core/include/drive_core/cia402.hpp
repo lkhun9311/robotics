@@ -56,6 +56,10 @@ class Cia402 {
   void drive_fault(std::uint16_t error_code);
   // Transition 14: Fault Reaction Active -> Fault once the reaction (ramp or none) is done.
   void fault_reaction_done();
+  // Loss of drive authority (D11 torque loss): Fault at once from any state (13 and 14 with no
+  // reaction), and the error code becomes `error_code` even if another fault was being handled,
+  // since the loss of authority supersedes it.
+  void fault_without_reaction(std::uint16_t error_code);
 
   // While inhibited, every entry into Operation Enabled is refused: transitions 4, 3+4 and 16
   // (16 exists with option 6). The command is ignored and the state stays where it is. The D11

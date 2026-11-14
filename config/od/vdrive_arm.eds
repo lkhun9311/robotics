@@ -820,7 +820,7 @@ AccessType=rww
 DefaultValue=0
 PDOMapping=1
 
-; D13/D14: feedback fields; 05 drive_flags (bit 0 = policy latch, D11) is SDO-only.
+; D13/D14: feedback fields; 05 drive_flags is SDO-only (bit 0 = policy latch, D11; full layout in drive_core drive_flag).
 [2030]
 ParameterName=feedback_ext
 ObjectType=0x9

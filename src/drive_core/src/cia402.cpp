@@ -149,6 +149,13 @@ void Cia402::fault_reaction_done() {
   }
 }
 
+void Cia402::fault_without_reaction(std::uint16_t error_code) {
+  if (state_ != Cia402State::kFault) {
+    enter(Cia402State::kFault);  // 13 + 14, no reaction.
+  }
+  fault_code_ = error_code;
+}
+
 bool Cia402::request_mode(std::int8_t mode) { return mode == kModeCsp; }
 
 std::uint16_t Cia402::statusword() const {

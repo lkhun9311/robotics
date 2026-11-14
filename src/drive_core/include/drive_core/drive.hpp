@@ -10,17 +10,29 @@
 #include "canopen_codec/codec.hpp"
 #include "drive_core/assembly.hpp"
 #include "drive_core/cia402.hpp"
+#include "drive_core/commit.hpp"
 #include "drive_core/exec_tag.hpp"
 #include "drive_core/joint.hpp"
 #include "drive_core/nmt.hpp"
+#include "drive_core/sdo_server.hpp"
 #include "runtime_core/time.hpp"
 
 // The virtual drive: frame dispatcher and drive loop. Every received frame is classified, passed
 // through the NMT service matrix (D12) and only then handed to its service. The drive loop runs
 // the SYNC timeline (D7), assembly and integrity (D8), guards (D9), the quick-stop ramp (D10),
 // the stop and fault layers with the policy latch (D11) and the TPDO feedback (D13). The SDO
-// server comes later (Task 8).
+// server (sdo_server.hpp) serves the object dictionary, including the execution commit
+// transaction (D17).
 namespace drive_core {
+
+// 0x2030:05 drive_flags (D11, D14): the one definition of its bit layout.
+namespace drive_flag {
+inline constexpr std::uint16_t kPolicyLatched = 1U << 0U;     // D11 policy latch is set.
+inline constexpr std::uint16_t kDriveUnavailable = 1U << 1U;  // Torque loss: no drive authority.
+// An integrity violation (D8) was detected and its latch is not yet reset.
+inline constexpr std::uint16_t kIntegrity = 1U << 2U;
+inline constexpr std::uint16_t kStopUnconfirmed = 1U << 3U;  // The latest stop is unconfirmed.
+}  // namespace drive_flag
 
 // Project-declared timing (E1; contract D7, D9, D10).
 inline constexpr runtime_core::Duration kBusPeriod{10'000'000};       // T_bus 10 ms
@@ -120,11 +132,13 @@ class Drive {
   // stop monitor (stop_confirmed / stop_unconfirmed, end of a fault reaction).
   void tick(runtime_core::MonoTime now);
 
-  // Commit through the drive (D17's last step; Task 8's SDO path calls this). Refused (nullopt,
-  // the current tag untouched) while the policy latch is set.
+  // The tag allocation step of a commit, without the D17 staging. The SDO path (0x2011) calls it
+  // after its own checks (staging, CRC, CiA 402 state, idempotent repeat); tests of the drive
+  // loop call it directly. Refused (nullopt, the current tag untouched) while the policy latch
+  // is set.
   std::optional<std::uint16_t> commit(std::uint64_t generation, std::uint32_t session,
                                       runtime_core::MonoTime now);
-  // SDO 0x2015 policy_reset = 1 (D11; Task 8 wires the write). Accepted only while latched and
+  // 0x2015 policy_reset = 1 (D11; the SDO write calls this). Accepted only while latched and
   // after the latest stop is confirmed; then the latch clears and the drive goes to Switch On
   // Disabled. Returns whether it was accepted.
   bool policy_reset(runtime_core::MonoTime now);
@@ -143,6 +157,10 @@ class Drive {
   bool stop_confirmed() const { return stop_confirmed_; }
   bool stop_unconfirmed() const { return stop_unconfirmed_; }
   bool drive_unavailable() const { return drive_unavailable_; }
+  // 0x2030:05 (bit layout in drive_flag).
+  std::uint16_t drive_flags() const;
+  // 0x2016: attempt_id of the last successful commit in this boot (D17).
+  std::uint32_t committed_attempt() const { return staging_.committed_attempt(); }
   // The command being tracked; nullopt when nothing actuates.
   const std::optional<Command>& actuated() const { return actuated_; }
   const JointState& joint() const { return joint_.state(); }
@@ -160,7 +178,17 @@ class Drive {
  private:
   std::vector<canopen_codec::Frame> on_nmt(const canopen_codec::Frame& frame,
                                            runtime_core::MonoTime now);
-  std::vector<canopen_codec::Frame> on_sdo(const canopen_codec::Frame& frame);
+  class Objects;  // The drive's ObjectAccess (drive.cpp).
+
+  std::vector<canopen_codec::Frame> on_sdo(const canopen_codec::Frame& frame,
+                                           runtime_core::MonoTime now);
+  // 0x2010 and 0x2011 writes (D17); each returns 0 or an SDO abort code.
+  std::uint32_t write_exec_request(std::uint8_t sub, std::uint32_t value,
+                                   runtime_core::MonoTime now);
+  std::uint32_t write_exec_commit(std::uint32_t crc, runtime_core::MonoTime now);
+  // While drive authority is lost, the drive stays in (or re-enters) Fault with the torque-loss
+  // code, so the statusword never offers an enable-able state.
+  void hold_unavailable_fault();
   void on_pdo(const canopen_codec::Frame& frame, runtime_core::MonoTime now);
   std::vector<canopen_codec::Frame> on_sync(runtime_core::MonoTime now);
   std::vector<canopen_codec::Frame> sample_tpdos(runtime_core::MonoTime now);
@@ -194,7 +222,21 @@ class Drive {
   runtime_core::MonoTime sync_ref_{};     // Last SYNC or Operation Enabled entry, if later.
   runtime_core::MonoTime command_ref_{};  // Last actuation or Operation Enabled entry, if later.
   std::uint32_t sync_duplicates_{0};
-  bool integrity_pending_{false};  // Detected, quick stop not yet started (next W tick).
+  bool integrity_pending_{false};    // Detected, quick stop not yet started (next W tick).
+  bool integrity_flag_{false};       // drive_flag::kIntegrity; cleared by an accepted policy reset.
+  std::uint32_t sample_time_us_{0};  // 0x2030:03 of the latest TPDO sample.
+  std::uint16_t controlword_{0};     // 6040h as last received (RPDO3).
+
+  // The commit transaction (D17). last_commit_ is the latest success, kept for the idempotent
+  // repeat: the same 0x2011 value again answers with the same tag while that tag is current.
+  CommitStaging staging_;
+  struct LastCommit {
+    CommitRequest request;
+    std::uint16_t tag{};
+    std::uint64_t epoch{};
+  };
+  std::optional<LastCommit> last_commit_;
+  std::uint32_t exec_commit_written_{0};  // 0x2011 as last written.
   bool policy_latched_{false};
   bool drive_unavailable_{false};
   // Stop monitor of the latest stop (D10).

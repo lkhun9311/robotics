@@ -112,7 +112,7 @@ std::vector<cc::Frame> Drive::on_frame(const cc::Frame& frame, runtime_core::Mon
       }
       return {};
     case FrameKind::kSdo:
-      return on_sdo(frame);
+      return on_sdo(frame, now);
     case FrameKind::kPdo:
       on_pdo(frame, now);
       return {};
@@ -146,6 +146,8 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       // the tag allocator stay. The CiA 402 state is application state and stays too, and so
       // does the policy latch (D11).
       issuer_.reset_communication();
+      staging_.reset_communication();  // The highest committed attempt_id stays (D17).
+      last_commit_.reset();
       assembler_.reset();
       actuated_.reset();
       applied_seq_ = 0;
@@ -153,10 +155,13 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       break;
     case NmtAction::kResetNode: {
       // D3: a new boot with a new boot_id, a new tag start and a new quarantine. The policy
-      // latch survives (D11): the re-initialised CiA 402 machine gets the inhibit again. The
-      // joint is physical and keeps its motion.
+      // latch survives (D11): the re-initialised CiA 402 machine gets the inhibit again, and a
+      // lost drive authority puts it straight back into Fault (after_transition). The joint is
+      // physical and keeps its motion.
       const Cia402State before = cia402_.state();
       issuer_.boot(next_boot_id(issuer_.boot_id()), now);
+      staging_.new_boot();  // attempt_ids start over only with a new boot (D17).
+      last_commit_.reset();
       assembler_.reset();
       actuated_.reset();
       applied_seq_ = 0;
@@ -172,15 +177,6 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
   return {boot_up_frame()};
 }
 
-std::vector<cc::Frame> Drive::on_sdo(const cc::Frame& frame) {
-  if (!cc::decode_sdo(node_, frame)) {
-    ++counts_.malformed;
-    return {};
-  }
-  ++counts_.sdo;
-  return {};  // The SDO server is not implemented yet; until then no request is answered.
-}
-
 void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
   if (const auto rpdo1 = cc::unpack_rpdo1(node_, frame)) {
     ++counts_.pdo;
@@ -194,6 +190,7 @@ void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
     }
   } else if (const auto rpdo3 = cc::unpack_rpdo3(node_, frame)) {
     ++counts_.pdo;
+    controlword_ = rpdo3->controlword;
     const Cia402State before = cia402_.state();
     cia402_.on_controlword(rpdo3->controlword);
     after_transition(before, now);
@@ -251,7 +248,15 @@ void Drive::start_stop_monitor(runtime_core::MonoTime now) {
   stop_unconfirmed_ = false;
 }
 
+void Drive::hold_unavailable_fault() {
+  if (drive_unavailable_ && cia402_.state() != Cia402State::kFault) {
+    cia402_.fault_without_reaction(kErrorTorqueLoss);
+  }
+}
+
 void Drive::after_transition(Cia402State before, runtime_core::MonoTime now) {
+  // A Fault Reset or a reset node cannot leave Fault while the drive authority is lost.
+  hold_unavailable_fault();
   const Cia402State after = cia402_.state();
   if (before == after) {
     return;
@@ -295,6 +300,7 @@ void Drive::note_integrity(runtime_core::MonoTime now) {
   // D8: normal actuation is blocked at once; the quick stop starts at the next W tick.
   actuated_.reset();
   integrity_pending_ = true;
+  integrity_flag_ = true;
   emit(DriveEvent{DriveEventKind::kIntegrity, now});
 }
 
@@ -349,13 +355,14 @@ std::vector<cc::Frame> Drive::on_sync(runtime_core::MonoTime now) {
 
 std::vector<cc::Frame> Drive::sample_tpdos(runtime_core::MonoTime now) {
   ++sample_seq_;
+  sample_time_us_ = to_wire_us(now);
   const JointState& joint = joint_.state();
   return {
       cc::pack_tpdo1(node_, cc::od::Tpdo1{cia402_.statusword(), to_wire_micro(joint.position_nrad),
                                           sample_seq_}),
       cc::pack_tpdo2(
           node_, cc::od::Tpdo2{to_wire_micro(joint.velocity_nrad_s), sample_seq_, applied_seq_}),
-      cc::pack_tpdo3(node_, cc::od::Tpdo3{to_wire_us(now), sample_seq_, applied_tag_}),
+      cc::pack_tpdo3(node_, cc::od::Tpdo3{sample_time_us_, sample_seq_, applied_tag_}),
   };
 }
 
@@ -415,6 +422,7 @@ bool Drive::policy_reset(runtime_core::MonoTime now) {
     return false;
   }
   policy_latched_ = false;
+  integrity_flag_ = false;
   apply_inhibit();
   const Cia402State before = cia402_.state();
   switch (before) {
@@ -447,12 +455,13 @@ void Drive::inject_fault(std::uint16_t error_code, runtime_core::MonoTime now) {
 
 void Drive::inject_torque_loss(runtime_core::MonoTime now) {
   const Cia402State before = cia402_.state();
-  cia402_.drive_fault(kErrorTorqueLoss);
-  cia402_.fault_reaction_done();  // No reaction: there is no actuator to run one.
+  drive_unavailable_ = true;
+  // No reaction: there is no actuator to run one. The torque-loss code replaces a fault that was
+  // already being handled (Fault Reaction Active or Fault): the authority loss supersedes it.
+  cia402_.fault_without_reaction(kErrorTorqueLoss);
   actuated_.reset();
   issuer_.revoke();
   after_transition(before, now);
-  drive_unavailable_ = true;
   apply_inhibit();
   // Never a controlled stop: no monitor, the stop is reported unconfirmed at once.
   stop_active_ = false;
@@ -462,6 +471,215 @@ void Drive::inject_torque_loss(runtime_core::MonoTime now) {
   fault.fault_code = kErrorTorqueLoss;
   emit(fault);
   emit(DriveEvent{DriveEventKind::kStopUnconfirmed, now});
+}
+
+std::uint16_t Drive::drive_flags() const {
+  std::uint16_t flags = 0;
+  if (policy_latched_) {
+    flags |= drive_flag::kPolicyLatched;
+  }
+  if (drive_unavailable_) {
+    flags |= drive_flag::kDriveUnavailable;
+  }
+  if (integrity_flag_ || integrity_pending_) {
+    flags |= drive_flag::kIntegrity;
+  }
+  if (stop_unconfirmed_) {
+    flags |= drive_flag::kStopUnconfirmed;
+  }
+  return flags;
+}
+
+// ---- SDO server: the drive's objects ----
+
+namespace {
+
+namespace addr = cc::od::addr;
+
+constexpr bool at(const cc::od::EntryInfo& entry, cc::od::Address a) {
+  return entry.index == a.index && entry.sub == a.sub;
+}
+
+// Fragment fields and the controlword reach the drive by PDO only (D4); an SDO write of them is
+// refused, so the command path has exactly one entrance.
+constexpr bool pdo_only(const cc::od::EntryInfo& entry) {
+  return entry.index == addr::controlword.index || entry.index == addr::target_position.index ||
+         entry.index == addr::rpdo1_ext_command_seq.index ||
+         entry.index == addr::rpdo2_ext_valid_until_us.index;
+}
+
+constexpr std::uint32_t raw_i32(std::int32_t v) { return static_cast<std::uint32_t>(v); }
+
+}  // namespace
+
+class Drive::Objects final : public ObjectAccess {
+ public:
+  Objects(Drive& drive, runtime_core::MonoTime now) : d_(drive), now_(now) {}
+
+  ReadResult read(const cc::od::EntryInfo& e) override { return {value(e), 0}; }
+
+  std::uint32_t write(const cc::od::EntryInfo& e, std::uint32_t v) override {
+    if (e.index == addr::exec_request_attempt_id.index) {
+      return d_.write_exec_request(e.sub, v, now_);
+    }
+    if (at(e, addr::exec_commit)) {
+      return d_.write_exec_commit(v, now_);
+    }
+    if (at(e, addr::policy_reset)) {
+      // D11: 1 asks for the reset; it is refused until the latest stop is confirmed. The EDS
+      // limits (0..1) already refused anything else; 0 asks for nothing.
+      return v == 0U || d_.policy_reset(now_) ? 0U : sdo_abort::kDeviceState;
+    }
+    if (at(e, addr::modes_of_operation)) {
+      // The EDS limits (8..8) already refused every other mode.
+      return d_.cia402_.request_mode(static_cast<std::int8_t>(v)) ? 0U : sdo_abort::kRange;
+    }
+    if (pdo_only(e)) {
+      return sdo_abort::kUnsupportedAccess;
+    }
+    // Every other writable object holds a value this drive does not change at run time (COB-IDs,
+    // transmission types, heartbeat time, option codes, quick-stop deceleration): writing the
+    // value it has is accepted, any other value is an invalid value for the parameter.
+    return v == value(e) ? 0U : sdo_abort::kRange;
+  }
+
+ private:
+  std::uint32_t value(const cc::od::EntryInfo& e) const {
+    const Drive& d = d_;
+    const std::optional<Command>& cmd = d.actuated_;
+    if (e.index == addr::exec_request_attempt_id.index && e.sub != 0U) {
+      return d.staging_.staged(e.sub);
+    }
+    if (at(e, addr::error_register)) {
+      return d.cia402_.fault_code() ? 1U : 0U;  // Bit 0: generic error.
+    }
+    if (at(e, addr::controlword)) {
+      return d.controlword_;
+    }
+    if (at(e, addr::statusword)) {
+      return d.cia402_.statusword();
+    }
+    if (at(e, addr::modes_of_operation) || at(e, addr::modes_of_operation_display)) {
+      return static_cast<std::uint8_t>(d.cia402_.mode_display());
+    }
+    if (at(e, addr::position_actual_value)) {
+      return raw_i32(to_wire_micro(d.joint_.state().position_nrad));
+    }
+    if (at(e, addr::velocity_actual_value)) {
+      return raw_i32(to_wire_micro(d.joint_.state().velocity_nrad_s));
+    }
+    if (at(e, addr::target_position)) {
+      return cmd ? raw_i32(cmd->target_position) : 0U;
+    }
+    if (at(e, addr::rpdo1_ext_command_seq) || at(e, addr::rpdo2_ext_command_seq)) {
+      return cmd ? cmd->command_seq : 0U;
+    }
+    if (at(e, addr::rpdo1_ext_exec_tag) || at(e, addr::rpdo2_ext_exec_tag)) {
+      return cmd ? cmd->exec_tag : 0U;
+    }
+    if (at(e, addr::rpdo2_ext_valid_until_us)) {
+      return cmd ? cmd->valid_until_us : 0U;
+    }
+    if (at(e, addr::exec_commit)) {
+      return d.exec_commit_written_;
+    }
+    if (at(e, addr::exec_tag)) {
+      return d.issuer_.current();
+    }
+    if (at(e, addr::boot_id)) {
+      return d.issuer_.boot_id();
+    }
+    if (at(e, addr::policy_reset)) {
+      return 0U;
+    }
+    if (at(e, addr::committed_attempt)) {
+      return d.staging_.committed_attempt();
+    }
+    if (at(e, addr::feedback_ext_sample_seq)) {
+      return d.sample_seq_;
+    }
+    if (at(e, addr::feedback_ext_applied_seq)) {
+      return d.applied_seq_;
+    }
+    if (at(e, addr::feedback_ext_sample_time_us)) {
+      return d.sample_time_us_;
+    }
+    if (at(e, addr::feedback_ext_applied_tag)) {
+      return d.applied_tag_;
+    }
+    if (at(e, addr::feedback_ext_drive_flags)) {
+      return d.drive_flags();
+    }
+    // Static objects: the EDS default, node-relative ones with this node-ID added.
+    const std::int64_t base = e.default_value + (e.default_adds_node_id ? d.node_.value() : 0);
+    return static_cast<std::uint32_t>(base);
+  }
+
+  Drive& d_;
+  runtime_core::MonoTime now_;
+};
+
+std::vector<cc::Frame> Drive::on_sdo(const cc::Frame& frame, runtime_core::MonoTime now) {
+  const std::optional<cc::Sdo> request = cc::decode_sdo(node_, frame);
+  if (!request) {
+    ++counts_.malformed;
+    return {};
+  }
+  ++counts_.sdo;
+  Objects objects(*this, now);
+  const std::optional<cc::Sdo> response = SdoServer::handle(*request, objects);
+  if (!response) {
+    return {};
+  }
+  if (const std::optional<cc::Frame> out = cc::encode_sdo(node_, *response)) {
+    return {*out};
+  }
+  return {};  // Unreachable: the server answers with the entry's own size.
+}
+
+std::uint32_t Drive::write_exec_request(std::uint8_t sub, std::uint32_t value,
+                                        runtime_core::MonoTime now) {
+  // 0x2010 is writable only outside Operation Enabled with an active command: a running command
+  // stream is never re-staged under it.
+  if (cia402_.state() == Cia402State::kOperationEnabled && actuated_) {
+    return sdo_abort::kDeviceState;
+  }
+  const bool ok = sub == CommitStaging::kSubAttemptId ? staging_.begin(value, now)
+                                                      : staging_.stage(sub, value, now);
+  // D17: an attempt_id not greater than every committed one, or a staging write with no open
+  // staging window, cannot be stored.
+  return ok ? 0U : sdo_abort::kTransfer;
+}
+
+std::uint32_t Drive::write_exec_commit(std::uint32_t crc, runtime_core::MonoTime now) {
+  exec_commit_written_ = crc;
+  // D17 idempotent repeat, decided before any allocation (ExecTagIssuer::commit always allocates):
+  // the value of the latest successful commit again, while its tag is still the current one,
+  // answers success with that same tag. Staging in progress for a newer attempt is untouched.
+  if (last_commit_ && crc == last_commit_->request.crc() &&
+      issuer_.epoch() == last_commit_->epoch && issuer_.current() == last_commit_->tag) {
+    return 0U;
+  }
+  const Cia402State state = cia402_.state();
+  const bool state_ok =
+      state == Cia402State::kSwitchedOn || (state == Cia402State::kOperationEnabled && !actuated_);
+  if (!state_ok || policy_latched_) {
+    staging_.clear();  // A refused commit leaves nothing staged behind.
+    return sdo_abort::kDeviceState;
+  }
+  const std::optional<CommitRequest> request = staging_.check(crc, now);  // Clears on failure.
+  if (!request) {
+    return sdo_abort::kTransfer;
+  }
+  const ExecTagIssuer::CommitOutcome outcome =
+      issuer_.commit_ex(request->generation(), request->session_lo, now);
+  if (!outcome.tag) {
+    staging_.clear();  // Boot quarantine or an exhausted tag counter (needs reset node).
+    return sdo_abort::kDeviceState;
+  }
+  staging_.committed(*request);
+  last_commit_ = LastCommit{*request, *outcome.tag, issuer_.epoch()};
+  return 0U;
 }
 
 }  // namespace drive_core

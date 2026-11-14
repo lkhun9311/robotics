@@ -778,6 +778,66 @@ TEST(Fault, TorqueLossIsNotAControlledStop) {
   EXPECT_FALSE(l.drive.stop_confirmed());
 }
 
+TEST(Fault, TorqueLossHoldsFaultAcrossResetAndResetNode) {
+  constexpr std::uint16_t kSwFault = 1U << 3U;
+  constexpr std::uint16_t kSwSwitchOnDisabled = 1U << 6U;
+  Loop l;
+  l.run_at_vmax();
+  l.drive.inject_torque_loss(l.now());
+  ASSERT_EQ(l.state(), Cia402State::kFault);
+  // A Fault Reset cannot leave Fault while the drive authority is lost: the statusword keeps
+  // showing Fault, never an enable-able Switch On Disabled.
+  for (int i = 0; i < 2; ++i) {
+    l.cw(0x00);
+    l.cw(0x80);
+    EXPECT_EQ(l.state(), Cia402State::kFault);
+    EXPECT_EQ(l.drive.cia402().statusword() & kSwFault, kSwFault);
+    EXPECT_EQ(l.drive.cia402().statusword() & kSwSwitchOnDisabled, 0);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorTorqueLoss);
+  }
+  l.cw(0x06);
+  l.cw(0x07);
+  l.cw(0x0F);
+  EXPECT_EQ(l.state(), Cia402State::kFault);
+  // Nor does a reset node: the re-initialised machine goes straight back to Fault.
+  l.nmt(cc::NmtCommand::kResetNode);
+  EXPECT_EQ(l.state(), Cia402State::kFault);
+  EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorTorqueLoss);
+  EXPECT_EQ(l.drive.cia402().statusword() & kSwFault, kSwFault);
+  EXPECT_TRUE(l.drive.drive_unavailable());
+}
+
+TEST(Fault, TorqueLossDuringFaultHandlingUpdatesCode) {
+  {
+    SCOPED_TRACE("Fault Reaction Active");
+    Loop l;
+    l.run_at_vmax();
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    ASSERT_EQ(l.state(), Cia402State::kFaultReactionActive);
+    l.tick();
+    l.drive.inject_torque_loss(l.now());
+    EXPECT_EQ(l.state(), Cia402State::kFault);  // The ramp ends: there is no actuator.
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorTorqueLoss);
+    EXPECT_EQ(l.last(DriveEventKind::kFault)->fault_code, drive_core::kErrorTorqueLoss);
+    const std::int64_t v = l.drive.joint().velocity_nrad_s;
+    l.tick();
+    EXPECT_EQ(l.drive.joint().velocity_nrad_s, v);  // Coasting, not braking.
+  }
+  {
+    SCOPED_TRACE("Fault");
+    Loop l;
+    l.cw(0x06);
+    l.cw(0x07);
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    l.ticks(10);
+    ASSERT_EQ(l.state(), Cia402State::kFault);
+    ASSERT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+    l.drive.inject_torque_loss(l.now());
+    EXPECT_EQ(l.state(), Cia402State::kFault);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorTorqueLoss);
+  }
+}
+
 TEST(Fault, ResetNeedsNewCommitAndEnable) {
   Loop l;
   l.run_at_vmax();
