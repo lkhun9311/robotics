@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 #include "runtime_core/time.hpp"
@@ -28,4 +30,15 @@ TEST(SystemMonotonicClock, NeverGoesBackwards) {
   const rc::MonoTime a = clock.now();
   const rc::MonoTime b = clock.now();
   EXPECT_LE(a, b);
+}
+
+TEST(Time, ArithmeticRejectsOverflowInsteadOfWrapping) {
+  constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+  constexpr auto kMin = std::numeric_limits<std::int64_t>::min();
+  EXPECT_THROW(rc::MonoTime{kMax} + rc::Duration{1}, std::overflow_error);
+  EXPECT_THROW(rc::MonoTime{kMin} - rc::Duration{1}, std::overflow_error);
+  EXPECT_THROW(rc::MonoTime{kMax} - rc::MonoTime{-1}, std::overflow_error);
+  EXPECT_THROW(rc::milliseconds(kMax / 1'000'000 + 1), std::overflow_error);
+  EXPECT_THROW(rc::microseconds(kMin / 1'000 - 1), std::overflow_error);
+  EXPECT_EQ((rc::MonoTime{kMax - 1} + rc::Duration{1}).ns, kMax);
 }
