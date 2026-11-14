@@ -3,7 +3,8 @@
 
 An observation is plain JSON, so a recorded one can be judged again without vcan:
   host, device   frames seen on vcan_host (what Lely saw) and vcan_device (what the drives
-                 saw): [t, cob_id, hex data], t = CLOCK_MONOTONIC seconds
+                 saw): [t, cob_id, hex data], t = the kernel receive stamp as
+                 CLOCK_MONOTONIC seconds (conftest.Capture)
   peer           the JSON lines lely_peer printed (Lely's own decoded events)
   bank           the vdrive_bank trace records (t_ns = CLOCK_MONOTONIC nanoseconds)
   proxy_exit     bus_fault_proxy's exit record

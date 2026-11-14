@@ -94,6 +94,31 @@ def test_proxy_forwards_both_ways_without_circulation(capture, proxy, peer):
     print(f"proxy cost (ns, measurement): {exit_record['cost_ns']}")
 
 
+def test_capture_stamps_frames_with_the_kernel_receive_time(capture, peer):
+    """Each captured time is the kernel stamp mapped to CLOCK_MONOTONIC: after the send started
+    and before the reader thread saw the frame, in send order."""
+    cap = capture(DEVICE_IF)
+    sender = peer(DEVICE_IF)
+    sent = []
+    for i in range(50):
+        sent.append(sender.send(0x123, bytes([i])))
+        time.sleep(0.002)
+    seen = wait_frames(cap, lambda f: f[1] == 0x123, len(sent), 1.0)
+    t_seen = time.monotonic()
+    frames = cap.stop()
+    if len(seen) != len(sent):
+        inconclusive(f"captured {len(seen)} of {len(sent)} frames")
+    ours = [f for f in frames if f[1] == 0x123]
+    assert [f[2] for f in ours] == [bytes([i]) for i in range(len(sent))], "frames out of order"
+    lags = [round((f[0] - t) * 1e6, 1) for f, t in zip(ours, sent)]
+    print(f"kernel stamp - send time, us: min {min(lags)} median {statistics.median(lags)} "
+          f"max {max(lags)}")
+    assert all(f[0] >= t for f, t in zip(ours, sent)), f"stamp before the send: {lags}"
+    assert all(f[0] <= t_seen for f in ours), "stamp after the frame was read"
+    nxt = sent[1:] + [t_seen]
+    assert all(f[0] < t for f, t in zip(ours, nxt)), f"stamp after the next send: {lags}"
+
+
 def test_proxy_rejects_bad_rules(vcan, tmp_path):
     rules = tmp_path / "bad.rules"
     rules.write_text("# drop SYNC\nh2d 0x080/0x7FF drop\nh2d 0x080/0x7FF explode\n")

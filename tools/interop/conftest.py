@@ -97,30 +97,76 @@ def probe_eds(tmp_path_factory):
     return derived_eds(tmp_path_factory.mktemp("eds") / "probe.eds")
 
 
+# SO_TIMESTAMPNS (asm-generic/socket.h; Python's socket module does not export it). On 64-bit
+# Linux the control message carries a struct timespec of two 64-bit fields.
+_SO_TIMESTAMPNS = 35
+_TIMESPEC = struct.Struct("=qq")
+CLOCK_OFFSET_SAMPLES = 50
+CLOCK_DRIFT_LIMIT_NS = 1_000_000  # Realtime - monotonic may move this much during a capture.
+
+
+def realtime_minus_monotonic_ns(samples=CLOCK_OFFSET_SAMPLES):
+    """CLOCK_REALTIME - CLOCK_MONOTONIC in ns, from the tightest of `samples` monotonic/realtime/
+    monotonic bracket reads (the one least disturbed by preemption)."""
+    best = None
+    for _ in range(samples):
+        a = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        r = time.clock_gettime_ns(time.CLOCK_REALTIME)
+        b = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        if best is None or b - a < best[0]:
+            best = (b - a, r - (a + b) // 2)
+    return best[1]
+
+
 class Capture:
-    """Every frame on one interface with its CLOCK_MONOTONIC receive time (time.monotonic())."""
+    """Every frame on one interface with its kernel receive time, as CLOCK_MONOTONIC seconds.
+
+    The time is the socket's SO_TIMESTAMPNS stamp (set by the kernel when the frame was queued),
+    not a time.monotonic() read after recv: the reader thread shares the GIL with the other
+    capture and process-reader threads, so a Python-side read can lag the frame by a scheduler
+    switch interval, while the judges compare these times with the bank's CLOCK_MONOTONIC trace
+    at millisecond tolerances. The kernel stamps CLOCK_REALTIME; it is mapped to CLOCK_MONOTONIC
+    by an offset sampled at capture start and checked again at stop (a clock step in between
+    makes the capture INCONCLUSIVE). The global rule "kernel receive timestamps are diagnostics
+    only" is about time passed to a Drive in vdrive_bank; this is the test's observation clock.
+    """
 
     def __init__(self, ifname):
         self.ifname = ifname
         self.frames = []  # (t, cob_id, bytes)
         self.errors = []
         self._sock = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+        self._sock.setsockopt(socket.SOL_SOCKET, _SO_TIMESTAMPNS, 1)
         self._sock.bind((ifname,))
         self._sock.settimeout(0.05)
+        self._offset_ns = realtime_minus_monotonic_ns()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def stamp(self, ancdata):
+        """CLOCK_MONOTONIC seconds of the kernel receive stamp in recvmsg's ancillary data."""
+        for level, kind, data in ancdata:
+            if level == socket.SOL_SOCKET and kind == _SO_TIMESTAMPNS and \
+                    len(data) >= _TIMESPEC.size:
+                sec, nsec = _TIMESPEC.unpack(data[:_TIMESPEC.size])
+                return (sec * 1_000_000_000 + nsec - self._offset_ns) / 1e9
+        return None
+
     def _run(self):
         while not self._stop.is_set():
             try:
-                raw = self._sock.recv(_CAN_FRAME.size)
+                raw, ancdata, _, _ = self._sock.recvmsg(_CAN_FRAME.size,
+                                                        socket.CMSG_SPACE(_TIMESPEC.size))
             except socket.timeout:
                 continue
             except OSError as e:
                 self.errors.append(str(e))
                 return
-            t = time.monotonic()
+            t = self.stamp(ancdata)
+            if t is None:
+                self.errors.append(f"a frame without a kernel receive timestamp: {ancdata}")
+                return
             can_id, dlc, data = _CAN_FRAME.unpack(raw)
             if can_id & (_CAN_EFF_FLAG | _CAN_RTR_FLAG | _CAN_ERR_FLAG):
                 self.errors.append(f"unexpected frame flags 0x{can_id:08x}")
@@ -131,6 +177,10 @@ class Capture:
         self._stop.set()
         self._thread.join(timeout=2)
         self._sock.close()
+        drift = realtime_minus_monotonic_ns() - self._offset_ns
+        if abs(drift) > CLOCK_DRIFT_LIMIT_NS:
+            self.errors.append(f"CLOCK_REALTIME moved {drift} ns against CLOCK_MONOTONIC during "
+                               f"the capture; the kernel stamps cannot be mapped")
         assert not self.errors, f"INCONCLUSIVE: capture on {self.ifname}: {self.errors}"
         return self.frames
 
