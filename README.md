@@ -102,6 +102,10 @@ What the contract fixes:
 - SYNC timeline: RPDOs received between SYNC k and k+1 are actuated at SYNC k+1; TPDOs are
   sampled at SYNC k. Loss of SYNC or of commands, an integrity violation or leaving NMT
   Operational starts a quick stop.
+- TPDO2 `applied_seq` (with TPDO3 `applied_tag`) reports the command the drive accepted for
+  actuation at that SYNC: drive verification, not plant motion. Position and velocity in the
+  same sample predate it; the joint first follows it at the next W tick. Plant application is
+  reported by `plantd` (E5).
 - Quick stop is an achieved deceleration ramp, not a switch of state. A stop not confirmed at
   rest within 0.112 s is reported unconfirmed (a fault reaction then ends in Fault). While the
   latest stop is unconfirmed, the drive refuses every entry into Operation Enabled, also after
