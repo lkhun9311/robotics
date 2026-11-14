@@ -25,7 +25,11 @@
 //   scenario_failed {scenario, reason}    a step could not be performed; exit 1
 //   exit   {}                             last line
 //   lely_peer --if IF --dcf PATH --scenario NAME [--node N] [--count K] [--duration-ms MS]
-//             [--statusword tpdo|sdo]
+//             [--statusword tpdo|sdo] [--validity-ms V]
+//   (--validity-ms: pdo_stream's valid_until = now + V ms, 1 to 48 (the drive's lease), default
+//   40; a stream that loses one update needs more than 40: Lely sends a write at the next SYNC
+//   and the drive actuates it at the one after, so after a lost update the previous command
+//   expires at 40 ms, the instant the next one is actuated)
 //   (--statusword: where the node scenarios read 6041h while waiting for a CiA 402 state; tpdo,
 //   the default, is Lely's TPDO1 values, sdo is an SDO upload, for a bus that loses TPDO1)
 //   (console: --node is optional and only selects the node whose TPDO values are reported)
@@ -43,7 +47,8 @@
 //                      performed in order on the driver of its node; `quit`, SIGTERM/SIGINT or
 //                      the duration end it with scenario_done; a line that does not parse fails it
 //   pdo_stream         commit_and_enable, then K updates of RPDO1/RPDO2 (one per SYNC, seq + 1,
-//                      valid_until = now + 40 ms) that Lely sends as synchronous PDOs; then stop
+//                      valid_until = now + --validity-ms) that Lely sends as synchronous PDOs;
+//                      then stop
 // Every PDO is encoded by Lely from the remote-mapped objects of the master DCF (dcfgen -r); the
 // peer writes values, never frames.
 #include <lely/coapp/fiber_driver.hpp>
@@ -136,7 +141,9 @@ constexpr std::uint16_t kExecRequest = 0x2010;  // 01 gen_lo, 02 gen_hi, 03 sess
 constexpr std::uint16_t kExecCommit = 0x2011;
 constexpr std::uint16_t kExecTag = 0x2012;
 constexpr std::uint16_t kCommittedAttempt = 0x2016;
-constexpr std::uint32_t kValidityUs = 40'000;  // valid_until = now + 40 ms
+// pdo_stream's valid_until = now + validity; the default and the drive's lease (kLeaseUs) bound.
+constexpr std::uint64_t kDefaultValidityMs = 40;
+constexpr std::uint64_t kMaxValidityMs = 48;
 constexpr std::chrono::milliseconds kSdoTimeout{1000};
 
 // CiA 402 statusword states (mask 0x6F).
@@ -150,6 +157,7 @@ struct Run {
   std::string scenario;
   std::uint8_t node = 0;
   std::uint32_t count = 0;
+  std::uint32_t validity_us = static_cast<std::uint32_t>(kDefaultValidityMs * 1000);
   lely_peer::StatuswordSource statusword = lely_peer::StatuswordSource::kTpdo;
   bool finished = false;
   std::uint64_t emcy = 0;
@@ -277,7 +285,7 @@ class PeerDriver : public canopen::FiberDriver {
     }
     ++seq_;
     const auto target = static_cast<std::int32_t>(seq_) * 100;  // µrad: a slow ramp
-    const std::uint32_t until = now_wire_us() + kValidityUs;
+    const std::uint32_t until = now_wire_us() + run_.validity_us;
     std::error_code ec;
     tpdo_mapped[kTargetPosition][0].Write(target, ec);
     if (!ec) tpdo_mapped[kRpdo1Ext][1].Write(seq_, ec);
@@ -851,9 +859,11 @@ int run(const lely_peer::Options& opts) {
   std::uint64_t duration_ms = 0;
   std::uint64_t node = 0;
   std::uint64_t count = 0;
+  std::uint64_t validity_ms = kDefaultValidityMs;
   if (!number_option(opts, "duration-ms", 1, 3600000, duration_ms) ||
       !number_option(opts, "node", 1, 127, node) ||
-      !number_option(opts, "count", 1, 65535, count)) {
+      !number_option(opts, "count", 1, 65535, count) ||
+      !number_option(opts, "validity-ms", 1, kMaxValidityMs, validity_ms)) {
     return 2;
   }
   if (node_scenario && node == 0) {
@@ -866,6 +876,7 @@ int run(const lely_peer::Options& opts) {
   }
   run.node = static_cast<std::uint8_t>(node);
   run.count = static_cast<std::uint32_t>(count);
+  run.validity_us = static_cast<std::uint32_t>(validity_ms * 1000);
   if (const auto it = opts.values.find("statusword"); it != opts.values.end()) {
     const auto parsed = lely_peer::parse_statusword_source(it->second);
     if (!parsed.ok) {
@@ -1058,12 +1069,13 @@ int run(const lely_peer::Options& opts) {
 int main(int argc, char** argv) {
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   const auto opts = lely_peer::parse_options(
-      args, {"if", "dcf", "scenario", "node", "count", "duration-ms", "statusword"},
+      args, {"if", "dcf", "scenario", "node", "count", "duration-ms", "statusword", "validity-ms"},
       {"if", "dcf", "scenario"});
   if (!opts.ok) {
     std::fprintf(stderr,
                  "lely_peer: %s\nusage: lely_peer --if IF --dcf PATH --scenario NAME [--node N] "
-                 "[--count K] [--duration-ms MS] [--statusword tpdo|sdo]\n",
+                 "[--count K] [--duration-ms MS] [--statusword tpdo|sdo] "
+                 "[--validity-ms V]\n",
                  opts.error.c_str());
     return 2;
   }
