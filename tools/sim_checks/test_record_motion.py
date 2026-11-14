@@ -67,3 +67,18 @@ def test_a_cleanup_error_does_not_mask_the_first_error(out, monkeypatch):
         record_motion.main(["--out", str(out)])
     assert any("process group survived SIGKILL" in note for note in getattr(e.value, "__notes__", [])), \
         "the cleanup error was dropped instead of reported alongside the first error"
+
+
+def test_ctrl_c_stops_the_sim_removes_the_partial_file_and_ends_ffmpeg(out, monkeypatch):
+    started = []
+    real_start = record_motion._start_ffmpeg
+    monkeypatch.setattr(record_motion, "_start_ffmpeg", lambda fps, path: started.append(real_start(fps, path)) or started[-1])
+    stopped = []
+    monkeypatch.setattr(FakeSim, "start_error", KeyboardInterrupt())
+    monkeypatch.setattr(FakeSim, "stop", lambda self: stopped.append(True))
+    with pytest.raises(KeyboardInterrupt):
+        record_motion.main(["--out", str(out)])
+    assert stopped, "Sim.stop() was not called after Ctrl-C"
+    assert started[0].poll() is not None, "ffmpeg was left running after Ctrl-C"
+    assert out.read_bytes() == b"the committed video"
+    assert sorted(p.name for p in out.parent.iterdir()) == [out.name], "a partial file was left behind"

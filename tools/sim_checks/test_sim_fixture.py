@@ -78,3 +78,59 @@ def test_paired_positions_timeout_is_an_overall_bound():
         stop.set()
         feeder.join()
     assert elapsed <= 1.2, f"paired_positions(timeout_s=1.0) gave up after {elapsed:.2f} s"
+
+
+def test_stop_keeps_the_launch_error_and_notes_the_teardown_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(sim_module, "LOG_DIR", tmp_path)
+    s = Sim("fixture-both-fail")
+
+    def launch_fails():
+        raise AssertionError("process group survived SIGKILL")
+
+    def node_fails():
+        raise RuntimeError("node teardown failed")
+
+    monkeypatch.setattr(s, "_stop_launch", launch_fails)
+    monkeypatch.setattr(s, "_stop_node", node_fails)
+    with pytest.raises(AssertionError, match="process group survived SIGKILL") as e:
+        s.stop()
+    assert any("node teardown failed" in n for n in getattr(e.value, "__notes__", [])), \
+        "the teardown error was dropped instead of attached to the launch error"
+
+
+def test_paired_positions_reports_the_last_gap_when_the_deadline_runs_out():
+    s = Sim("fixture-pair-error")
+    stop = threading.Event()
+
+    def publish():
+        # Pairs 100 s apart for 0.5 s, then both topics fall silent: the deadline ends inside
+        # a sample().
+        t0 = time.monotonic()
+        while not stop.is_set() and time.monotonic() - t0 < 0.5:
+            _feed(s, "/joint_states", 100.0)
+            _feed(s, sim_module.MUJOCO_STATES, 200.0)
+            time.sleep(0.01)
+
+    feeder = threading.Thread(target=publish, daemon=True)
+    feeder.start()
+    try:
+        with pytest.raises(SimError, match=r"no sample pair within 0\.02 s of each other \(last gap 100\.0 s\)"):
+            s.paired_positions(within_s=0.02, timeout_s=1.0)
+    finally:
+        stop.set()
+        feeder.join()
+
+
+def test_stop_tears_down_the_node_and_reraises_ctrl_c_from_the_launch_step(monkeypatch, tmp_path):
+    monkeypatch.setattr(sim_module, "LOG_DIR", tmp_path)
+    s = Sim("fixture-ctrl-c")
+    torn_down = []
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(s, "_stop_launch", interrupted)
+    monkeypatch.setattr(s, "_stop_node", lambda: torn_down.append(True))
+    with pytest.raises(KeyboardInterrupt):
+        s.stop()
+    assert torn_down, "_stop_node did not run after the launch step was interrupted"

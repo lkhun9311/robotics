@@ -33,7 +33,7 @@ jobs:
         run: |
           set -o pipefail
           set -a; . ./.env; set +a
-          docker build --target runtime --build-arg ROS_IMAGE="$ROS_IMAGE" \
+          docker build --progress=plain --target runtime --build-arg ROS_IMAGE="$ROS_IMAGE" \
             --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" --build-arg BUILD_FROM=robotics-dev:ci \
             -t robotics-runtime:ci -f docker/Dockerfile . 2>&1 | tee "$RUNNER_TEMP/runtime-build.log"
           if grep -q 'menagerie.py fetch' "$RUNNER_TEMP/runtime-build.log"; then

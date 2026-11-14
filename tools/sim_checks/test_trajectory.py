@@ -140,7 +140,7 @@ def test_follow_timeout_cancels_the_goal(sim):
     _go_home(sim)
     duration_s = 4.0
     sent = time.monotonic()
-    with pytest.raises(SimError, match="no answer"):
+    with pytest.raises(SimError, match="result: no answer .*; the goal was cancelled"):
         sim.follow([(duration_s, TARGET)], timeout_s=1.0)
     # Past the end of the trajectory: an uncancelled goal has reached TARGET by now.
     time.sleep(max(0.0, sent + duration_s + 0.5 - time.monotonic()))

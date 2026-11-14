@@ -266,6 +266,7 @@ def test_urdf_origins_and_axes_equal_the_mjcf_bodies(urdf, mjcf):
 
 def test_urdf_effort_equals_the_mjcf_actuator_forcerange(urdf, mjcf):
     joints = _urdf_joints(urdf)
+    assert len(mjcf["actuators"]) == 6, sorted(mjcf["actuators"])  # an empty loop would pass vacuously
     for act, spec in mjcf["actuators"].items():
         lo, hi = spec["forcerange"]
         assert lo == -hi, f"{act}: forcerange {(lo, hi)} is not symmetric; one URDF effort cannot express it"
