@@ -34,7 +34,7 @@ RUN apt-get update \
       python3-pytest can-utils iproute2 rt-tests util-linux kmod \
       ros-jazzy-mujoco-ros2-control ros-jazzy-joint-trajectory-controller \
       ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli ros-jazzy-xacro \
-      ros-jazzy-robot-state-publisher ros-jazzy-control-msgs python3-numpy \
+      ros-jazzy-robot-state-publisher ros-jazzy-control-msgs python3-numpy ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 # Menagerie UR5e: fetched at build time, verified against the checked-in sums.
 COPY tools/models/menagerie.py models/universal_robots_ur5e/SHA256SUMS /tmp/models/

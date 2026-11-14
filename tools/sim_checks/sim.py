@@ -22,6 +22,7 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 LOG_DIR = REPO / "artifacts" / "sim"
 CONTROLLERS = ("joint_state_broadcaster", "arm_controller")
 CONTROLLER_STATE = "/arm_controller/controller_state"
+IMAGE_TOPIC = "/overview/image_raw"
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
 
 
@@ -82,7 +83,11 @@ def _wait(future, timeout_s, what):
 
 
 class Sim:
-    def __init__(self, name):
+    def __init__(self, name, camera=False, on_frame=None):
+        """`camera=True` launches with `camera:=true`; `on_frame(msg)` then receives every
+        sensor_msgs/Image on IMAGE_TOPIC from the executor thread."""
+        self._camera = camera
+        self._on_frame = on_frame
         self.log_path = LOG_DIR / f"launch-{name}.log"
         self._proc = None
         self._log = None
@@ -105,7 +110,7 @@ class Sim:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "w")
         self._proc = subprocess.Popen(
-            LAUNCH, stdin=subprocess.DEVNULL, stdout=self._log, stderr=subprocess.STDOUT,
+            LAUNCH + (["camera:=true"] if self._camera else []), stdin=subprocess.DEVNULL, stdout=self._log, stderr=subprocess.STDOUT,
             start_new_session=True, preexec_fn=_no_core_dumps,
         )
         self._start_node()
@@ -273,6 +278,10 @@ class Sim:
             self._node.create_subscription(JointState, topic, lambda m, t=topic: self._on_state(t, m), 10)
         self._node.create_subscription(JointTrajectoryControllerState, CONTROLLER_STATE,
                                        self._on_controller_state, 10)
+        if self._on_frame is not None:
+            from sensor_msgs.msg import Image
+
+            self._node.create_subscription(Image, IMAGE_TOPIC, self._on_frame, 10)
         self._list = self._node.create_client(ListControllers, "/controller_manager/list_controllers")
         self._follow = ActionClient(self._node, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory")
         self._executor = MultiThreadedExecutor(context=self._ctx)
