@@ -83,14 +83,14 @@ void Cia402::on_controlword(std::uint16_t controlword) {
     case Cia402State::kReadyToSwitchOn:
       if (cmd == Command::kSwitchOn) {
         enter(Cia402State::kSwitchedOn);  // 3
-      } else if (cmd == Command::kEnableOperation) {
+      } else if (cmd == Command::kEnableOperation && !enable_inhibited_) {
         enter(Cia402State::kOperationEnabled);  // 3 + 4
       } else if (cmd == Command::kDisableVoltage || cmd == Command::kQuickStop) {
         enter(Cia402State::kSwitchOnDisabled);  // 7
       }
       break;
     case Cia402State::kSwitchedOn:
-      if (cmd == Command::kEnableOperation) {
+      if (cmd == Command::kEnableOperation && !enable_inhibited_) {
         enter(Cia402State::kOperationEnabled);  // 4
       } else if (cmd == Command::kShutdown) {
         enter(Cia402State::kReadyToSwitchOn);  // 6

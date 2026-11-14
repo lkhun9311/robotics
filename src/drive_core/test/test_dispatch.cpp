@@ -89,8 +89,11 @@ TEST(Dispatch, SyncIgnoredInStopped) {
 
   d.send(nmt(cc::NmtCommand::kStop));
   ASSERT_EQ(d.drive.nmt().state(), cc::NmtState::kStopped);
+  const auto gated = d.drive.counts().gated;
   EXPECT_TRUE(d.send(cc::encode_sync()).empty());
+  EXPECT_EQ(d.drive.counts().gated, gated + 1);
   EXPECT_TRUE(d.send(controlword(0x06)).empty());
+  EXPECT_EQ(d.drive.counts().gated, gated + 2);
   EXPECT_EQ(d.drive.counts().sync, 2U);
   EXPECT_EQ(d.drive.counts().pdo, 0U);
   EXPECT_EQ(d.drive.cia402().state(), Cia402State::kSwitchOnDisabled);
@@ -136,6 +139,10 @@ TEST(Dispatch, ResetCommunicationClearsTagSessionGeneration) {
   const auto first = d.drive.issuer().commit(7, 9, kReady);
   ASSERT_TRUE(first.has_value());
   d.send(nmt(cc::NmtCommand::kStart));
+  d.send(controlword(0x06));
+  ASSERT_EQ(d.drive.cia402().state(), Cia402State::kReadyToSwitchOn);
+  d.send(cc::pack_rpdo1(kNode, od::Rpdo1{100, 1, *first}));
+  ASSERT_EQ(d.drive.assembler().held_fragments(), 1U);
   d.send(nmt(cc::NmtCommand::kStop));  // Reset communication is accepted in Stopped too.
 
   EXPECT_EQ(d.send(nmt(cc::NmtCommand::kResetCommunication)), std::vector<cc::Frame>{boot_up()});
@@ -144,6 +151,9 @@ TEST(Dispatch, ResetCommunicationClearsTagSessionGeneration) {
   EXPECT_EQ(d.drive.issuer().generation(), 0U);
   EXPECT_EQ(d.drive.issuer().session(), 0U);
   EXPECT_EQ(d.drive.issuer().boot_id(), kBootId);
+  EXPECT_EQ(d.drive.assembler().held_fragments(), 0U);  // Per-command state cleared.
+  // The CiA 402 state is application state, not communication state: it survives.
+  EXPECT_EQ(d.drive.cia402().state(), Cia402State::kReadyToSwitchOn);
 
   // The allocator survives: the next tag follows the revoked one, no quarantine restarts.
   const auto second = d.drive.issuer().commit(8, 10, kReady);
@@ -153,16 +163,20 @@ TEST(Dispatch, ResetCommunicationClearsTagSessionGeneration) {
 
 TEST(Dispatch, ResetNodeStartsNewBoot) {
   Fixture d;
-  ASSERT_TRUE(d.drive.issuer().commit(7, 9, kReady).has_value());
+  const auto tag = d.drive.issuer().commit(7, 9, kReady);
+  ASSERT_TRUE(tag.has_value());
   d.send(nmt(cc::NmtCommand::kStart));
   d.send(controlword(0x06));
   ASSERT_EQ(d.drive.cia402().state(), Cia402State::kReadyToSwitchOn);
+  d.send(cc::pack_rpdo1(kNode, od::Rpdo1{100, 1, *tag}));
+  ASSERT_EQ(d.drive.assembler().held_fragments(), 1U);
 
   EXPECT_EQ(d.send(nmt(cc::NmtCommand::kResetNode)), std::vector<cc::Frame>{boot_up()});
   EXPECT_EQ(d.drive.nmt().state(), cc::NmtState::kPreOperational);
   EXPECT_NE(d.drive.issuer().boot_id(), kBootId);
   EXPECT_EQ(d.drive.issuer().current(), 0);
   EXPECT_EQ(d.drive.cia402().state(), Cia402State::kSwitchOnDisabled);
+  EXPECT_EQ(d.drive.assembler().held_fragments(), 0U);
   // A new boot starts a new quarantine.
   EXPECT_FALSE(d.drive.issuer().commit(1, 1, kReady).has_value());
   EXPECT_TRUE(d.drive.issuer().commit(1, 1, kReady + milliseconds(100)).has_value());

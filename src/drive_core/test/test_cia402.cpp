@@ -71,6 +71,18 @@ const std::vector<Row> kTransitions = {
     {S::kQuickStopActive, kEnableOperation, S::kOperationEnabled, "16"},
 };
 
+// The same commands with the standard's don't-care bits ("x") set: a command is a bit pattern
+// over bits 7, 3, 2, 1, 0, not one controlword value. Bit 8 (halt) and up are not part of it.
+const std::vector<Row> kMasked = {
+    {S::kOperationEnabled, 0x0D, S::kSwitchOnDisabled, "9 (0xxx xx0x)"},
+    {S::kOperationEnabled, 0x04, S::kSwitchOnDisabled, "9 (0xxx xx0x)"},
+    {S::kOperationEnabled, 0x0B, S::kQuickStopActive, "11 (0xxx x01x)"},
+    {S::kSwitchedOn, 0x0E, S::kReadyToSwitchOn, "6 (0xxx x110)"},
+    {S::kSwitchedOn, 0x10F, S::kOperationEnabled, "4 (0xxx 1111, bit 8 set)"},
+    // Bit 7 set: Fault Reset, which has no transition outside Fault; not a Shutdown.
+    {S::kSwitchOnDisabled, 0x86, S::kSwitchOnDisabled, "- (1xxx xxxx)"},
+};
+
 // Commands that have no transition in the state: the state does not change.
 const std::vector<Row> kIgnored = {
     {S::kNotReadyToSwitchOn, kShutdown, S::kNotReadyToSwitchOn, "-"},
@@ -251,11 +263,40 @@ TEST(Cia402, EnableFromQuickStopWithoutInhibit) {
 
 TEST(Cia402, EnableFromQuickStopInhibited) {
   Cia402 m = reach(S::kQuickStopActive);
-  m.set_enable_inhibited(true);
+  m.set_operation_enable_inhibited(true);
   m.on_controlword(kEnableOperation);
   EXPECT_EQ(m.state(), S::kQuickStopActive);
   m.on_controlword(kDisableVoltage);  // Transition 12 stays available.
   EXPECT_EQ(m.state(), S::kSwitchOnDisabled);
+}
+
+// Every way into Operation Enabled (transitions 4, 3+4, 16) is refused while inhibited and works
+// again once the inhibit is cleared.
+TEST(Cia402, OperationEnableInhibitBlocksEveryEntry) {
+  for (const Cia402State from : {S::kSwitchedOn, S::kReadyToSwitchOn, S::kQuickStopActive}) {
+    SCOPED_TRACE(static_cast<int>(from));
+    Cia402 allowed = reach(from);
+    allowed.on_controlword(kEnableOperation);
+    EXPECT_EQ(allowed.state(), S::kOperationEnabled);
+
+    Cia402 m = reach(from);
+    m.set_operation_enable_inhibited(true);
+    EXPECT_TRUE(m.operation_enable_inhibited());
+    m.on_controlword(kEnableOperation);
+    EXPECT_EQ(m.state(), from);
+    expect_coding(m);
+    m.set_operation_enable_inhibited(false);
+    m.on_controlword(kEnableOperation);
+    EXPECT_EQ(m.state(), S::kOperationEnabled);
+  }
+}
+
+TEST(Cia402, CommandsDecodeByMaskNotValue) { run_rows(kMasked); }
+
+TEST(Cia402, CommStateIsAQuickStopReason) {
+  Cia402 m = reach(S::kOperationEnabled);
+  EXPECT_TRUE(m.quick_stop(QuickStopReason::kCommState));
+  EXPECT_EQ(m.quick_stop_reason(), QuickStopReason::kCommState);
 }
 
 TEST(Mode, OnlyCspIsAccepted) {

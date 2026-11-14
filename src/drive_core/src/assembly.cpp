@@ -33,6 +33,14 @@ void CommandAssembler::follow_issuer() {
 
 void CommandAssembler::clear_window() { window_.fill(Slot{}); }
 
+std::size_t CommandAssembler::held_fragments() const {
+  std::size_t held = 0;
+  for (const Slot& slot : window_) {
+    held += (slot.has_rpdo1 ? 1U : 0U) + (slot.has_rpdo2 ? 1U : 0U);
+  }
+  return held;
+}
+
 void CommandAssembler::reset() {
   epoch_ = issuer_.epoch();
   clear_window();

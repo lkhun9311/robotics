@@ -91,6 +91,10 @@ class CommandAssembler {
   // unreported violation stays pending.
   void reset();
 
+  // Fragment halves held in the window, as stored: an epoch change the assembler has not yet
+  // noticed (it follows the issuer on the next offer or on_sync) does not empty this view.
+  std::size_t held_fragments() const;
+
  private:
   void follow_issuer();
   OfferResult admit(std::uint16_t seq, bool matches_actuated);

@@ -29,6 +29,7 @@ enum class QuickStopReason : std::uint8_t {
   kSyncLoss,
   kIntegrity,
   kExpiry,
+  kCommState,  // The NMT state left Operational while Operation Enabled (amended D12).
 };
 
 class Cia402 {
@@ -56,10 +57,11 @@ class Cia402 {
   // Transition 14: Fault Reaction Active -> Fault once the reaction (ramp or none) is done.
   void fault_reaction_done();
 
-  // CiA 402 transition 16 (Quick Stop Active -> Operation Enabled on Enable Operation) exists with
-  // option 6. The D11 policy latch disables it through this hook.
-  void set_enable_inhibited(bool inhibited) { enable_inhibited_ = inhibited; }
-  bool enable_inhibited() const { return enable_inhibited_; }
+  // While inhibited, every entry into Operation Enabled is refused: transitions 4, 3+4 and 16
+  // (16 exists with option 6). The command is ignored and the state stays where it is. The D11
+  // policy latch sets this.
+  void set_operation_enable_inhibited(bool inhibited) { enable_inhibited_ = inhibited; }
+  bool operation_enable_inhibited() const { return enable_inhibited_; }
 
   // Mode request (6060h). Only kModeCsp is accepted; any other value changes nothing.
   bool request_mode(std::int8_t mode);
