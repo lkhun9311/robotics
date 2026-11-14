@@ -8,6 +8,7 @@ import common
 import fault_timeline
 import frame_trace
 import matrix_table
+import pick_place_replay
 import proxy_cost_histogram
 
 MEDIA = common.MEDIA
@@ -101,8 +102,84 @@ def test_histogram_plots_the_measured_distribution():
                                "max": cost["max"] / 1000}
 
 
+@pytest.fixture(scope="module")
+def kin():
+    return pick_place_replay.Kinematics()
+
+
+@pytest.fixture(scope="module")
+def pick_place_rec():
+    return pick_place_replay.load()
+
+
+def test_pick_place_recording_is_the_current_demo_and_passes_the_sim_check_conditions(pick_place_rec, kin):
+    """The committed recording is of today's waypoints and schedule, covers the goal at 100 Hz,
+    and passes the same conditions as the simulation check."""
+    from pick_place import DEMO_SCHEDULE, WAYPOINTS, failures
+
+    from expected import JOINTS
+
+    rec = pick_place_rec
+    assert rec["joints"] == list(JOINTS)
+    assert [tuple(x) for x in rec["schedule"]] == list(DEMO_SCHEDULE)
+    assert {k: tuple(v) for k, v in rec["waypoints"].items()} == WAYPOINTS
+    stamps = [row[0] for row in rec["samples"]]
+    assert stamps[0] <= 0.01 and stamps[-1] >= rec["result_s"] + 1.0 >= DEMO_SCHEDULE[-1][2]
+    # Every fifth 500 Hz message is kept, so one missing message stretches a step to 12 ms (the
+    # committed recording has one); 20 ms bounds the hole a missing message can leave.
+    assert all(0 < b - a <= 0.02 for a, b in zip(stamps, stamps[1:])), "gap or disorder in the 100 Hz samples"
+    assert failures(*pick_place_replay.judged(rec, kin)) == []
+
+
+def test_pick_place_height_plot_draws_mujocos_site_height_per_sample(pick_place_rec, kin):
+    data = pick_place_replay.plot_data(pick_place_rec, kin)
+    rows = pick_place_rec["samples"]
+    assert data["t"] == [row[0] for row in rows]
+    assert data["site_z"] == [kin.site(dict(zip(pick_place_rec["joints"], row[1:])))[0][2] for row in rows]
+    # The carried interval: the lowest site sample of the first PICK and PLACE dwells, found here
+    # from the plotted heights and the schedule.
+    def lowest(name):
+        _, arrive, leave = next(x for x in pick_place_rec["schedule"] if x[0] == name)
+        return min((z, t) for t, z in zip(data["t"], data["site_z"]) if arrive <= t <= leave + 0.2)[1]
+    assert data["carried"] == (lowest("PICK"), lowest("PLACE"))
+    assert data["lowest_carry"] >= data["carry_min_z"]
+
+
+def test_drawn_object_rests_rides_with_the_tool_only_while_carried_then_rests(pick_place_rec, kin):
+    from expected import OBJECT_BELOW_SITE, OBJECT_RADIUS, TABLE_Z
+    from pick_place import CONTACT_ALLOWANCE
+
+    track = pick_place_replay.object_track(pick_place_rec, kin)
+    attach, release = pick_place_replay.carried_interval(pick_place_rec, kin)
+    before = {c for t, c, carried in track if t < attach}
+    after = {c for t, c, carried in track if t > release}
+    assert len(before) == 1 and len(after) == 1, "the resting object moved"
+    assert next(iter(before))[2] == next(iter(after))[2] == TABLE_Z + OBJECT_RADIUS
+    jumps = []
+    for (t, centre, carried), row in zip(track, pick_place_rec["samples"]):
+        assert carried == (attach <= t <= release)
+        if carried:
+            pos, axis = kin.site(dict(zip(pick_place_rec["joints"], row[1:])))
+            assert centre == tuple(p + OBJECT_BELOW_SITE * a for p, a in zip(pos, axis))
+        assert centre[2] - OBJECT_RADIUS >= TABLE_Z - CONTACT_ALLOWANCE, f"object into the table at {t} s"
+        if t in (attach, release):
+            rest = next(iter(before if t == attach else after))
+            jumps.append(max(abs(a - b) for a, b in zip(centre, rest)))
+    # Attach and release move the drawn object by at most this much (it sits on the table, the
+    # tool stops a few millimetres above or below).
+    assert len(jumps) == 2 and max(jumps) <= 0.015, jumps
+
+
+def test_pick_place_videos_are_committed_and_the_gif_fits_the_readme():
+    assert pick_place_replay.MP4.stat().st_size > 0
+    assert 0 < pick_place_replay.GIF.stat().st_size <= 3 * 1024 * 1024
+    assert (MEDIA / "e2-baseline.mp4").stat().st_size > 0
+
+
 FRESH = [("e3b-fault-timeline.svg", "fault_timeline.py",
           lambda out: fault_timeline.draw(out)),
+         ("e2-pick-place-height.svg", "pick_place_replay.py",
+          lambda out: pick_place_replay.draw_svg(pick_place_replay.load(), out, pick_place_replay.Kinematics())),
          ("e3b-proxy-cost.svg", "proxy_cost_histogram.py",
           lambda out: proxy_cost_histogram.draw(
               json.loads((MEDIA / "e3b-proxy-cost.json").read_text()), out, 200))]

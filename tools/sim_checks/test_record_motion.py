@@ -82,3 +82,37 @@ def test_ctrl_c_stops_the_sim_removes_the_partial_file_and_ends_ffmpeg(out, monk
     assert started[0].poll() is not None, "ffmpeg was left running after Ctrl-C"
     assert out.read_bytes() == b"the committed video"
     assert sorted(p.name for p in out.parent.iterdir()) == [out.name], "a partial file was left behind"
+
+
+class StillSim(FakeSim):
+    """A simulator whose arm never leaves HOME: every goal reports success."""
+
+    def __init__(self, name, camera=False, on_frame=None):
+        super().__init__(name, camera, on_frame)
+        self._stamps = iter((0.0, 26.0))
+
+    def start(self):
+        pass
+
+    def start_recording(self):
+        pass
+
+    def stamp_now(self):
+        return next(self._stamps)
+
+    def stop_recording(self, until_stamp=None):
+        from expected import HOME, JOINTS
+        from sim import MUJOCO_STATES, Sample
+
+        still = dict(zip(JOINTS, HOME))
+        return {MUJOCO_STATES: [(0.0, Sample(i * 0.002, still, {})) for i in range(13501)]}
+
+
+def test_a_pick_place_recording_that_misses_the_waypoints_is_not_written(tmp_path, monkeypatch):
+    monkeypatch.setattr(record_motion, "Sim", StillSim)
+    out = tmp_path / "pick-place.json.gz"
+    out.write_bytes(b"the committed recording")
+    with pytest.raises(SimError, match="fails the check's conditions: PICK_APPROACH not reached"):
+        record_motion.main(["--demo", "pick_place", "--out", str(out)])
+    assert out.read_bytes() == b"the committed recording"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [out.name], "a partial file was left behind"

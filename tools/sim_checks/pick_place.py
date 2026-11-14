@@ -6,8 +6,9 @@ FollowJointTrajectory goal. Each waypoint is a pair of points, arrive and leave,
 there; the dwell is where "reached" is judged. The demo (record_motion.py --demo pick_place)
 appends a retreat to PLACE_APPROACH and HOME after the same points.
 
-There is no grasp: nothing in the simulation holds an object. The replay render draws one at the
-tool site while it is carried, from PICK reached to PLACE reached.
+There is no grasp: nothing in the simulation holds an object. The replay render
+(tools/evidence/pick_place_replay.py) draws one at the tool site while it is carried, from the
+lowest site point of the PICK dwell to that of the PLACE dwell.
 """
 import dataclasses
 
@@ -78,3 +79,22 @@ def judge(samples, sent, site_z, schedule=SCHEDULE):
             zs = [site_z(p) for t, p in rel if by[a].reached_s <= t <= by[b].reached_s]
             heights[key] = min(zs) if zs else None
     return reaches, heights
+
+
+def failures(reaches, heights):
+    """What the simulation check would reject in a judged recording, as messages; empty when the
+    recording passes. The check itself (test_pick_place_trajectory_reaches_each_waypoint) states
+    the same conditions as assertions."""
+    out = [f"{x.name} not reached within {GOAL_TOLERANCE} rad (best {x.best_error:.4f})"
+           for x in reaches if x.reached_s is None]
+    by = {}
+    for x in reaches:
+        by.setdefault(x.name, x)
+    for name in ("PICK", "PLACE"):
+        if name in by and (by[name].lowest_z is None or by[name].lowest_z > GRASP_MAX_Z):
+            out.append(f"{name}: lowest site z {by[name].lowest_z} above {GRASP_MAX_Z}")
+    if heights.get("pick_to_place") is None or heights["pick_to_place"] - OBJECT_HANG < TABLE_Z - CONTACT_ALLOWANCE:
+        out.append(f"PICK to PLACE: lowest site z {heights.get('pick_to_place')} puts the object into the table")
+    if heights.get("carry") is None or heights["carry"] < CARRY_MIN_Z:
+        out.append(f"carry: lowest site z {heights.get('carry')} below {CARRY_MIN_Z}")
+    return out
