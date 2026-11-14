@@ -10,6 +10,7 @@ import collections
 import dataclasses
 import os
 import pathlib
+import resource
 import signal
 import subprocess
 import threading
@@ -36,11 +37,38 @@ class Sample:
     velocity: dict
 
 
+PGREP = ["pgrep", "-f", "ros2_control_node"]
+
+
+def ros2_control_pids():
+    """Pids of running ros2_control_node processes. pgrep exits 1 for "none found"; any
+    other non-zero exit is pgrep's own error and must not read as "none found"."""
+    p = subprocess.run(PGREP, capture_output=True, text=True)
+    if p.returncode not in (0, 1):
+        raise SimError(f"{' '.join(PGREP)} exited {p.returncode}: {p.stderr.strip()}")
+    return p.stdout.split()
+
+
+def _no_core_dumps():
+    # A node that aborts during shutdown would otherwise drop a ~200 MB core file into the
+    # working directory, which is the repository root.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
 @dataclasses.dataclass(frozen=True)
 class FollowResult:
     accepted: bool
     error_code: int | None
     error_string: str
+    # action_msgs/msg/GoalStatus value of the finished goal; None when the goal was rejected.
+    # A cancelled goal still reports error_code 0, so error_code alone cannot mean success.
+    status: int | None
+
+    @property
+    def succeeded(self):
+        from action_msgs.msg import GoalStatus
+
+        return self.accepted and self.status == GoalStatus.STATUS_SUCCEEDED and self.error_code == 0
 
 
 def _wait(future, timeout_s, what):
@@ -68,15 +96,14 @@ class Sim:
     # --- lifecycle ---
 
     def start(self, timeout_s=60.0):
-        running = subprocess.run(["pgrep", "-f", "ros2_control_node"], capture_output=True, text=True)
-        if running.stdout.strip():
-            pids = ", ".join(running.stdout.split())
-            raise SimError(f"a simulator is already running: ros2_control_node pid {pids}")
+        running = ros2_control_pids()
+        if running:
+            raise SimError(f"a simulator is already running: ros2_control_node pid {', '.join(running)}")
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self._log = open(self.log_path, "w")
         self._proc = subprocess.Popen(
             LAUNCH, stdin=subprocess.DEVNULL, stdout=self._log, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=True, preexec_fn=_no_core_dumps,
         )
         self._start_node()
         deadline = time.monotonic() + timeout_s
@@ -168,6 +195,10 @@ class Sim:
         while time.monotonic() < deadline:
             ros = self.sample("/joint_states", timeout_s)
             mujoco = self.sample("/mujoco_actuators_states", timeout_s)
+            # Unstamped messages would pair with a gap of 0 and make the comparison vacuous.
+            if ros.stamp_s == 0.0 or mujoco.stamp_s == 0.0:
+                raise SimError(f"unstamped message: /joint_states {ros.stamp_s}, "
+                               f"/mujoco_actuators_states {mujoco.stamp_s}")
             gap = abs(ros.stamp_s - mujoco.stamp_s)
             if gap <= within_s:
                 return ros.position, mujoco.position, gap
@@ -197,9 +228,9 @@ class Sim:
             goal.trajectory.points.append(p)
         handle = _wait(self._follow.send_goal_async(goal), timeout_s, "send_goal")
         if not handle.accepted:
-            return FollowResult(False, None, "")
-        result = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result").result
-        return FollowResult(True, result.error_code, result.error_string)
+            return FollowResult(False, None, "", None)
+        response = _wait(handle.get_result_async(), timeout_s, "follow_joint_trajectory result")
+        return FollowResult(True, response.result.error_code, response.result.error_string, response.status)
 
     # --- ROS node ---
 

@@ -4,16 +4,10 @@
 This module never requests the module-scoped `sim` fixture: that simulator stays up until its
 own module ends, and a test here would meet it and trip the guard against a second simulator.
 """
-import subprocess
-
 import pytest
 
 from sim import Sim, SimError
-
-
-def _ros2_control_pids():
-    p = subprocess.run(["pgrep", "-f", "ros2_control_node"], capture_output=True, text=True)
-    return p.stdout.split()
+from sim import ros2_control_pids as _ros2_control_pids
 
 
 def _started(name):
