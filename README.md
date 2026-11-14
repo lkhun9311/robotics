@@ -128,7 +128,7 @@ Which tool checks what:
 | Check | Tool | What it covers |
 |---|---|---|
 | Wire bytes | Python wire encoder (`tools/od/wire.py`), independent of the C++ codec and of the shared EDS loader | Golden vectors (`tools/od/make_golden.py`) that the C++ codec must reproduce byte for byte |
-| EDS syntax | Lely `dcfchk` 2.3.5 (`tools/od/tests/test_dcfchk.py`) | Catches sections, keys, access types, value syntax and ranges, sub-object counts. Misses PDO mappings that are 72 bits long, map an unmappable object, or map a read-only object into an RPDO |
+| EDS syntax | Lely `dcfchk` 2.3.5 (`tools/od/tests/test_dcfchk.py`) | Calibrated on five broken copies: catches a missing sub-object (0x1018:01) and the `0x80+$NODEID` default form it cannot parse; misses PDO mappings that are 72 bits long, map an unmappable object, or map a read-only object into an RPDO. No other defect class is calibrated |
 | EDS contract | project validator and `tools/od/tests/test_od.py` | The PDO mapping rules `dcfchk` misses, and every object, type, default and PDO layout of the contract, restated by hand in the test |
 | CiA 402 transitions | table written from the standard text, in the drive core tests | The transitions of the state machine |
 | Bandwidth | `tools/od/bandwidth.py` | Frame count and occupancy computed from the EDS |
