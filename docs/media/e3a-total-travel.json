@@ -1,0 +1,29 @@
+{
+  "test": "Stop.TotalTravelWithinBoundAcrossPhases",
+  "w_ns": 2000000,
+  "lease_ns": 48000000,
+  "allowance_nrad": 100000000,
+  "max_travel_nrad": 97000000,
+  "phases": [
+    {"phase": 0, "send_after_sync_ns": 1000000, "deadline_phase_in_w_ns": 1000000, "travel_nrad": 97000000},
+    {"phase": 1, "send_after_sync_ns": 1100000, "deadline_phase_in_w_ns": 1100000, "travel_nrad": 97000000},
+    {"phase": 2, "send_after_sync_ns": 1200000, "deadline_phase_in_w_ns": 1200000, "travel_nrad": 97000000},
+    {"phase": 3, "send_after_sync_ns": 1300000, "deadline_phase_in_w_ns": 1300000, "travel_nrad": 97000000},
+    {"phase": 4, "send_after_sync_ns": 1400000, "deadline_phase_in_w_ns": 1400000, "travel_nrad": 97000000},
+    {"phase": 5, "send_after_sync_ns": 1500000, "deadline_phase_in_w_ns": 1500000, "travel_nrad": 97000000},
+    {"phase": 6, "send_after_sync_ns": 1600000, "deadline_phase_in_w_ns": 1600000, "travel_nrad": 97000000},
+    {"phase": 7, "send_after_sync_ns": 1700000, "deadline_phase_in_w_ns": 1700000, "travel_nrad": 97000000},
+    {"phase": 8, "send_after_sync_ns": 1800000, "deadline_phase_in_w_ns": 1800000, "travel_nrad": 97000000},
+    {"phase": 9, "send_after_sync_ns": 1900000, "deadline_phase_in_w_ns": 1900000, "travel_nrad": 97000000},
+    {"phase": 10, "send_after_sync_ns": 2000000, "deadline_phase_in_w_ns": 0, "travel_nrad": 95000000},
+    {"phase": 11, "send_after_sync_ns": 2100000, "deadline_phase_in_w_ns": 100000, "travel_nrad": 97000000},
+    {"phase": 12, "send_after_sync_ns": 2200000, "deadline_phase_in_w_ns": 200000, "travel_nrad": 97000000},
+    {"phase": 13, "send_after_sync_ns": 2300000, "deadline_phase_in_w_ns": 300000, "travel_nrad": 97000000},
+    {"phase": 14, "send_after_sync_ns": 2400000, "deadline_phase_in_w_ns": 400000, "travel_nrad": 97000000},
+    {"phase": 15, "send_after_sync_ns": 2500000, "deadline_phase_in_w_ns": 500000, "travel_nrad": 97000000},
+    {"phase": 16, "send_after_sync_ns": 2600000, "deadline_phase_in_w_ns": 600000, "travel_nrad": 97000000},
+    {"phase": 17, "send_after_sync_ns": 2700000, "deadline_phase_in_w_ns": 700000, "travel_nrad": 97000000},
+    {"phase": 18, "send_after_sync_ns": 2800000, "deadline_phase_in_w_ns": 800000, "travel_nrad": 97000000},
+    {"phase": 19, "send_after_sync_ns": 2900000, "deadline_phase_in_w_ns": 900000, "travel_nrad": 97000000}
+  ]
+}

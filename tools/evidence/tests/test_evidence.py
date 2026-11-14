@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """The committed E3b evidence is what the committed scripts make from the committed inputs."""
 import json
+import os
+import subprocess
 
 import pytest
 
 import common
 import fault_timeline
 import frame_trace
+import bandwidth_table
 import matrix_table
 import pick_place_replay
 import proxy_cost_histogram
+import travel_phases
 
 MEDIA = common.MEDIA
 
@@ -176,10 +180,41 @@ def test_pick_place_videos_are_committed_and_the_gif_fits_the_readme():
     assert (MEDIA / "e2-baseline.mp4").stat().st_size > 0
 
 
+def test_travel_dump_is_what_the_drive_core_test_writes_now(tmp_path):
+    """The committed dump is regenerated from the release build of the gtest that pins the
+    maximum; the test must pass while writing it."""
+    assert travel_phases.TEST_BINARY.is_file(), f"{travel_phases.TEST_BINARY} missing: build the workspace first"
+    out = tmp_path / "travel.json"
+    run = subprocess.run([str(travel_phases.TEST_BINARY), f"--gtest_filter={travel_phases.TEST}"],
+                         env=os.environ | {"DRIVE_CORE_TRAVEL_DUMP": str(out)}, capture_output=True, text=True)
+    assert run.returncode == 0 and "[  PASSED  ] 1 test." in run.stdout, run.stdout[-2000:]
+    assert out.read_bytes() == travel_phases.DUMP.read_bytes(), (
+        "the committed dump differs from what the gtest writes now: regenerate it with " + travel_phases.DUMP_COMMAND)
+
+
+def test_travel_plot_draws_every_phase_of_the_dump():
+    dump = json.loads(travel_phases.DUMP.read_text())
+    data = travel_phases.plot_data(dump)
+    assert sorted(p for _, _, p in data["bars"]) == list(range(20))
+    for x_us, y_rad, phase in data["bars"]:
+        entry = dump["phases"][phase]
+        assert (x_us, y_rad) == (entry["deadline_phase_in_w_ns"] / 1000, entry["travel_nrad"] * 1e-9)
+        assert 0 <= entry["deadline_phase_in_w_ns"] < dump["w_ns"]
+    assert data["max"] == max(y for _, y, _ in data["bars"]) <= data["allowance"] == 0.1
+
+
+def test_readme_bandwidth_table_is_what_bandwidth_py_computes():
+    text = bandwidth_table.README.read_text(encoding="utf-8")
+    assert bandwidth_table.readme_block(text) == bandwidth_table.table(), (
+        "README.md's bandwidth table is stale: run python3 tools/evidence/bandwidth_table.py --write-readme")
+
+
 FRESH = [("e3b-fault-timeline.svg", "fault_timeline.py",
           lambda out: fault_timeline.draw(out)),
          ("e2-pick-place-height.svg", "pick_place_replay.py",
           lambda out: pick_place_replay.draw_svg(pick_place_replay.load(), out, pick_place_replay.Kinematics())),
+         ("e3a-total-travel.svg", "travel_phases.py",
+          lambda out: travel_phases.draw(json.loads(travel_phases.DUMP.read_text()), out)),
          ("e3b-proxy-cost.svg", "proxy_cost_histogram.py",
           lambda out: proxy_cost_histogram.draw(
               json.loads((MEDIA / "e3b-proxy-cost.json").read_text()), out, 200))]

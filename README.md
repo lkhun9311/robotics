@@ -40,6 +40,8 @@ The simulation checks (`tools/sim_checks`) show that:
 - the joints, actuators and controller joints map to each other by name;
 - the arm starts at the home pose;
 - a normal goal is accepted and reached within 0.05 rad at its end;
+- a pick-and-place-shaped goal reaches each of its five waypoints within 0.05 rad (see
+  [E2 evidence](#e2-evidence));
 - out-of-range goals behave as measured below.
 
 Out-of-range behaviour, measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e:
@@ -57,6 +59,45 @@ Pinned versions: ROS snapshot 2026-10-05, `mujoco_ros2_control` 0.1.2,
 `370c43965323c0944b433b202aac5058b5f907a9` (files verified by SHA-256).
 
 This path uses the stock JointTrajectoryController. It accepts goals on its own action and topic interfaces, and nothing outside it can prove which goal produced a given output, so E2 claims no permit or generation guarantee. Those claims start with the project's own controller in E3.
+
+### E2 evidence
+
+![Replay render of the recorded joint trajectory of the pick-and-place-shaped demo](docs/media/e2-pick-place-replay-render-of-the-recorded-joint-trajectory.gif)
+
+A replay render of the recorded joint trajectory: the arm moves as MuJoCo reported it under the
+plugin, and the red ball is not grasped (there is no grasp physics; the render draws it at the
+tool only while it is carried, and on the table before and after). The goal is one
+FollowJointTrajectory goal through five waypoints, approach, pick, lift, place approach and place,
+with a dwell at each, followed by a retreat to HOME
+([MP4](docs/media/e2-pick-place-replay-render-of-the-recorded-joint-trajectory.mp4)).
+
+How it is made: `mujoco_ros2_control` 0.1.2 offers no runtime weld or mocap control (its services
+are `reset_world`, `set_free_joint_state`, `set_pause` and `step_simulation`, and the scene has no
+free body), so the live run has no object. `record_motion.py --demo pick_place` records the
+MuJoCo joint positions from `/mujoco_actuators_states` of the live run and refuses a recording that
+fails the check's conditions; `tools/evidence/pick_place_replay.py` sets them, frame by frame, on
+the same installed scene with the MuJoCo 3.12.0 Python bindings (the version the plugin links) and
+adds the ball kinematically. The floor plane the arm stands on (z = 0) is the table.
+
+![Site height during the pick-and-place-shaped demo](docs/media/e2-pick-place-height.svg)
+
+The simulation check `test_pick_place_trajectory_reaches_each_waypoint` sends the same goal and
+judges the 500 Hz MuJoCo joint positions: every waypoint is reached within 0.05 rad during its
+dwell; by the `attachment_site` height from MuJoCo's own kinematics, the site comes low enough at
+PICK and PLACE for the ball to be within 0.02 m of the table, the ball never goes more than 0.01 m
+into the table between them, and the site stays above 0.20 m from LIFT to PLACE_APPROACH. From the
+committed recording (100 Hz):
+
+    python3 tools/evidence/pick_place_replay.py           # prints the values, redraws the SVG
+    python3 tools/evidence/pick_place_replay.py --video   # also renders the MP4 and the GIF
+
+the largest joint error at its best point in each dwell was 0.0081 to 0.0122 rad; the lowest site
+point between PICK and PLACE was 0.0875 m, which puts the ball's lowest point 0.0025 m above the
+table; from LIFT to PLACE_APPROACH the site stayed at or above 0.2436 m. The script prints the command that
+records the trajectory again. The generic pytest stage checks that the recording is of the current
+waypoints and passes the check's conditions, that the plot draws MuJoCo's site height for every
+sample, that the ball rests, rides only between the two dwells and rests again, and that the GIF
+fits in 3 MB; the MP4 and GIF are encoder output and are not compared byte for byte.
 
 ## What E1 proves today (logic time, no robot, no ROS)
 
@@ -149,13 +190,10 @@ Measured and computed:
   (`TotalTravelWithinBoundAcrossPhases` in `src/drive_core/test/test_drive_loop.cpp`, which pins
   the value): maximum 0.097 rad, the lease interval (24 ticks at v_max, 0.048 rad) plus the
   braking ramp from v_max (0.049 rad), against an allowance of 0.100 rad (lease 48 ms at v_max
-  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values.
-- Bandwidth (`python3 tools/od/bandwidth.py config/od/vdrive_arm.eds`): per 10 ms bus cycle
-  1 SYNC + 6 x (2 RPDO + 3 TPDO) = 31 frames; RPDO3 is event-driven and not counted. At the
-  worst-case 135 bits per 8-byte frame (47 + 8n + floor((34 + 8n - 1)/4) with stuffing) the
-  cyclic load is 4185 bits per cycle, 41.85 % of 1 Mbit/s (41.05 % with the real DLC of SYNC).
-  With 6 heartbeats per 100 ms and one SDO request and response per cycle it is 44.94 %. This
-  is a computed bound: vcan does not show physical arbitration delay.
+  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values. All 20
+  phases are drawn under [E3a evidence](#e3a-evidence).
+- Bandwidth: the bus-load table under [E3a evidence](#e3a-evidence), computed from the EDS. It is
+  a computed bound: vcan does not show physical arbitration delay.
 
 Residual risks and deviations:
 
@@ -215,6 +253,37 @@ Decision index (the `D<n>` references in code comments):
 | D16 | One CMake include sets warnings, sanitizers and coverage for every pure C++ package |
 | D17 | Commit transaction: attempt_id, staged values, then a CRC-32 commit; idempotent repeat; 0x2016 confirms which attempt holds the tag |
 | D18 | SYNC on 0x80, EMCY on 0x80 + node-ID, read from the EDS |
+
+### E3a evidence
+
+![Total travel against the validity-deadline phase](docs/media/e3a-total-travel.svg)
+
+Total travel of the last command from its send to rest, for each of the 20 phases of the validity
+deadline inside one W tick, in logic time. The command reaches the drive 20 ms late, so the expiry
+guard, not the command timeout, stops the joint. Nineteen phases travel 0.097 rad; the phase whose
+deadline falls exactly on a tick travels 0.095 rad; all stay under the 0.100 rad allowance. The
+values are the dump of the gtest that pins the maximum, written with:
+
+    docker compose run --rm -T dev bash -c 'DRIVE_CORE_TRAVEL_DUMP=docs/media/e3a-total-travel.json build/release/drive_core/drive_core_tests --gtest_filter=Stop.TotalTravelWithinBoundAcrossPhases'
+    python3 tools/evidence/travel_phases.py   # redraws the SVG from the dump
+
+The generic pytest stage runs that gtest again and requires the committed dump to be byte for byte
+what it writes now, and checks that the SVG plots every phase of the dump and is fresh (as the E3b
+images are).
+
+The bus load, rendered from `python3 tools/od/bandwidth.py config/od/vdrive_arm.eds` by
+`python3 tools/evidence/bandwidth_table.py --write-readme`; a test requires this table to be
+exactly what the script prints:
+
+<!-- bandwidth table: python3 tools/evidence/bandwidth_table.py --write-readme -->
+| Bus load (computed bound) | Value |
+|---|---|
+| Cyclic frames per bus cycle | 31 per 10 ms: 1 SYNC + 6 x (2 RPDO + 3 TPDO); RPDO3 is event-driven and not counted |
+| Worst-case bits of an 8-byte frame | 135, from `bits(n) = 47 + 8*n + floor((34 + 8*n - 1)/4)` (with stuffing) |
+| Cyclic load, every frame charged 8 bytes | 4185 bits per cycle, 41.85 % of 1 Mbit/s |
+| Cyclic load, real DLC (SYNC carries none) | 4105 bits per cycle, 41.05 % |
+| Plus 6 heartbeats per 100 ms and one SDO request and response per cycle | 4494 bits per cycle, 44.94 % (55.06 % free) |
+<!-- end of bandwidth table -->
 
 ## E3b bus processes and Lely interop
 
