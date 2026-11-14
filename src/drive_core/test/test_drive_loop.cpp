@@ -942,6 +942,28 @@ TEST(Fault, TorqueLossIsNotAControlledStop) {
   EXPECT_FALSE(l.drive.stop_confirmed());
 }
 
+// D11: a stop that becomes due after the torque loss (here a pending integrity stop) must not
+// start a monitor that then reads a slow coast as a confirmed stop.
+TEST(Fault, TorqueLossWithPendingIntegrityNeverConfirmsStop) {
+  Loop l;
+  l.enable();
+  l.sync();
+  l.command(8);  // 8 µrad: one tick of tracking leaves 0.004 rad/s, below the quiet threshold.
+  l.ticks(5);
+  l.sync();
+  ASSERT_EQ(l.count(DriveEventKind::kActuated), 1U);
+  l.tick();
+  ASSERT_EQ(l.drive.joint().velocity_nrad_s, 4'000'000);
+  l.rpdo1(l.seq, 9);  // A second payload for the actuated seq.
+  ASSERT_EQ(l.count(DriveEventKind::kIntegrity), 1U);
+  l.drive.inject_torque_loss(l.now());
+  l.ticks(200);
+  EXPECT_EQ(l.count(DriveEventKind::kStopConfirmed), 0U);
+  EXPECT_FALSE(l.drive.stop_confirmed());
+  EXPECT_TRUE(l.drive.stop_unconfirmed());
+  EXPECT_EQ(l.drive.joint().velocity_nrad_s, 4'000'000);  // Still coasting.
+}
+
 TEST(Fault, TorqueLossHoldsFaultAcrossResetAndResetNode) {
   constexpr std::uint16_t kSwFault = 1U << 3U;
   constexpr std::uint16_t kSwSwitchOnDisabled = 1U << 6U;

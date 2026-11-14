@@ -272,6 +272,12 @@ void Drive::apply_inhibit() {
 }
 
 void Drive::start_stop_monitor(runtime_core::MonoTime now) {
+  if (drive_unavailable_) {
+    // D11: without drive authority nothing is a controlled stop. A stop that becomes due later
+    // (a pending integrity stop, a policy stop) starts no monitor: a slow coast must never be
+    // reported as a confirmed stop, and stop_unconfirmed stays.
+    return;
+  }
   stop_active_ = true;
   stop_started_ = now;
   quiet_ticks_ = 0;
