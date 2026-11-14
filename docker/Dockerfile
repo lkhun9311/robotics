@@ -4,6 +4,10 @@ ARG ROS_IMAGE
 # Default keeps every stage's FROM resolvable when only the dev target is built (BuildKit
 # resolves all stages); release builds pass the pinned digest from .env.
 ARG RUNTIME_IMAGE=ros:jazzy-ros-core
+# Base of the build stage: the dev stage below, or an already built dev image. CI passes the dev
+# image it has just checked, so the runtime build neither rebuilds the dev stage nor fetches the
+# model again when the layer cache misses, and ships from the very image the checks ran in.
+ARG BUILD_FROM=dev
 FROM ${ROS_IMAGE} AS base
 ARG ROS_SNAPSHOT
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -54,7 +58,7 @@ ENV MENAGERIE_UR5E_DIR=/opt/models/menagerie/universal_robots_ur5e
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /ws
 
-FROM dev AS build
+FROM ${BUILD_FROM} AS build
 COPY . /ws
 RUN source /opt/ros/jazzy/setup.bash \
  && colcon build --base-paths src --build-base build/release --install-base install/release \

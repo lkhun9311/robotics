@@ -27,12 +27,19 @@ jobs:
       - name: Run checks
         run: docker run --rm --init -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
       - name: Build and smoke-run the runtime image
+        # Built on the dev image checked above (BUILD_FROM), so the model is not fetched again.
+        # The dev stage's build args are left out on purpose: a build that ran that stage anyway
+        # fails on them, and the log check below fails it too.
         run: |
+          set -o pipefail
           set -a; . ./.env; set +a
           docker build --target runtime --build-arg ROS_IMAGE="$ROS_IMAGE" \
-            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
-            --build-arg ROS_SNAPSHOT="$ROS_SNAPSHOT" \
-            --build-arg MENAGERIE_COMMIT="$MENAGERIE_COMMIT" -t robotics-runtime:ci -f docker/Dockerfile .
+            --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" --build-arg BUILD_FROM=robotics-dev:ci \
+            -t robotics-runtime:ci -f docker/Dockerfile . 2>&1 | tee "$RUNNER_TEMP/runtime-build.log"
+          if grep -q 'menagerie.py fetch' "$RUNNER_TEMP/runtime-build.log"; then
+            echo 'the runtime build ran the dev stage (model fetch) instead of using robotics-dev:ci' >&2
+            exit 1
+          fi
           docker run --rm robotics-runtime:ci --scenario normal --defect none --out /tmp/t.jsonl
           rc=0; docker run --rm robotics-runtime:ci --scenario nope --defect none --out /tmp/t.jsonl || rc=$?
           test "$rc" -eq 2
