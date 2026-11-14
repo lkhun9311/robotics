@@ -119,3 +119,18 @@ def test_paired_positions_reports_the_last_gap_when_the_deadline_runs_out():
     finally:
         stop.set()
         feeder.join()
+
+
+def test_stop_tears_down_the_node_and_reraises_ctrl_c_from_the_launch_step(monkeypatch, tmp_path):
+    monkeypatch.setattr(sim_module, "LOG_DIR", tmp_path)
+    s = Sim("fixture-ctrl-c")
+    torn_down = []
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(s, "_stop_launch", interrupted)
+    monkeypatch.setattr(s, "_stop_node", lambda: torn_down.append(True))
+    with pytest.raises(KeyboardInterrupt):
+        s.stop()
+    assert torn_down, "_stop_node did not run after the launch step was interrupted"

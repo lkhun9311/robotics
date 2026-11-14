@@ -164,14 +164,15 @@ class Sim:
         failure = None
         try:
             self._stop_launch()
-        except Exception as e:
+        except BaseException as e:  # Ctrl-C included: the node is still torn down, then it re-raises
             failure = e
         try:
             self._stop_node()
         except Exception as e:
             if failure is None:
                 raise
-            failure.add_note(f"also, while tearing down the test node: {type(e).__name__}: {e}")
+            if isinstance(failure, Exception):
+                failure.add_note(f"also, while tearing down the test node: {type(e).__name__}: {e}")
         if failure is not None:
             raise failure
 
