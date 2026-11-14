@@ -8,13 +8,18 @@ FROM ${ROS_IMAGE} AS base
 ARG ROS_SNAPSHOT
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
-# Pin ROS packages to a dated, signed snapshot. The key fingerprint is checked so a swapped
-# key file fails the build instead of silently changing the trust root.
+# Pin ROS packages to a dated, signed snapshot. The key file must hold exactly one primary key
+# with the expected fingerprint, so a swapped key, or a second key appended to the file (apt
+# would trust every key in the keyring), fails the build instead of changing the trust root.
 COPY docker/keys/ros-snapshots.asc /tmp/ros-snapshots.asc
 RUN gpg --dearmor < /tmp/ros-snapshots.asc > /usr/share/keyrings/ros-snapshots.gpg \
- && fpr="$(gpg --show-keys --with-colons /usr/share/keyrings/ros-snapshots.gpg | awk -F: '/^fpr:/{print $10; exit}')" \
- && test "$fpr" = "4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA" \
- || { echo "ros snapshot key fingerprint mismatch: ${fpr:-none}" >&2; exit 1; } \
+ && keys="$(gpg --show-keys --with-colons /usr/share/keyrings/ros-snapshots.gpg)" \
+ && primaries="$(grep -c '^pub:' <<< "$keys" || true)" \
+ && if [ "$primaries" != 1 ]; then \
+      echo "ros snapshot key file holds ${primaries:-0} primary keys, expected exactly 1" >&2; exit 1; fi \
+ && fpr="$(awk -F: '/^fpr:/{print $10; exit}' <<< "$keys")" \
+ && if [ "$fpr" != "4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA" ]; then \
+      echo "ros snapshot key fingerprint mismatch: ${fpr:-none}" >&2; exit 1; fi \
  && rm /tmp/ros-snapshots.asc \
  && : "${ROS_SNAPSHOT:?set ROS_SNAPSHOT}" \
  && rm -f /etc/apt/sources.list.d/ros2.sources \
