@@ -108,3 +108,12 @@ def test_cli_duplicate_sums_entry_exits_3(tmp_path):
     result = _cli("verify", model, sums)
     assert result.returncode == 3
     assert f"{sums}:3: duplicate entry for assets/base.obj" in result.stderr, result.stderr
+
+
+def test_cli_non_utf8_sums_file_exits_3(tmp_path):
+    model, sums = _tree(tmp_path)
+    sums.write_bytes(b"\xff\xfe not utf-8\n")
+    result = _cli("verify", model, sums)
+    assert result.returncode == 3, result.stderr
+    assert result.stderr.startswith("menagerie.py: cannot verify: "), result.stderr
+    assert "Traceback" not in result.stderr, result.stderr

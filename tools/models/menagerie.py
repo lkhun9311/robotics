@@ -36,7 +36,11 @@ class CannotVerify(Exception):
 
 def _read_sums(sums_file: pathlib.Path) -> dict[str, str]:
     expected = {}
-    for number, line in enumerate(sums_file.read_text().splitlines(), start=1):
+    try:
+        text = sums_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise CannotVerify(f"{sums_file}: not UTF-8 text: {e}") from e
+    for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         match = SUMS_LINE.fullmatch(line)
