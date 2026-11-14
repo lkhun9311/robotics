@@ -345,12 +345,12 @@ purpose:
 
 ### Interop matrix and proxy fault rows
 
-CI run [43643374003](https://github.com/lkhun9311/robotics/actions/runs/43643374003)
-(workflow_dispatch on this branch at commit `45ebca5`) passed. The table is generated from that
-run's `pytest-vcan.xml`:
+CI run [43651578195](https://github.com/lkhun9311/robotics/actions/runs/43651578195)
+(workflow_dispatch on `feat/e3b-bus-processes` at `4ddaa5b`) passed, 119 vcan tests. The table
+is generated from that run's `pytest-vcan.xml` artifact, not from a committed file:
 
-    gh run download 43643374003 -n checks-artifacts -D ci-43643374003
-    python3 tools/evidence/matrix_table.py ci-43643374003/artifacts/pytest-vcan.xml
+    gh run download 43651578195 -n checks-artifacts -D ci-43651578195
+    python3 tools/evidence/matrix_table.py ci-43651578195/artifacts/pytest-vcan.xml
 
 | Row | What | Test | Result |
 |---|---|---|---|
@@ -432,12 +432,13 @@ matching rule wins, no match forwards:
 Per forwarded frame on the normal path (nothing held, no rule acting): `CLOCK_MONOTONIC` right
 after `recvmsg` returns to right after `write` returns. On host `genesis` at commit `649562b`,
 over 5359 frames: p50 1.41 µs, p99 5.44 µs, max 12.79 µs. This is a measurement on one host,
-not a bound, and the tail moves between runs: the same test on the CI runner of run 43643374003
-measured p50 2.87 µs, p99 7.71 µs, max 31.90 µs over 5346 frames. PR CI asserts only the sample
-size (at least 5000) and the order p50 <= p99 <= max.
+not a bound, and the tail moves between runs: the same test on the CI runner of run 43651578195
+(`feat/e3b-bus-processes` at `4ddaa5b`) measured p50 5.89 µs, p99 16.28 µs, max 72.53 µs over
+5359 frames. PR CI asserts only the sample size (at least 5000) and the order
+p50 <= p99 <= max.
 
     grep -E '"(count|p50|p99|max|host|commit)"' docs/media/e3b-proxy-cost.json
-    gh run download 43643374003 -n checks-artifacts -D ci-43643374003 && grep -E '"(count|p50|p99|max)"' ci-43643374003/artifacts/proxy-cost.json
+    gh run download 43651578195 -n checks-artifacts -D ci-43651578195 && grep -E '"(count|p50|p99|max)"' ci-43651578195/artifacts/proxy-cost.json
     python3 tools/evidence/proxy_cost_histogram.py   # redraws the SVG; prints how to measure again
 
 ### One SYNC cycle on the wire
