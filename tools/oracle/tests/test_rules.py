@@ -357,3 +357,32 @@ def test_unit_scenario_is_not_reachable_from_files(tmp_path):
     p.write_text("".join(json.dumps(e) + "\n" for e in base()), encoding="utf-8")
     v = judge_file(p)
     assert v.result == INCONCLUSIVE and reasons(v, "unit")
+
+
+def test_unknown_fault_name_is_inconclusive():
+    events = [*base()[:-1], ev(30 * MS, "fault_injected", name="not_a_known_fault"), end()]
+    v = judge(events)
+    assert v.result == INCONCLUSIVE and reasons(v, "unknown fault")
+
+
+def _after_manager_restart(session, generation):
+    # Manager 1 issues and revokes 1/1; manager 2 (a restarted instance) then issues session/generation.
+    return [begin(), permit(1 * MS), revoke(2 * MS),
+            permit(3 * MS, session=session, generation=generation, expires=51 * MS, manager=2),
+            sent(4 * MS, session=session, generation=generation),
+            applied(4 * MS, session=session, generation=generation), end()]
+
+
+def test_another_manager_reusing_a_closed_generation_fails():
+    v = judge(_after_manager_restart(session=2, generation=1))
+    assert v.result == FAIL and reasons(v, "reuses a closed session/generation")
+
+
+def test_another_manager_reusing_a_closed_session_fails():
+    v = judge(_after_manager_restart(session=1, generation=2))
+    assert v.result == FAIL and reasons(v, "reuses a closed session/generation")
+
+
+def test_another_manager_with_fresh_identifiers_passes():
+    v = judge(_after_manager_restart(session=2, generation=2))
+    assert v.result == PASS, v.reasons
