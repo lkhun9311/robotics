@@ -283,3 +283,29 @@ def test_rejudge_finds_the_master_rows_in_their_own_directory(capsys):
     assert "INTEROP_RECORD_DIR=tools/interop/recorded/master " in out
     assert "tools/interop/recorded/master/n5.json.gz" in out
 
+
+
+def test_capture_parsing_is_shared_between_judges_and_evidence():
+    """The judges and the evidence scripts read frames and PDO fields through one module
+    (tools/interop/observation.py): neither keeps a parser of its own, and both see the same
+    frames and fields of a recording."""
+    import inspect
+
+    import judges
+    import observation
+
+    for module in (judges, common):
+        source = inspect.getsource(module)
+        assert "bytes.fromhex(h)" not in source, f"{module.__name__} parses captured frames itself"
+        assert 'int.from_bytes(raw, "little"' not in source, \
+            f"{module.__name__} decodes PDO fields itself"
+    obs = common.load_recording("m5")
+    rpdo1 = common.cob("RPDO1")
+    t0, t1 = obs["device"][10][0], obs["device"][-10][0]
+    assert common.frames(obs, "device", {rpdo1}, t0, t1) == \
+        observation.frames(obs, "device", rpdo1, t0, t1, inclusive=True)
+    assert judges.frames(obs, "device", rpdo1, t0, t1) == \
+        observation.frames(obs, "device", rpdo1, t0, t1)
+    data = next(d for _, _, d in judges.frames(obs, "device", rpdo1) if len(d) == 8)
+    assert common.decode("RPDO1", data) == judges.decode("RPDO1", data)
+    assert common.drive_records(obs) == judges.drive_records(obs)

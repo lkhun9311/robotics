@@ -25,6 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 sys.path.insert(0, str(ROOT / "tools" / "od"))
 
 import cia301  # noqa: E402
+import observation  # noqa: E402
 import od  # noqa: E402
 import wire  # noqa: E402
 
@@ -82,12 +83,8 @@ def pdo_layout(label):
 # ---- observation access ----
 
 def frames(obs, side, cob=None, t0=None, t1=None):
-    out = []
-    for t, c, h in obs[side]:
-        if (cob is None or c == cob or (isinstance(cob, (set, tuple)) and c in cob)) and \
-                (t0 is None or t > t0) and (t1 is None or t < t1):
-            out.append((t, c, bytes.fromhex(h)))
-    return out
+    """[(t, COB-ID, bytes)] on `side`, t strictly between t0 and t1 (observation.frames)."""
+    return observation.frames(obs, side, cob, t0, t1)
 
 
 def events(obs, kind, t0=None, t1=None, **fields):
@@ -771,11 +768,7 @@ def decode(label, data):
     """Field values of one PDO frame by the EDS mapping (wire.py's layout)."""
     layout = pdo_layout(label)
     need(len(data) == layout["length"], f"{label} frame of {len(data)} bytes")
-    out = {}
-    for f in layout["fields"]:
-        raw = data[f["offset"]:f["offset"] + f["bits"] // 8]
-        out[f["name"]] = int.from_bytes(raw, "little", signed=f["signed"])
-    return out
+    return observation.pdo_fields(layout, data)
 
 
 def encode(label, values):
@@ -795,9 +788,7 @@ def rpdo_seqs(obs, side, n, tag, t0=None, t1=None):
 
 
 def drive_records(obs, kind=None, node=NODE, t0=None, t1=None, bank="bank"):
-    return [r for r in obs[bank] if r.get("event") == "drive" and r.get("node") == node and
-            (kind is None or r.get("kind") == kind) and
-            (t0 is None or r["t_ns"] / 1e9 > t0) and (t1 is None or r["t_ns"] / 1e9 < t1)]
+    return observation.drive_records(obs, node, kind, t0, t1, bank)
 
 
 def dropped(obs, reason, **kw):

@@ -4,7 +4,8 @@ EDS layout of tools/od/wire.py, and the commands that reproduce each input.
 
 The inputs are the observations the interop tests record (tools/interop/recorded/*.json.gz,
 written with INTEROP_RECORD_DIR) and the proxy cost JSON written by tools/bench/proxy_cost.py.
-Nothing here judges: the verdicts stay with tools/interop/judges.py.
+Nothing here judges: the verdicts stay with tools/interop/judges.py. Frames and PDO fields are
+parsed by tools/interop/observation.py, the same code the judges read them with.
 """
 import gzip
 import json
@@ -13,7 +14,9 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "od"))
+sys.path.insert(0, str(ROOT / "tools" / "interop"))
 
+import observation  # noqa: E402
 import wire  # noqa: E402
 
 RECORDED = ROOT / "tools" / "interop" / "recorded"
@@ -120,23 +123,19 @@ def decode(label, data):
     pdo = layout(label)
     if len(data) != pdo["length"]:
         raise ValueError(f"{label} frame of {len(data)} bytes, mapping is {pdo['length']}")
-    values = {}
-    for f in pdo["fields"]:
-        raw = data[f["offset"]:f["offset"] + f["bits"] // 8]
-        values[f["name"]] = int.from_bytes(raw, "little", signed=f["signed"])
+    values = observation.pdo_fields(pdo, data)
     if bytes(wire.pdo_frame(pdo, NODE, values, "check")["data"]) != bytes(data):
         raise ValueError(f"{label} {data.hex()} does not re-encode")
     return values
 
 
 def frames(obs, side, cobs=None, t0=None, t1=None):
-    """[(t s, COB-ID, bytes)] on `side` ('host' or 'device')."""
-    return [(t, c, bytes.fromhex(h)) for t, c, h in obs[side]
-            if (cobs is None or c in cobs) and (t0 is None or t >= t0) and (t1 is None or t <= t1)]
+    """[(t s, COB-ID, bytes)] on `side` ('host' or 'device'), t0 <= t <= t1."""
+    return observation.frames(obs, side, cobs, t0, t1, inclusive=True)
 
 
 def drive_records(obs, node=NODE):
-    return [r for r in obs["bank"] if r.get("event") == "drive" and r.get("node") == node]
+    return observation.drive_records(obs, node)
 
 
 def stream_tag(obs):
