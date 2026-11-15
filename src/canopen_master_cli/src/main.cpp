@@ -19,6 +19,11 @@
 //   dispatch {seq, approved, source_seq}        the session sent a new wire command_seq (C6):
 //                                               an approved command or an arm hold
 //   stop {stop:[...]}                           the per-node stop status changed (C18)
+//   feedback {fresh, age_ns}                    the published feedback's age (now - the oldest
+//                                               node sample) crossed --max-feedback-age (30 ms)
+//   faults {bits, faults:[...]}                 the Feedback fault set changed
+//   verdict {seq, verdict, age_ns}              stream: the HalVerdict of a write differs from the
+//                                               one before (the first write included)
 //   cmd {n, line}                               console: line n read; scenarios: step n begins
 //   cmd_done {n, ok[, error, missing]}          ... carried out (console: an SDO result is in its
 //                                               own sdo_* line before) or not
@@ -27,7 +32,7 @@
 //   scenario_done {scenario, ...} / scenario_failed {scenario, reason}   exit 0 / exit 1
 //   exit {wakes, ..., tx_eagain, tx_enobufs, ...}   last line: the worker's counters
 // canopen_master_cli --if IF --nodes LIST --scenario NAME [--required LIST] [--duration-ms MS]
-//                    [--trace PATH]
+//                    [--arm-at-ns NS] [--trace PATH]
 // Scenarios:
 //   console       a bare master over the nodes; the commands of parse_console (args.hpp), one
 //                 per line; `quit` ends the run once every command before it is done (PR #25
@@ -40,6 +45,8 @@
 //   stream        arm, then every T_bus an approved command at the held position under a
 //                 synthetic permit (expires 100 ms after each write) for --duration-ms (default
 //                 2000), then nothing for 0.5 s while the drives' own stop is observed
+// --arm-at-ns (CLOCK_MONOTONIC ns) holds the arm step until that instant, so a harness whose
+// fault window is fixed to its proxy's start knows the fault comes after the arm.
 // --duration-ms is the deadline of activate_hal and arm (default 15000) and of console (default
 // none). SIGTERM/SIGINT end any scenario.
 #include <fcntl.h>
@@ -91,6 +98,7 @@ constexpr rc::Duration kBusPeriod{10'000'000};  // T_bus
 constexpr rc::Duration kPermitLife{100'000'000};
 constexpr rc::Duration kHold{1'000'000'000};        // The arm's hold (C12: at most 1 s).
 constexpr rc::Duration kObserveAfter{500'000'000};  // stream: after the last write.
+constexpr rc::Duration kFeedbackAge{30'000'000};    // The CLI's max_feedback_age.
 constexpr rc::Duration kShutdownTimeout{1'000'000'000};
 constexpr hc::AuthorityId kAuthority{rc::ManagerInstance{1}, rc::SessionId{1}, rc::Generation{1}};
 
@@ -347,8 +355,14 @@ int run_console(cb::Worker& worker, Run& run, Out& out, std::optional<rc::MonoTi
 
 class HalRun {
  public:
-  HalRun(hc::Hal& hal, cb::Worker& worker, Run& run, Out& out, rc::Duration stream_for)
-      : hal_(hal), worker_(worker), run_(run), out_(out), stream_for_(stream_for) {}
+  HalRun(hc::Hal& hal, cb::Worker& worker, Run& run, Out& out, rc::Duration stream_for,
+         std::optional<rc::MonoTime> arm_at)
+      : hal_(hal),
+        worker_(worker),
+        run_(run),
+        out_(out),
+        stream_for_(stream_for),
+        arm_at_(arm_at) {}
 
   void loop(std::optional<rc::MonoTime> deadline) {
     rc::MonoTime next = now();
@@ -358,6 +372,7 @@ class HalRun {
       const rc::MonoTime t = now();
       feedback_ = hal_.read(t);
       report_stops();
+      report_feedback(t);
       if (g_signal.load() != 0) {
         run_.finish(false, "stopped by a signal before the scenario ended");
         break;
@@ -405,6 +420,12 @@ class HalRun {
   }
 
   void progress(rc::MonoTime t) {
+    if (waiting_arm_) {
+      if (arm_at_ && t < *arm_at_) return;
+      waiting_arm_ = false;
+      start_step(t);
+      return;
+    }
     if (stage_ == Stage::kStream) {
       stream(t);
       return;
@@ -437,6 +458,10 @@ class HalRun {
     } else if (stage_ == Stage::kActivate) {
       if (s == cli::Scenario::kActivateHal) return run_.finish(true, "");
       stage_ = Stage::kArm;
+      if (arm_at_ && t < *arm_at_) {
+        waiting_arm_ = true;
+        return;
+      }
     } else if (stage_ == Stage::kArm) {
       if (s == cli::Scenario::kArm) return run_.finish(true, "");
       stage_ = Stage::kStream;
@@ -472,6 +497,11 @@ class HalRun {
     sp.snapshot.position = held_;
     const hc::HalVerdict v = hal_.write(&permit, sp, t);
     ++verdict_counts_.at(static_cast<std::size_t>(v));
+    if (!last_verdict_ || *last_verdict_ != v) {
+      last_verdict_ = v;
+      out_.emit("verdict", num("seq", sp.snapshot.source_seq) + ",\"verdict\":\"" +
+                               hc::to_string(v) + "\"," + num("age_ns", age_ns(t)));
+    }
     if (v == hc::HalVerdict::kSend) ++sent_;
   }
 
@@ -495,6 +525,37 @@ class HalRun {
                           num("expired_before_dispatch", fb.counters.expired_before_dispatch));
   }
 
+  std::uint64_t age_ns(rc::MonoTime t) const {
+    return feedback_.sampled_at.ns == 0 || t.ns < feedback_.sampled_at.ns
+               ? 0
+               : static_cast<std::uint64_t>(t.ns - feedback_.sampled_at.ns);
+  }
+
+  // The published feedback's age against the 30 ms the CLI configured, on every change.
+  void report_feedback(rc::MonoTime t) {
+    if (feedback_.sampled_at.ns != 0) {
+      const bool fresh = age_ns(t) <= static_cast<std::uint64_t>(kFeedbackAge.ns);
+      if (!last_fresh_ || *last_fresh_ != fresh) {
+        last_fresh_ = fresh;
+        out_.emit("feedback", std::string("\"fresh\":") + (fresh ? "true" : "false") + "," +
+                                  num("age_ns", age_ns(t)));
+      }
+    }
+    if (feedback_.faults.bits() != last_faults_) {
+      last_faults_ = feedback_.faults.bits();
+      std::string names;
+      for (const hc::Fault f :
+           {hc::Fault::kTransportLost, hc::Fault::kNodeLost, hc::Fault::kBootTimeout,
+            hc::Fault::kDriveFault, hc::Fault::kEventOverflow, hc::Fault::kStopUnconfirmed,
+            hc::Fault::kPolicyStop, hc::Fault::kInhibited, hc::Fault::kArmFailed}) {
+        if (feedback_.faults.has(f)) {
+          names += std::string(names.empty() ? "" : ",") + "\"" + hc::to_string(f) + "\"";
+        }
+      }
+      out_.emit("faults", num("bits", last_faults_) + ",\"faults\":[" + names + "]");
+    }
+  }
+
   void report_stops() {
     if (feedback_.stop == last_stop_) return;
     last_stop_ = feedback_.stop;
@@ -510,6 +571,11 @@ class HalRun {
   Run& run_;
   Out& out_;
   rc::Duration stream_for_;
+  std::optional<rc::MonoTime> arm_at_;
+  bool waiting_arm_{false};
+  std::optional<hc::HalVerdict> last_verdict_;
+  std::optional<bool> last_fresh_;
+  std::uint32_t last_faults_{0};
   Stage stage_{Stage::kConfigure};
   hc::OpHandle op_{};
   std::uint64_t step_n_{0};
@@ -557,8 +623,10 @@ int run(const cli::Options& opts) {
     required = cli::parse_required(it->second);
   }
   std::uint64_t duration_ms = 0;
+  std::uint64_t arm_at_ns = 0;
   if (!scenario.ok || !nodes.ok || !required.ok ||
-      !number_option(opts, "duration-ms", 1, 3'600'000, duration_ms)) {
+      !number_option(opts, "duration-ms", 1, 3'600'000, duration_ms) ||
+      !number_option(opts, "arm-at-ns", 1, 0x7FFFFFFFFFFFFFFFULL, arm_at_ns)) {
     std::fprintf(stderr, "canopen_master_cli: %s\n",
                  (!scenario.ok ? scenario.error
                   : !nodes.ok  ? nodes.error
@@ -643,7 +711,10 @@ int run(const cli::Options& opts) {
     const std::uint64_t ms = duration_ms > 0 ? duration_ms : (stream ? 2000 : 15000);
     hal = std::make_unique<hc::Hal>(std::move(owned), required.required,
                                     rc::GuardConfig{kBusPeriod, rc::milliseconds(30)}, limits());
-    HalRun hr(*hal, worker, r, out, rc::milliseconds(static_cast<std::int64_t>(ms)));
+    HalRun hr(*hal, worker, r, out, rc::milliseconds(static_cast<std::int64_t>(ms)),
+              arm_at_ns > 0
+                  ? std::optional<rc::MonoTime>(rc::MonoTime{static_cast<std::int64_t>(arm_at_ns)})
+                  : std::nullopt);
     // stream: the duration is the stream's length; the bring-up has its own 15 s deadline.
     const rc::Duration bring_up =
         stream ? rc::milliseconds(15000) : rc::milliseconds(static_cast<std::int64_t>(ms));
@@ -666,14 +737,14 @@ int run(const cli::Options& opts) {
 
 int main(int argc, char** argv) {
   const std::vector<std::string_view> args(argv + 1, argv + argc);
-  const cli::Options opts =
-      cli::parse_options(args, {"if", "nodes", "scenario", "required", "duration-ms", "trace"},
-                         {"if", "nodes", "scenario"});
+  const cli::Options opts = cli::parse_options(
+      args, {"if", "nodes", "scenario", "required", "duration-ms", "arm-at-ns", "trace"},
+      {"if", "nodes", "scenario"});
   if (!opts.ok) {
     std::fprintf(stderr,
                  "canopen_master_cli: %s\nusage: canopen_master_cli --if IF --nodes LIST "
                  "--scenario console|activate_hal|arm|stream [--required LIST] "
-                 "[--duration-ms MS] [--trace PATH]\n",
+                 "[--duration-ms MS] [--arm-at-ns NS] [--trace PATH]\n",
                  opts.error.c_str());
     return 2;
   }
