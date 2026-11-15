@@ -263,18 +263,7 @@ TEST(Session, ConfigureProbesIdentityAndTag) {
 TEST(Session, GenericNodeConfiguresWithoutExtensionReads) {
   BusLoop l;
   // Node 4 has no 0x2012: it answers the probe's upload with abort 0x06020000 (no object).
-  l.intercept[3] = [](const cc::Frame& f) -> std::optional<cc::Frame> {
-    const auto s = cc::decode_sdo(node_id(3), f);
-    if (f.cob_id != 0x604 || !s || s->type != cc::SdoType::kUploadRequest ||
-        s->address.index != 0x2012) {
-      return std::nullopt;
-    }
-    cc::Sdo abort{};
-    abort.type = cc::SdoType::kAbortToClient;
-    abort.address = s->address;
-    abort.abort_code = 0x0602'0000;
-    return cc::encode_sdo(node_id(3), abort);
-  };
+  l.intercept[3] = canopen_master::testing::without_object(3, 0x2012);
   l.power_on();
   l.step();
   ASSERT_EQ(l.configure(), OpState::kSucceeded);
@@ -836,11 +825,8 @@ TEST(Session, PeerWithoutAppliedTagFailsConfirmation) {
   BusLoop l;
   // Node 4 as a scripted peer: commits like a vdrive but its TPDO3 never reports a tag.
   l.rewrite = [](bool from_master, const cc::Frame& f) -> std::optional<cc::Frame> {
-    if (from_master || f.cob_id != 0x384) return std::nullopt;
-    auto t = cc::unpack_tpdo3(node_id(3), f);
-    if (!t) return std::nullopt;
-    t->applied_tag = 0;
-    return cc::pack_tpdo3(node_id(3), *t);
+    if (from_master) return std::nullopt;
+    return canopen_master::testing::without_applied_tag(3, f);
   };
   bring_up(l);
   const MonoTime posted = l.now;

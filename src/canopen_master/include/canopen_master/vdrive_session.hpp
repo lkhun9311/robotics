@@ -217,6 +217,14 @@ class VdriveSession {
   NodeView node(std::size_t index) const;
   const SessionCounts& counts() const { return counts_; }
   const FeedbackJoin& join() const { return join_; }
+  // What the stream sent under a wire command_seq, among the last kSeqRing dispatches: an
+  // approved command (with its source_seq) or an arm hold. For observers of the device side
+  // (traces, the contract fixture); std::nullopt for a seq not among them.
+  struct Dispatch {
+    bool approved{false};
+    std::uint64_t source_seq{0};
+  };
+  std::optional<Dispatch> dispatched(std::uint16_t wire_seq) const;
 
   static constexpr std::size_t kOpRing = 16;
   static constexpr std::size_t kSeqRing = 64;

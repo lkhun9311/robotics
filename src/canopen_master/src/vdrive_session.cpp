@@ -1058,6 +1058,14 @@ const VdriveSession::SeqEntry* VdriveSession::lookup(std::uint16_t seq) const {
   return nullptr;
 }
 
+std::optional<VdriveSession::Dispatch> VdriveSession::dispatched(std::uint16_t wire_seq) const {
+  const SeqEntry* e = lookup(wire_seq);
+  if (e == nullptr) {
+    return std::nullopt;
+  }
+  return Dispatch{e->approved, e->source_seq};
+}
+
 void VdriveSession::send_stream(Stream& s) {
   const std::uint32_t until = wire_us(s.valid_until);
   for (std::size_t i = 0; i < kSessionNodes; ++i) {
