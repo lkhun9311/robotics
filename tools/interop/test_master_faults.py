@@ -33,8 +33,7 @@ def rules_text(name):
     return (FAULTS / name).read_text()
 
 
-def run_row(row, rules, capture, start_bank, start_proxy, procs, peer, scenario="stream",
-            drive_flags=False):
+def run_row(row, rules, capture, start_bank, start_proxy, procs, scenario="stream"):
     """Runs the CLI through the proxy rules to the end of its scenario; returns the observation."""
     host, device = capture(HOST_IF), capture(DEVICE_IF)
     proxy = start_proxy(rules)
@@ -84,39 +83,37 @@ def judge(obs):
 
 
 def row(name, rules_file, **kw):
-    def go(capture, start_bank, start_proxy, procs, peer):
+    def go(capture, start_bank, start_proxy, procs):
         assert CLI_BIN.exists(), f"NOT_RUN: {CLI_BIN} not built"
         judge(run_row(name, rules_text(rules_file), capture, start_bank, start_proxy, procs,
-                      peer, **kw))
+                      **kw))
     return go
 
 
-def test_short_feedback_outage_latches_inhibit(capture, start_bank, start_proxy, procs, peer):
-    row("X1", "master_tpdo_outage_35ms.rules")(capture, start_bank, start_proxy, procs, peer)
+def test_short_feedback_outage_latches_inhibit(capture, start_bank, start_proxy, procs):
+    row("X1", "master_tpdo_outage_35ms.rules")(capture, start_bank, start_proxy, procs)
 
 
-def test_dropped_tpdos_make_feedback_stale(capture, start_bank, start_proxy, procs, peer):
-    row("X2", "master_tpdo_outage_100ms.rules")(capture, start_bank, start_proxy, procs, peer)
+def test_dropped_tpdos_make_feedback_stale(capture, start_bank, start_proxy, procs):
+    row("X2", "master_tpdo_outage_100ms.rules")(capture, start_bank, start_proxy, procs)
 
 
-def test_one_node_command_loss_stops_the_group(capture, start_bank, start_proxy, procs, peer):
-    row("X3", "master_drop_rpdo2_node3.rules")(capture, start_bank, start_proxy, procs, peer)
+def test_one_node_command_loss_stops_the_group(capture, start_bank, start_proxy, procs):
+    row("X3", "master_drop_rpdo2_node3.rules")(capture, start_bank, start_proxy, procs)
 
 
-def test_heartbeat_loss_raises_fault_without_reset(capture, start_bank, start_proxy, procs, peer):
-    row("X4", "master_drop_heartbeat_node4.rules")(capture, start_bank, start_proxy, procs, peer)
+def test_heartbeat_loss_raises_fault_without_reset(capture, start_bank, start_proxy, procs):
+    row("X4", "master_drop_heartbeat_node4.rules")(capture, start_bank, start_proxy, procs)
 
 
-def test_sdo_timeout_during_arm_fails_arming(capture, start_bank, start_proxy, procs, peer):
+def test_sdo_timeout_during_arm_fails_arming(capture, start_bank, start_proxy, procs):
     row("X5", "master_drop_sdo_answers_node5.rules", scenario="arm")(
-        capture, start_bank, start_proxy, procs, peer)
+        capture, start_bank, start_proxy, procs)
 
 
-def test_all_commands_delayed_stop_the_group(capture, start_bank, start_proxy, procs, peer):
-    row("X6", "master_delay_all_rpdo2.rules")(capture, start_bank, start_proxy, procs, peer)
+def test_all_commands_delayed_stop_the_group(capture, start_bank, start_proxy, procs):
+    row("X6", "master_delay_all_rpdo2.rules")(capture, start_bank, start_proxy, procs)
 
 
-def test_minority_delayed_commands_never_actuate_late(capture, start_bank, start_proxy, procs,
-                                                      peer):
-    row("X7", "master_delay_some_rpdo2_node3.rules")(capture, start_bank, start_proxy, procs,
-                                                      peer)
+def test_minority_delayed_commands_never_actuate_late(capture, start_bank, start_proxy, procs):
+    row("X7", "master_delay_some_rpdo2_node3.rules")(capture, start_bank, start_proxy, procs)

@@ -44,6 +44,10 @@ def cli(obs, kind, t0=None, t1=None, **fields):
             (t0 is None or e["t"] > t0) and (t1 is None or e["t"] < t1)]
 
 
+def epoch_offset(obs, t):
+    return t - epoch(obs)
+
+
 def at(e):
     """The worker's instant of a master event, seconds."""
     return e["at_ns"] / 1e9
@@ -239,7 +243,20 @@ def four_phases(obs, matched):
     faults = [e for e in cli(obs, "faults", t1=t_onset) if e["bits"]]
     need(not early and not faults, f"a stop, fault or event before the onset: "
                                    f"{(early + faults)[:3]}")
+    healthy_writes(obs, t_onset)
     return tags, t_onset, t_armed
+
+
+def healthy_writes(obs, t_onset):
+    """Every Hal::write before the onset returned kSend. The CLI prints a `verdict` line at the
+    first write and at every change, so a refused write always leaves a non-SEND line; one is a
+    defect of the host (FAIL), not a missing precondition."""
+    lines = cli(obs, "verdict", t1=t_onset)
+    need(lines, "the stream wrote nothing before the onset")
+    bad = [v for v in lines if v["verdict"] != "SEND"]
+    check(not bad, f"Hal::write returned {bad[0]['verdict']} at seq {bad[0]['seq']} "
+                   f"{epoch_offset(obs, bad[0]['t']):.4f} s after the proxy's start, before the "
+                   f"onset (feedback age {bad[0]['age_ns'] / 1e6:.1f} ms)" if bad else "")
 
 
 # ---- the stop observation ----
@@ -351,9 +368,12 @@ def judge_outage(obs, row):
     check(stale["age_ns"] > MAX_FEEDBACK_AGE_S * 1e9,
           f"the feedback went stale at an age of {stale['age_ns'] / 1e6:.1f} ms, not above 30 ms")
     t_inhibit = inhibit_latched(obs, t_onset)
-    check(stale["t"] <= t_inhibit + 1e-6 and t_inhibit - t_onset < 0.080,
-          f"the inhibit at {t_inhibit - t_onset:.3f} s after the onset, the stale feedback "
-          f"at {stale['t'] - t_onset:.3f} s")
+    # C17 latches when the age passes max_feedback_age: at most max_feedback_age + T_bus after
+    # the onset (the last sample may be a bus period older than it), plus the CLI's two 2 ms ticks.
+    bound = MAX_FEEDBACK_AGE_S + 0.010 + 0.004
+    check(stale["t"] <= t_inhibit + 1e-6 and t_inhibit - t_onset <= bound,
+          f"the inhibit at {t_inhibit - t_onset:.3f} s after the onset (bound {bound:.3f} s), "
+          f"the stale feedback at {stale['t'] - t_onset:.3f} s")
     only_feedback_caused_it(obs, t_onset, t_inhibit)
     t_stopping = first_stop(obs, t_onset)
     no_dispatch_after(obs, t_stopping)
@@ -381,14 +401,13 @@ def judge_x1(obs):
 
 
 def judge_x2(obs):
-    """100 ms of node 3's TPDOs lost: the published feedback age exceeds max_feedback_age and
-    Hal::write returns kFeedbackStale in that window; the observation recovers (fresh samples,
+    """100 ms of node 3's TPDOs lost: the published feedback age exceeds max_feedback_age and C17
+    latches the inhibit on it within max_feedback_age + T_bus of the onset (from then on writes
+    return kInhibited, so no separate kFeedbackStale from age is observable); the observation
+    recovers (fresh samples,
     no hardware-level fault) while the motion stays inhibited: the inhibit is never cleared,
     nothing is dispatched, no drive actuates, node 3 stays in Quick Stop Active."""
     notes, (obs, t_onset, t_inhibit, fresh, stale, stops, faults) = judge_outage(obs, "X2")
-    stale_writes = [v for v in cli(obs, "verdict", t0=t_onset) if v["verdict"] == "FEEDBACK_STALE"
-                    and v["t"] <= t_inhibit + 1e-6]
-    check(stale_writes, "Hal::write never returned kFeedbackStale between the onset and the latch")
     window_end = parse_rules(obs["harness"]["rules"])[0]["to_s"] + epoch(obs)
     check(fresh["t"] > window_end - EDGE_S and fresh["age_ns"] <= MAX_FEEDBACK_AGE_S * 1e9,
           f"the feedback returned at {fresh['t'] - epoch(obs):.3f} s, the window ended "
@@ -402,8 +421,8 @@ def judge_x2(obs):
           f"{sorted({hex(s) for s in after})}")
     check(not any(r["t_ns"] / 1e9 > t_inhibit for r in bank_records(obs, "actuated", 3)),
           "node 3 actuated after the inhibit")
-    return notes + [f"Hal::write returned kFeedbackStale {len(stale_writes)} time(s) before the "
-                    f"latch; the observation recovered {(fresh['t'] - window_end) * 1000:.0f} ms "
+    verdicts = cli(obs, "stream_end")[0]["verdicts"]
+    return notes + [f"writes by verdict over the run {verdicts}; the observation recovered {(fresh['t'] - window_end) * 1000:.0f} ms "
                     f"after the window ({len(resumed)} TPDO1 of node 3 since, all Quick Stop "
                     f"Active; faults ever raised: {faults}); the inhibit stayed latched to the "
                     f"end, no command and no kActuated followed"]
@@ -420,7 +439,14 @@ def judge_x3(obs):
          rules[0]["id"] == cia301.RPDO_BASE[2] + 3 and rules[0]["every"] == 1,
          "the rule is not 'drop every RPDO2 of node 3'")
     tags, t_onset, t_armed = four_phases(obs, matched)
-    first_dropped = judges.decode("RPDO2", matched[0][0][2])["command_seq"]
+    # A seq repeated in a later slot may have reached the drive in an earlier copy: only the seqs
+    # no copy of which reached vcan_device are lost.
+    delivered = {v["command_seq"] for _, _, d in judges.frames(
+        obs, "device", cia301.RPDO_BASE[2] + 3) if len(d) == 8
+        for v in [judges.decode("RPDO2", d)]}
+    lost = sorted({judges.decode("RPDO2", d)["command_seq"] for _, _, d in matched[0]} - delivered)
+    need(lost, "every dropped RPDO2 was repeated through to the drive")
+    first_dropped = lost[0]
     t_own = [r for r in bank_records(obs, "quick_stop", 3, t0=t_onset)]
     check(t_own and t_own[0]["reason"] in STOP_REASONS,
           f"node 3's first stop {[judges.QS_NAMES[r['reason']] for r in t_own]}, expected "
@@ -628,7 +654,12 @@ def judge_x7(obs):
         held += late[:1]
     need(len(held) == len(delayed), f"{len(delayed)} RPDO2 delayed, {len(held)} on vcan_device one "
                                     f"delay later")
-    delayed_seqs = {s for _, s in held}
+    # A seq the master repeated in a later slot may also have an on-time copy: only a seq with
+    # every copy delayed can never actuate.
+    copies = {}
+    for _, k, s, _ in rpdo_arrivals(obs, 3, tag):
+        copies[s] = copies.get(s, 0) + (k == 2)
+    delayed_seqs = {s for _, s in held if copies.get(s, 0) == len([1 for _, ss in held if ss == s])}
     stops = bank_records(obs, "quick_stop", 3)
     t_stop = stops[0]["t_ns"] / 1e9 if stops else float("inf")
     live = [s for t, s in held if t < t_stop]

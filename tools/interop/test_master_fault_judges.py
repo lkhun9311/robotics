@@ -212,11 +212,21 @@ def test_x2_dispatch_after_the_feedback_returned_fails():
     assert status == "FAIL" and "dispatched after" in why, why
 
 
-def test_x2_without_a_stale_write_fails():
+def test_x2_inhibit_latched_late_fails():
     obs = load("X2")
-    obs["cli"] = [e for e in obs["cli"] if not (e["event"] == "verdict" and
-                                                 e["verdict"] == "FEEDBACK_STALE")]
-    expect(obs, "FAIL", "never returned kFeedbackStale")
+    for e in obs["cli"]:
+        if e["event"] in ("faults", "verdict", "stop") and e["t"] > onset(obs) + 0.015:
+            e["t"] += 0.05
+    expect(obs, "FAIL", "after the onset (bound")
+
+
+@pytest.mark.parametrize("row", STREAM_ROWS)
+def test_refused_write_before_the_onset_fails(row):
+    obs = load(row)
+    first = [e for e in obs["cli"] if e["event"] == "verdict"][0]
+    obs["cli"].append({"t": onset(obs) - 0.1, "event": "verdict", "seq": first["seq"] + 30,
+                       "verdict": "FEEDBACK_STALE", "age_ns": 12_000_000})
+    expect(obs, "FAIL", "before the onset")
 
 
 def test_x2_inhibit_cleared_after_recovery_fails():
