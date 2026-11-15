@@ -41,6 +41,9 @@ struct NodeSample {
   runtime_core::MonoTime sampled_at{};
 };
 
+// floor(t.ns / 1000), also for negative times: the wire microsecond rule of D5.
+std::int64_t floor_us(runtime_core::MonoTime t);
+
 // The host instant of a 32-bit microsecond stamp, nearest to `reference`.
 runtime_core::MonoTime unwrap_us(std::uint32_t stamp_us, runtime_core::MonoTime reference);
 

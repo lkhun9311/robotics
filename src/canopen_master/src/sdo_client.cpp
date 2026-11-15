@@ -40,12 +40,12 @@ bool SdoClient::push(Request request) {
   return true;
 }
 
-bool SdoClient::upload(std::uint16_t index, std::uint8_t sub, SdoDone done) {
-  return push(Request{true, index, sub, 0, 0, std::move(done)});
+bool SdoClient::upload(std::uint16_t index, std::uint8_t sub, SdoDone done, std::uint64_t tag) {
+  return push(Request{true, index, sub, 0, 0, std::move(done), tag});
 }
 
 bool SdoClient::download(std::uint16_t index, std::uint8_t sub, std::span<const std::uint8_t> bytes,
-                         SdoDone done) {
+                         SdoDone done, std::uint64_t tag) {
   if (bytes.empty() || bytes.size() > 4) {
     return false;
   }
@@ -53,8 +53,32 @@ bool SdoClient::download(std::uint16_t index, std::uint8_t sub, std::span<const 
   for (std::size_t i = 0; i < bytes.size(); ++i) {
     value |= static_cast<std::uint32_t>(bytes[i]) << (8U * i);
   }
-  return push(
-      Request{false, index, sub, static_cast<std::uint8_t>(bytes.size()), value, std::move(done)});
+  return push(Request{false, index, sub, static_cast<std::uint8_t>(bytes.size()), value,
+                      std::move(done), tag});
+}
+
+std::size_t SdoClient::cancel(std::uint64_t tag) {
+  if (tag == 0) {
+    return 0;
+  }
+  // The outstanding request (the head while active) has left already; only queued ones go.
+  const std::size_t first = active_ ? 1 : 0;
+  std::size_t kept = first;
+  for (std::size_t k = first; k < count_; ++k) {
+    Request& r = ring_.at((head_ + k) % kCapacity);
+    if (r.tag == tag) {
+      r = Request{};
+      continue;
+    }
+    if (kept != k) {
+      ring_.at((head_ + kept) % kCapacity) = std::move(r);
+      r = Request{};
+    }
+    ++kept;
+  }
+  const std::size_t dropped = count_ - kept;
+  count_ = kept;
+  return dropped;
 }
 
 std::optional<cc::Frame> SdoClient::start(MonoTime now) {

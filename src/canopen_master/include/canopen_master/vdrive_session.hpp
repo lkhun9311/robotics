@@ -41,8 +41,10 @@
 //   callbacks. An op still pending at its deadline fails at the first call at or after it,
 //   whether or not anyone waits. Posting an op while another is pending fails the pending one.
 // - Every op runs under an epoch. Ending an op bumps it, and every SDO completion and every
-//   frame sent for an op checks it first, so a failed or timed-out op never sends anything
-//   later: no SDO request, no RPDO, no 0x0F.
+//   frame sent for an op checks it first; its SDO requests carry the epoch as their tag and
+//   ending the op cancels the ones still queued in the master. So a failed or timed-out op never
+//   sends anything later: no SDO request, no RPDO, no 0x0F. (A request already on the wire when
+//   the op ends cannot be recalled; its answer is ignored.)
 // - A failed op latches the inhibit (C17); only a new configure clears it.
 // - Frames the session sends itself (RPDOs) leave with the return value of the call that made
 //   them, after the master's frames of that call, so a SYNC is always followed by that slot's
@@ -72,7 +74,6 @@ inline constexpr std::int32_t kRestVelocityUradS = 10'000;  // 0.01 rad/s
 // The EMCY code of the drive's torque loss (drive_core kErrorTorqueLoss, CiA 301 device range).
 inline constexpr std::uint16_t kEmcyTorqueLoss = 0xFF01;
 // 0x2030:05 drive_flags bits (the EDS comment at [2030sub5]).
-inline constexpr std::uint16_t kFlagPolicyLatched = 1U << 0U;
 inline constexpr std::uint16_t kFlagDriveUnavailable = 1U << 1U;
 inline constexpr std::uint16_t kFlagStopUnconfirmed = 1U << 3U;
 
@@ -162,6 +163,8 @@ struct SessionCounts {
   std::uint32_t unexpected{};
   // Offers dropped because the session was not armed or the identity was not the armed one.
   std::uint32_t discarded{};
+  // Offers refused because a position is non-finite or beyond the wire's int32 urad.
+  std::uint32_t refused{};
   // Commit retries after a refusal inside the boot quarantine (C9 phase 3).
   std::uint32_t quarantine_retries{};
 };
@@ -192,7 +195,8 @@ class VdriveSession {
   // ---- control path (no allocation) ----
   // An approved command for the armed identity. The newest offer wins at the next slot; one
   // overwritten before it is counted as superseded. Dropped (counted as discarded) unless armed,
-  // not inhibited and `command.id` is the armed identity.
+  // not inhibited and `command.id` is the armed identity; refused (counted as refused) when a
+  // position is not finite or does not fit the wire's int32 urad. Never clamped.
   void offer(const hal_contract::ApprovedCommand& command);
   // C6: whether a command closing at `valid_until` offered at `now` can still be dispatched: its
   // deadline floored to 1 us must be strictly later than the SYNC after its dispatch slot + W +

@@ -406,6 +406,35 @@ TEST(Master, SdoQueueOverflowRefused) {
   ASSERT_EQ(rec.results.size(), 1U);  // Refused requests are never called back.
 }
 
+TEST(Master, CancelDropsOnlyQueuedTaggedRequests) {
+  Master m(config({kNode2, kNode3}));
+  Recorder rec;
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00, rec.done(), 5));  // Will be outstanding.
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1018, 0x01, rec.done(), 5));  // Queued: dropped.
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1018, 0x02, rec.done()));     // Untagged: kept.
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1018, 0x03, rec.done(), 6));  // Other tag: kept.
+  ASSERT_TRUE(
+      m.sdo_upload(kNode3, 0x1018, 0x04, rec.done(), 5));  // Outstanding after the tick: kept.
+  const std::vector<cc::Frame> first = m.tick(at(0));
+  // Both nodes' first requests left; node 3's tagged one is outstanding now and stays.
+  ASSERT_EQ(first.size(), 2U);
+  EXPECT_EQ(m.cancel_sdo(0), 0U) << "untagged requests are never cancelled";
+  EXPECT_EQ(m.cancel_sdo(5), 1U);
+  // Node 2: the outstanding 0x1000 completes, then 0x1018:02 and 0x1018:03 follow; never :01.
+  EXPECT_EQ(m.on_frame(frame(0x582, {0x43, 0x00, 0x10, 0x00, 1, 0, 0, 0}), at(1)),
+            std::vector<cc::Frame>{frame(0x602, {0x40, 0x18, 0x10, 0x02, 0, 0, 0, 0})});
+  EXPECT_EQ(m.on_frame(frame(0x582, {0x43, 0x18, 0x10, 0x02, 2, 0, 0, 0}), at(2)),
+            std::vector<cc::Frame>{frame(0x602, {0x40, 0x18, 0x10, 0x03, 0, 0, 0, 0})});
+  EXPECT_EQ(m.on_frame(frame(0x582, {0x43, 0x18, 0x10, 0x03, 3, 0, 0, 0}), at(3)),
+            std::vector<cc::Frame>{});
+  // Node 3: its outstanding tagged request was on the wire already and still completes.
+  m.on_frame(frame(0x583, {0x43, 0x18, 0x10, 0x04, 4, 0, 0, 0}), at(4));
+  ASSERT_EQ(rec.results.size(), 4U);
+  for (const SdoResult& r : rec.results) EXPECT_NE(r.sub, 0x01) << "a cancelled request ran";
+  // The freed slot is usable again.
+  EXPECT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00, rec.done(), 5));
+}
+
 TEST(Master, StaleSdoResponseNotMatchedToQueuedRequest) {
   // A response already received when on_frame is called cannot answer a request that this
   // call only now puts on the wire.

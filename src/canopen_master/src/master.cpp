@@ -96,9 +96,10 @@ bool Master::nmt(cc::NmtCommand command, cc::NodeId node) {
   return true;
 }
 
-bool Master::sdo_upload(cc::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done) {
+bool Master::sdo_upload(cc::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done,
+                        std::uint64_t tag) {
   Node* n = find(node);
-  if (n == nullptr || !n->sdo.upload(index, sub, std::move(done))) {
+  if (n == nullptr || !n->sdo.upload(index, sub, std::move(done), tag)) {
     ++counts_.sdo_refused;
     return false;
   }
@@ -106,13 +107,21 @@ bool Master::sdo_upload(cc::NodeId node, std::uint16_t index, std::uint8_t sub, 
 }
 
 bool Master::sdo_download(cc::NodeId node, std::uint16_t index, std::uint8_t sub,
-                          std::span<const std::uint8_t> bytes, SdoDone done) {
+                          std::span<const std::uint8_t> bytes, SdoDone done, std::uint64_t tag) {
   Node* n = find(node);
-  if (n == nullptr || !n->sdo.download(index, sub, bytes, std::move(done))) {
+  if (n == nullptr || !n->sdo.download(index, sub, bytes, std::move(done), tag)) {
     ++counts_.sdo_refused;
     return false;
   }
   return true;
+}
+
+std::size_t Master::cancel_sdo(std::uint64_t tag) {
+  std::size_t dropped = 0;
+  for (Node& n : nodes_) {
+    dropped += n.sdo.cancel(tag);
+  }
+  return dropped;
 }
 
 bool Master::set_heartbeat_consumer(cc::NodeId node, Duration consumer_time) {

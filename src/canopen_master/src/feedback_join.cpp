@@ -19,7 +19,8 @@ constexpr std::uint8_t kHave3 = 1U << 2U;
 constexpr std::uint8_t kHaveAll = kHave1 | kHave2 | kHave3;
 constexpr double kMicro = 1e-6;
 
-// floor(t.ns / 1000), also for negative times (the wire rule of D5).
+}  // namespace
+
 std::int64_t floor_us(MonoTime t) {
   std::int64_t us = t.ns / 1000;
   if (t.ns % 1000 < 0) {
@@ -27,8 +28,6 @@ std::int64_t floor_us(MonoTime t) {
   }
   return us;
 }
-
-}  // namespace
 
 MonoTime unwrap_us(std::uint32_t stamp_us, MonoTime reference) {
   const std::int64_t ref_us = floor_us(reference);

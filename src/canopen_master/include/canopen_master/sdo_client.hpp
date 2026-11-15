@@ -40,9 +40,14 @@ class SdoClient {
 
   // Queue a request. false (and `done` is never called) when the queue is full, or for a
   // download of other than 1..4 bytes.
-  bool upload(std::uint16_t index, std::uint8_t sub, SdoDone done);
+  // `tag` names the requests cancel() may drop; 0 is never cancelled.
+  bool upload(std::uint16_t index, std::uint8_t sub, SdoDone done, std::uint64_t tag = 0);
   bool download(std::uint16_t index, std::uint8_t sub, std::span<const std::uint8_t> bytes,
-                SdoDone done);
+                SdoDone done, std::uint64_t tag = 0);
+
+  // Drops every queued request with this nonzero tag before it is sent; their callbacks are never
+  // called. The outstanding request has been sent and is not touched. Returns how many dropped.
+  std::size_t cancel(std::uint64_t tag);
 
   // When nothing is outstanding and a request waits: makes it outstanding with its deadline at
   // now + timeout and returns its frame.
@@ -65,6 +70,7 @@ class SdoClient {
     std::uint8_t size{};
     std::uint32_t value{};
     SdoDone done;
+    std::uint64_t tag{0};
   };
 
   bool push(Request request);

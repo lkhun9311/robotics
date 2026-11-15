@@ -861,6 +861,58 @@ TEST(Session, PeerWithoutAppliedTagFailsConfirmation) {
   }
 }
 
+TEST(Session, FailedOpLeavesNoQueuedSdo) {
+  BusLoop l;
+  l.power_on();
+  l.run(milliseconds(150));
+  // The boot-ups after configure's Reset Communication are held: their re-reads are queued from
+  // event handling, so they would only leave with the master's next call.
+  bool configuring = false;
+  l.filter = [&](const WireFrame& w) {
+    const bool boot_up =
+        !w.from_master && node_of(w.frame, 0x700) && w.frame.dlc == 1 && w.frame.data[0] == 0;
+    return configuring && boot_up ? Fate::kHold : Fate::kDeliver;
+  };
+  const hal_contract::OpTicket t = l.ticket(hal_contract::kConfigureTimeout);
+  configuring = true;
+  l.session.configure(t);
+  l.step();
+  ASSERT_EQ(l.held.size(), kNodes) << "INCONCLUSIVE: the boot-ups were not held";
+  configuring = false;
+  // One boot-up arrives: node 1's re-read is queued in the master and not yet on the wire.
+  l.deliver_from_drive(l.held.front().frame);
+  const std::uint64_t mark = l.wire.back().order;
+  l.session.inhibit(l.now);  // The op fails before the master's next call.
+  ASSERT_EQ(l.session.op_state(t.op_id), OpState::kFailed);
+  l.run(milliseconds(50));
+  for (const WireFrame& w : l.wire) {
+    if (w.order > mark) {
+      EXPECT_FALSE(sdo_request(w)) << "an SDO request of the failed op left";
+    }
+  }
+}
+
+TEST(Session, RefusesUnrepresentableTargets) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.2);
+  stream(l, r, milliseconds(40));
+  const std::uint64_t mark = l.wire.back().order;
+  Joints bad = r.position;
+  for (const double v : {std::nan(""), HUGE_VAL, 3000.0, -2148.0}) {
+    bad[2] = v;  // 3000 rad and -2148 rad do not fit int32 urad.
+    l.session.offer({kA, r.seq + 1, bad, l.now, l.now + milliseconds(48)});
+  }
+  EXPECT_EQ(l.session.counts().refused, 4U);
+  l.run(milliseconds(20));
+  for (const WireFrame& w : l.wire) {
+    if (const auto p = rpdo1(w); p && w.order > mark && p->node == 2) {
+      // Only the last good command repeats: no refused, zeroed or clamped target.
+      EXPECT_EQ(p->pdo.target_position, std::lround(r.position[2] * 1e6));
+    }
+  }
+}
+
 TEST(Session, ForeignAppliedTagInhibits) {
   BusLoop l;
   bring_up_and_arm(l, kA);

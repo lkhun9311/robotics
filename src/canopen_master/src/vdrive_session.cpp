@@ -55,27 +55,20 @@ std::uint32_t eds_default(std::uint16_t index, std::uint8_t sub) {
 }
 
 // floor(t / 1 us) in ns: the instant the wire value of D5 stands for.
-std::int64_t floor_us_ns(MonoTime t) {
-  std::int64_t us = t.ns / 1000;
-  if (t.ns % 1000 < 0) {
-    --us;
-  }
-  return us * 1000;
-}
+std::int64_t floor_us_ns(MonoTime t) { return floor_us(t) * 1000; }
 
 std::uint32_t wire_us(MonoTime t) {
-  return static_cast<std::uint32_t>(static_cast<std::uint64_t>(floor_us_ns(t) / 1000));
+  return static_cast<std::uint32_t>(static_cast<std::uint64_t>(floor_us(t)));
 }
 
-std::int32_t to_urad(double rad) {
+// The wire target (int32 urad) of a position in rad; std::nullopt for a non-finite value or one
+// the wire cannot carry. Never clamped: a clamped target is a different command.
+std::optional<std::int32_t> to_urad(double rad) {
   const double urad = std::round(rad * 1e6);
   constexpr double lo = std::numeric_limits<std::int32_t>::min();
   constexpr double hi = std::numeric_limits<std::int32_t>::max();
-  if (!(urad >= lo)) {
-    return std::numeric_limits<std::int32_t>::min();
-  }
-  if (urad > hi) {
-    return std::numeric_limits<std::int32_t>::max();
+  if (!std::isfinite(urad) || urad < lo || urad > hi) {
+    return std::nullopt;
   }
   return static_cast<std::int32_t>(urad);
 }
@@ -508,7 +501,10 @@ void VdriveSession::end_op(OpState state, const char* error) {
   }
   record(op_->id, state, error);
   op_.reset();
-  ++epoch_;  // Every SDO completion and frame of the ended op is ignored from here on.
+  // A request of the op still queued in the master never leaves; one already sent cannot be
+  // recalled, and its completion, like every later frame of the op, is ignored by the epoch.
+  master_.cancel_sdo(epoch_);
+  ++epoch_;
 }
 
 void VdriveSession::succeed() { end_op(OpState::kSucceeded, nullptr); }
@@ -632,16 +628,18 @@ void VdriveSession::probe(std::size_t i, std::size_t k) {
   }
   const std::uint64_t epoch = epoch_;
   std::optional<std::uint32_t>* into = items[k].into;
-  if (!master_.sdo_upload(config_.nodes[i], items[k].index, items[k].sub,
-                          [this, epoch, into, i, k](const SdoResult& r) {
-                            if (epoch != epoch_) {
-                              return;
-                            }
-                            if (r.status == SdoStatus::kOk) {
-                              *into = r.value;  // A failed read stays empty: not a vdrive.
-                            }
-                            probe(i, k + 1);
-                          })) {
+  if (!master_.sdo_upload(
+          config_.nodes[i], items[k].index, items[k].sub,
+          [this, epoch, into, i, k](const SdoResult& r) {
+            if (epoch != epoch_) {
+              return;
+            }
+            if (r.status == SdoStatus::kOk) {
+              *into = r.value;  // A failed read stays empty: not a vdrive.
+            }
+            probe(i, k + 1);
+          },
+          epoch)) {
     fail("a probe request was refused", now_);
   }
 }
@@ -690,24 +688,30 @@ void VdriveSession::reread(std::size_t i) {
     return true;
   };
   const cc::NodeId id = config_.nodes[i];
-  if (!master_.sdo_upload(id, kIdxBootId, 0, [this, ok, i, id](const SdoResult& r) {
-        if (!ok(r)) {
-          return;
-        }
-        nodes_[i].boot_id = r.value;
-        if (!master_.sdo_upload(id, kIdxCommittedAttempt, 0, [this, ok, i](const SdoResult& r2) {
-              if (!ok(r2)) {
-                return;
-              }
-              nodes_[i].committed_attempt = r2.value;
-              if (--reset_left_ == 0) {
-                phase_ = SessionPhase::kConfigured;
-                succeed();
-              }
-            })) {
-          fail("a re-read was refused", now_);
-        }
-      })) {
+  if (!master_.sdo_upload(
+          id, kIdxBootId, 0,
+          [this, ok, i, id, epoch](const SdoResult& r) {
+            if (!ok(r)) {
+              return;
+            }
+            nodes_[i].boot_id = r.value;
+            if (!master_.sdo_upload(
+                    id, kIdxCommittedAttempt, 0,
+                    [this, ok, i](const SdoResult& r2) {
+                      if (!ok(r2)) {
+                        return;
+                      }
+                      nodes_[i].committed_attempt = r2.value;
+                      if (--reset_left_ == 0) {
+                        phase_ = SessionPhase::kConfigured;
+                        succeed();
+                      }
+                    },
+                    epoch)) {
+              fail("a re-read was refused", now_);
+            }
+          },
+          epoch)) {
     fail("a re-read was refused", now_);
   }
 }
@@ -853,19 +857,21 @@ void VdriveSession::commit_write(std::size_t i, std::size_t k) {
   const std::uint64_t epoch = epoch_;
   const bool last = k + 1 == writes.size();
   const std::array<std::uint8_t, 4> bytes = le32(writes[k].value);
-  if (!master_.sdo_download(config_.nodes[i], writes[k].index, writes[k].sub, bytes,
-                            [this, epoch, i, k, last](const SdoResult& r) {
-                              if (epoch != epoch_) {
-                                return;
-                              }
-                              if (r.status != SdoStatus::kOk) {
-                                commit_failed(i, last, now_);
-                              } else if (last) {
-                                commit_read(i);
-                              } else {
-                                commit_write(i, k + 1);
-                              }
-                            })) {
+  if (!master_.sdo_download(
+          config_.nodes[i], writes[k].index, writes[k].sub, bytes,
+          [this, epoch, i, k, last](const SdoResult& r) {
+            if (epoch != epoch_) {
+              return;
+            }
+            if (r.status != SdoStatus::kOk) {
+              commit_failed(i, last, now_);
+            } else if (last) {
+              commit_read(i);
+            } else {
+              commit_write(i, k + 1);
+            }
+          },
+          epoch)) {
     fail("a commit request was refused", now_);
   }
 }
@@ -900,33 +906,39 @@ void VdriveSession::commit_read(std::size_t i) {
     return true;
   };
   const cc::NodeId id = config_.nodes[i];
-  if (!master_.sdo_upload(id, kIdxCommittedAttempt, 0, [this, ok, i, id](const SdoResult& r) {
-        if (!ok(r)) {
-          return;
-        }
-        if (r.value != nodes_[i].attempt) {
-          fail("0x2016 does not show the commit", now_);
-          return;
-        }
-        if (!master_.sdo_upload(id, kIdxExecTag, 0, [this, ok, i](const SdoResult& r2) {
-              if (!ok(r2)) {
-                return;
-              }
-              const auto tag = static_cast<std::uint16_t>(r2.value);
-              if (tag == 0) {
-                fail("0x2012 shows no tag after the commit", now_);
-                return;
-              }
-              NodeState& node = nodes_[i];
-              node.committed_attempt = node.attempt;
-              node.pending_tag = tag;
-              node.stream_tag = tag;
-              node.commit = CommitStep::kDone;
-              commits_progress(now_);
-            })) {
-          fail("a commit read-back was refused", now_);
-        }
-      })) {
+  if (!master_.sdo_upload(
+          id, kIdxCommittedAttempt, 0,
+          [this, ok, i, id, epoch](const SdoResult& r) {
+            if (!ok(r)) {
+              return;
+            }
+            if (r.value != nodes_[i].attempt) {
+              fail("0x2016 does not show the commit", now_);
+              return;
+            }
+            if (!master_.sdo_upload(
+                    id, kIdxExecTag, 0,
+                    [this, ok, i](const SdoResult& r2) {
+                      if (!ok(r2)) {
+                        return;
+                      }
+                      const auto tag = static_cast<std::uint16_t>(r2.value);
+                      if (tag == 0) {
+                        fail("0x2012 shows no tag after the commit", now_);
+                        return;
+                      }
+                      NodeState& node = nodes_[i];
+                      node.committed_attempt = node.attempt;
+                      node.pending_tag = tag;
+                      node.stream_tag = tag;
+                      node.commit = CommitStep::kDone;
+                      commits_progress(now_);
+                    },
+                    epoch)) {
+              fail("a commit read-back was refused", now_);
+            }
+          },
+          epoch)) {
     fail("a commit read-back was refused", now_);
   }
 }
@@ -998,6 +1010,12 @@ void VdriveSession::offer(const hal_contract::ApprovedCommand& command) {
     ++counts_.discarded;
     return;
   }
+  for (const double p : command.position) {
+    if (!to_urad(p)) {
+      ++counts_.refused;  // Non-finite or beyond the wire's int32 urad: never sent, not clamped.
+      return;
+    }
+  }
   if (box_) {
     ++counters_.superseded;  // Overwritten before a slot: never sent, never acknowledged.
   }
@@ -1067,7 +1085,7 @@ void VdriveSession::slot(MonoTime now) {
     s.approved = true;
     s.source_seq = box_->source_seq;
     for (std::size_t i = 0; i < kSessionNodes; ++i) {
-      s.target_urad[i] = to_urad(box_->position[i]);
+      s.target_urad[i] = to_urad(box_->position[i]).value_or(0);  // Checked in offer().
     }
     s.valid_until = box_->valid_until;
     current_ = s;

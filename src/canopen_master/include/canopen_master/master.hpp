@@ -108,9 +108,14 @@ class Master {
   // Queue an expedited SDO request. false (counted in sdo_refused; `done` never called) for a
   // node not in the config, a full queue (SdoClient::kCapacity per node) or a download of other
   // than 1..4 bytes. `done` may be empty.
-  bool sdo_upload(canopen_codec::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done);
+  // `tag` (nonzero) lets cancel_sdo drop the request while it is still queued.
+  bool sdo_upload(canopen_codec::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done,
+                  std::uint64_t tag = 0);
   bool sdo_download(canopen_codec::NodeId node, std::uint16_t index, std::uint8_t sub,
-                    std::span<const std::uint8_t> bytes, SdoDone done);
+                    std::span<const std::uint8_t> bytes, SdoDone done, std::uint64_t tag = 0);
+  // Drops every request with this nonzero tag that has not been sent yet, on every node; their
+  // `done` is never called. A request already sent is not recalled. Returns how many dropped.
+  std::size_t cancel_sdo(std::uint64_t tag);
 
   // Per-node consumer time; zero disables that node's consumer (C7). false for a node not in
   // the config.
