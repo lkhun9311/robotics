@@ -702,6 +702,49 @@ TEST(Session, InhibitAfterRearmQuickStopsAll) {
   }
 }
 
+TEST(Session, ConfigureClearsInhibitAfterStop) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.5);
+  stream(l, r, milliseconds(100));
+  // Approvals stop: every drive stops on its own (timeout or expiry), the session latches.
+  ASSERT_TRUE(l.run_until([&] { return l.session.inhibited(); }, milliseconds(200)));
+  const std::uint64_t latched_at = l.wire.back().order;
+  l.run(milliseconds(250));
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    ASSERT_EQ(l.drives[i]->cia402().state(), Cia402State::kQuickStopActive) << "INCONCLUSIVE";
+    ASSERT_EQ(l.drives[i]->nmt().state(), cc::NmtState::kOperational) << "INCONCLUSIVE";
+  }
+  // From here the nodes are Operational, in Quick Stop Active, with the old applied_tag, and
+  // SDO answers take a W, so TPDOs keep arriving while configure probes.
+  l.sdo_round_trip = true;
+  const hal_contract::OpTicket t = l.ticket(hal_contract::kConfigureTimeout);
+  l.session.configure(t);
+  ASSERT_EQ(l.wait(t.op_id, milliseconds(3100)), OpState::kSucceeded)
+      << (l.session.op_error(t.op_id) != nullptr ? l.session.op_error(t.op_id) : "");
+  EXPECT_FALSE(l.session.inhibited());
+  EXPECT_FALSE(l.session.feedback().faults.any());
+  EXPECT_EQ(l.session.phase(), SessionPhase::kConfigured);
+  l.run(milliseconds(200));
+  EXPECT_FALSE(l.session.inhibited());
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    EXPECT_EQ(l.drives[i]->nmt().state(), cc::NmtState::kPreOperational) << i;
+    EXPECT_NE(l.drives[i]->cia402().state(), Cia402State::kOperationEnabled) << i;
+  }
+  // No actuation and no command or enable at any point after the latch.
+  for (const DriveRecord& e : l.drive_events) {
+    if (e.order > latched_at) {
+      EXPECT_NE(e.event.kind, DriveEventKind::kActuated) << e.node;
+    }
+  }
+  for (const WireFrame& w : l.wire) {
+    if (w.order > latched_at) {
+      EXPECT_FALSE(is_command_pdo(w));
+      EXPECT_FALSE(is_controlword(w, 0x0F));
+    }
+  }
+}
+
 TEST(Session, ForeignAppliedTagInhibits) {
   BusLoop l;
   bring_up_and_arm(l, kA);

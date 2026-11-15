@@ -361,6 +361,9 @@ void VdriveSession::on_sample(std::size_t i, const NodeSample& s, MonoTime now) 
     return;
   }
   NodeState& n = nodes_[i];
+  if (phase_ == SessionPhase::kConfiguring && n.leaving_operational) {
+    return;  // Residue of the state this configure clears (see start_configure).
+  }
   const DriveState state = decode_statusword(s.statusword);
   check_tag(i, s, now);
   if (!inhibited_) {
@@ -569,7 +572,7 @@ void VdriveSession::start(const Op& op, MonoTime now) {
 
 // ---- configure (C2, C9) ----
 
-void VdriveSession::start_configure(MonoTime /*now*/) {
+void VdriveSession::start_configure(MonoTime now) {
   inhibited_ = false;  // C17: only a new configure clears the inhibit.
   faults_ = {};
   profile_confirmed_ = false;
@@ -578,11 +581,21 @@ void VdriveSession::start_configure(MonoTime /*now*/) {
   stop_streaming();
   join_.reset();
   phase_ = SessionPhase::kConfiguring;
-  for (NodeState& n : nodes_) {
+  for (std::size_t i = 0; i < kSessionNodes; ++i) {
+    NodeState& n = nodes_[i];
+    // A node still Operational (what an inhibit leaves behind) leaves it first. Until it is
+    // Pre-operational its TPDOs (Quick Stop Active, Fault, the old applied_tag) are residue of
+    // the state this configure clears, not events of this op.
+    const bool operational = n.commanded == cc::NmtState::kOperational ||
+                             master_.nmt_state(config_.nodes[i]) == cc::NmtState::kOperational;
     NodeState fresh;
     fresh.boot_at = n.boot_at;
     fresh.stop.gen = n.stop.gen + 1;
     n = fresh;
+    if (operational) {
+      n.leaving_operational = true;
+      command_nmt(i, cc::NmtCommand::kEnterPreOperational, now);
+    }
   }
   probe_left_ = static_cast<int>(kSessionNodes);
   for (std::size_t i = 0; i < kSessionNodes && op_is(OpKind::kConfigure); ++i) {

@@ -24,6 +24,14 @@
 // confirmed from the drive's own evidence (C18). A cancelled arm fences every node it may have
 // enabled with NMT Enter Pre-operational (C10).
 //
+// configure clears the inhibit from whatever an inhibit left behind: it first sends NMT Enter
+// Pre-operational to every node still Operational, and until this configure ends the TPDOs of
+// those nodes (Quick Stop Active, Fault, an old applied_tag) are not events of the op.
+//
+// deactivate with a stop that is not confirmed fails, keeps the nodes Operational (TPDOs keep
+// flowing; communication is not cut before the stop completes, spec §8.1 STOPPING) and latches
+// the inhibit; only a configure goes on from there.
+//
 // Calling convention (the same queued style as Master):
 // - The session owns the master's event queue: the caller calls the session's on_frame and tick
 //   instead of the master's, and never drains the master's events itself.
@@ -254,6 +262,7 @@ class VdriveSession {
     std::optional<std::uint32_t> committed_attempt;
     std::optional<runtime_core::MonoTime> boot_at;  // Latest boot-up that started a new boot.
     bool awaiting_boot{false};                      // configure sent Reset Communication.
+    bool leaving_operational{false};  // configure sent Enter Pre-operational to this node.
     std::optional<canopen_codec::NmtState> commanded;
     std::optional<canopen_codec::NmtState> previous;
     runtime_core::MonoTime commanded_at{};

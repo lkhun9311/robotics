@@ -107,6 +107,13 @@ class BusLoop {
       }
     }
     pump();
+    // SDO answers held back by sdo_round_trip reach the master one W after their request.
+    std::vector<cc::Frame> late;
+    late.swap(late_sdo_);
+    for (const cc::Frame& f : late) {
+      queue_.push_back({false, 0, f});
+      pump(true);
+    }
     const std::uint64_t syncs = master.syncs_produced();
     from_master(session.tick(now));
     pump();
@@ -218,6 +225,9 @@ class BusLoop {
   std::array<std::function<std::optional<cc::Frame>(const cc::Frame&)>, kSessionNodes> intercept;
   std::function<void()> after_step;
   bool sync_this_step{false};
+  // When set, every SDO answer arrives at the next step instead of at once: an SDO round trip
+  // takes one W, so a chain of requests spans SYNCs as on a real bus.
+  bool sdo_round_trip{false};
 
  private:
   struct Pending {
@@ -273,6 +283,11 @@ class BusLoop {
       if (fate == Fate::kDrop) {
         continue;
       }
+      if (sdo_round_trip && !p.from_master && !redelivery && p.frame.cob_id > 0x580 &&
+          p.frame.cob_id <= 0x5FF) {
+        late_sdo_.push_back(p.frame);
+        continue;
+      }
       if (fate == Fate::kHold) {
         held.push_back(w);
         continue;
@@ -295,6 +310,7 @@ class BusLoop {
   }
 
   std::deque<Pending> queue_;
+  std::vector<cc::Frame> late_sdo_;
   std::vector<DriveRecord> pending_events_;
   std::array<runtime_core::MonoTime, kSessionNodes> next_heartbeat_{};
   std::array<bool, kSessionNodes> powered_{};
