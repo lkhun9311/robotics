@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>socketcan_io</name>
+  <version>0.1.0</version>
+  <description>One raw SocketCAN socket and the classification of received frames that may reach the CANopen codec.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

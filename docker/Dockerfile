@@ -47,6 +47,7 @@ RUN apt-get update \
       ros-jazzy-mujoco-ros2-control ros-jazzy-joint-trajectory-controller \
       ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli ros-jazzy-xacro \
       ros-jazzy-robot-state-publisher ros-jazzy-control-msgs python3-numpy ffmpeg \
+      python3-matplotlib \
       ros-jazzy-lely-core-libraries \
  && rm -rf /var/lib/apt/lists/*
 # Menagerie UR5e: fetched at build time, verified against the checked-in sums.
@@ -56,16 +57,33 @@ RUN : "${MENAGERIE_COMMIT:?set MENAGERIE_COMMIT}" \
  && python3 /tmp/models/menagerie.py verify /opt/models/menagerie/universal_robots_ur5e /tmp/models/SHA256SUMS \
  && rm -rf /tmp/models
 ENV MENAGERIE_UR5E_DIR=/opt/models/menagerie/universal_robots_ur5e
+# MuJoCo Python bindings for the simulation checks' forward kinematics and the replay render:
+# the PyPI wheel of the same MuJoCo version as ros-jazzy-mujoco-vendor (3.12.0), pinned by its
+# SHA-256. --no-deps: its runtime imports come from the Ubuntu archive (typing_extensions, and
+# PyOpenGL for EGL rendering); glfw, etils and absl are needed only by viewers and extras.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-typing-extensions python3-opengl \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf '%s\n' 'mujoco==3.12.0 --hash=sha256:7ec16ce408871a0a9157cc556958ab66cd34db9fc1dccd3ef07717170163a4e0' \
+      > /tmp/mujoco-requirements.txt \
+ && pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes --break-system-packages \
+      -r /tmp/mujoco-requirements.txt \
+ && rm /tmp/mujoco-requirements.txt \
+ && python3 -c 'import mujoco; v = mujoco.mj_versionString(); assert v == "3.12.0", v'
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /ws
 
 FROM ${BUILD_FROM} AS build
 COPY . /ws
+# lely_peer is a test peer linked against the dev image's Lely libraries; it does not ship.
 RUN source /opt/ros/jazzy/setup.bash \
  && colcon build --base-paths src --build-base build/release --install-base install/release \
-      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+      --packages-skip lely_peer --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
 # Runtime: the pinned ros-core image (no compilers, no colcon) plus the installed artifacts.
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=build /ws/install/release /opt/robotics
+# The bus processes ship too: each must load and start in this image (--help exits 0).
+RUN /opt/robotics/vdrive_bank/lib/vdrive_bank/vdrive_bank --help \
+ && /opt/robotics/bus_fault_proxy/lib/bus_fault_proxy/bus_fault_proxy --help
 ENTRYPOINT ["/opt/robotics/runtime_core/lib/runtime_core/logic_sim"]

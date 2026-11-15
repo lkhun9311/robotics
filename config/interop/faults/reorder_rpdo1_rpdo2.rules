@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# RPDO1 and RPDO2 of node 3 (0x203 and 0x303 under mask 0x6FF): each frame is released
+# behind the next one, so every RPDO1 follows its RPDO2 inside the same SYNC window.
+h2d 0x203/0x6FF reorder

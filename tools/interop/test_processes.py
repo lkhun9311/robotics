@@ -1,0 +1,322 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The vdrive_bank and bus_fault_proxy processes on vcan (E3b Task 4).
+
+Every test first asserts its preconditions (process ready, the declared traffic on the wire, a
+complete trace); a missing one fails with INCONCLUSIVE. These assert protocol facts, ordering and
+liveness; interval distributions are printed as measurements, not gated (shared runners).
+"""
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import time
+
+import pytest
+
+from conftest import (BUS_FAULT_PROXY_BIN, DEVICE_IF, HOST_IF, NODES, ROOT, VCAN_UP,
+                      VDRIVE_BANK_BIN, inconclusive)
+
+BOOT_UP = 0x00
+PRE_OPERATIONAL = 0x7F
+CAN_RTR_FLAG = 0x40000000
+
+
+def wait_frames(cap, predicate, count, timeout):
+    """The first `count` captured frames satisfying predicate, waiting up to timeout seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        found = [f for f in list(cap.frames) if predicate(f)]
+        if len(found) >= count or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.01)
+
+
+def sdo_upload(index, sub=0):
+    return bytes([0x40, index & 0xFF, index >> 8, sub, 0, 0, 0, 0])
+
+
+def test_bank_boots_six_nodes(capture, start_bank):
+    cap = capture(DEVICE_IF)
+    t_start = time.monotonic()
+    bank = start_bank()
+    start = bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "start record")
+    boot_ids = start["boot_ids"]
+    assert len(boot_ids) == 6 and all(boot_ids), boot_ids
+    assert len(set(boot_ids)) == 6, f"boot_ids not distinct: {boot_ids}"
+
+    def is_boot(f):
+        return 0x701 <= f[1] <= 0x706 and f[2] == bytes([BOOT_UP])
+    boots = wait_frames(cap, is_boot, 6, 2.0)
+    late = [f for f in boots if f[0] - t_start > 2.0]
+    assert sorted(f[1] - 0x700 for f in boots) == list(NODES), boots
+    assert not late, f"boot-up later than 2 s after start: {late}"
+
+
+def test_heartbeat_present_on_the_wire(capture, bank):
+    cap = capture(DEVICE_IF)
+    time.sleep(1.5)
+    frames = cap.stop()
+    for node in NODES:
+        beats = [(t, d) for t, cob, d in frames if cob == 0x700 + node]
+        times = [t for t, _ in beats]
+        gaps = [round((b - a) * 1000, 2) for a, b in zip(times, times[1:])]
+        if gaps:
+            print(f"node {node}: {len(beats)} heartbeats in 1.5 s, interval ms "
+                  f"min {min(gaps)} median {statistics.median(gaps)} max {max(gaps)}")
+        assert len(beats) >= 10, f"node {node}: {len(beats)} heartbeats in 1.5 s"
+        states = {d for _, d in beats}
+        assert states == {bytes([PRE_OPERATIONAL])}, f"node {node}: state bytes {states}"
+
+
+def test_proxy_forwards_both_ways_without_circulation(capture, proxy, peer):
+    host_cap, device_cap = capture(HOST_IF), capture(DEVICE_IF)
+    host, device = peer(HOST_IF), peer(DEVICE_IF)
+    down, up = (0x123, b"\x01\x02\x03"), (0x456, b"\x0a")
+    t_down = host.send(*down)
+    t_up = device.send(*up)
+    seen_down = wait_frames(device_cap, lambda f: (f[1], f[2]) == down, 1, 0.2)
+    seen_up = wait_frames(host_cap, lambda f: (f[1], f[2]) == up, 2, 0.2)
+    time.sleep(0.2)  # Anything circulating would arrive within this.
+    host_frames, device_frames = host_cap.stop(), device_cap.stop()
+
+    def count(frames, frame):
+        return [f[0] for f in frames if (f[1], f[2]) == frame]
+    # Host side: the original down frame once (not echoed back) and the forwarded up frame once.
+    assert len(count(host_frames, down)) == 1, host_frames
+    assert len(count(host_frames, up)) == 1, host_frames
+    assert len(count(device_frames, down)) == 1, device_frames
+    assert len(count(device_frames, up)) == 1, device_frames
+    assert seen_down and seen_down[0][0] - t_down <= 0.2
+    assert seen_up and seen_up[0][0] - t_up <= 0.2
+    exit_record = proxy.stop()
+    assert exit_record["forwarded"] == {"h2d": 1, "d2h": 1}, exit_record
+    assert exit_record["dropped_at_exit"] == 0
+    print(f"proxy cost (ns, measurement): {exit_record['cost_ns']}")
+
+
+def test_capture_stamps_frames_with_the_kernel_receive_time(capture, peer):
+    """Each captured time is the kernel stamp mapped to CLOCK_MONOTONIC: after the send started
+    and before the reader thread saw the frame, in send order."""
+    cap = capture(DEVICE_IF)
+    sender = peer(DEVICE_IF)
+    sent = []
+    for i in range(50):
+        sent.append(sender.send(0x123, bytes([i])))
+        time.sleep(0.002)
+    seen = wait_frames(cap, lambda f: f[1] == 0x123, len(sent), 1.0)
+    t_seen = time.monotonic()
+    frames = cap.stop()
+    if len(seen) != len(sent):
+        inconclusive(f"captured {len(seen)} of {len(sent)} frames")
+    ours = [f for f in frames if f[1] == 0x123]
+    assert [f[2] for f in ours] == [bytes([i]) for i in range(len(sent))], "frames out of order"
+    lags = [round((f[0] - t) * 1e6, 1) for f, t in zip(ours, sent)]
+    print(f"kernel stamp - send time, us: min {min(lags)} median {statistics.median(lags)} "
+          f"max {max(lags)}")
+    assert all(f[0] >= t for f, t in zip(ours, sent)), f"stamp before the send: {lags}"
+    assert all(f[0] <= t_seen for f in ours), "stamp after the frame was read"
+    nxt = sent[1:] + [t_seen]
+    assert all(f[0] < t for f, t in zip(ours, nxt)), f"stamp after the next send: {lags}"
+
+
+def test_proxy_rejects_bad_rules(vcan, tmp_path):
+    rules = tmp_path / "bad.rules"
+    rules.write_text("# drop SYNC\nh2d 0x080/0x7FF drop\nh2d 0x080/0x7FF explode\n")
+    assert BUS_FAULT_PROXY_BIN.exists(), f"NOT_RUN: {BUS_FAULT_PROXY_BIN} not built"
+    result = subprocess.run([str(BUS_FAULT_PROXY_BIN), "--host", HOST_IF, "--device", DEVICE_IF,
+                             "--rules", str(rules), "--trace", str(tmp_path / "t.jsonl")],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2, result
+    assert "line 3" in result.stderr, result.stderr
+    assert not (tmp_path / "t.jsonl").exists(), "a rejected start must not begin a trace"
+
+
+def test_trace_reports_io_counters(start_bank, peer, capture):
+    cap = capture(DEVICE_IF)
+    bank = start_bank()
+    sender = peer(DEVICE_IF)
+    for _ in range(10):
+        sender.send(0x601, sdo_upload(0x1000))
+    for _ in range(3):
+        sender.send(0x602, sdo_upload(0x1017))
+    sender.send(0x601, flags=CAN_RTR_FLAG)  # Received and counted, never dispatched (B11).
+    responses = wait_frames(cap, lambda f: f[1] in (0x581, 0x582), 13, 2.0)
+    if len(responses) != 13:
+        inconclusive(f"expected 13 SDO responses on the wire, saw {len(responses)}")
+    time.sleep(1.1)  # At least one periodic snapshot as well.
+    exit_record = bank.stop()
+    records = bank.trace.records
+    periodic = [r for r in records[:-8] if r["event"] == "io"]
+    assert periodic, "no periodic io snapshot within 1.1 s"
+
+    final = records[-9:-1]  # loop, dispatch x6, io, then exit.
+    assert [r["event"] for r in final] == ["loop"] + ["dispatch"] * 6 + ["io"], final
+    dispatch = {r["node"]: r for r in final if r["event"] == "dispatch"}
+    assert sorted(dispatch) == list(NODES)
+    for node, r in dispatch.items():
+        for key in ("nmt", "heartbeat", "sync", "emcy", "sdo", "pdo", "gated", "foreign",
+                    "malformed"):
+            assert key in r, (node, key, r)
+        assert r["sdo"] == {1: 10, 2: 3}.get(node, 0), (node, r)
+        assert r["trace_overflow"] == 0
+    io = final[-1]
+    assert io["rx"] >= 14, io
+    assert io["rx_rejected"]["rtr"] == 1, io
+    assert io["tx"] >= 6 + 13, io
+    assert io["tx_eagain"] == io["tx_enobufs"] == io["tx_other_error"] == 0, io
+    loop = final[0]
+    assert loop["releases_executed"] > 0 and loop["frames_dispatched"] >= 13, loop
+    print(f"loop counters: {loop}")
+    assert exit_record["signal"] == 15
+
+
+def test_vcan_unavailable_is_not_run(tmp_path):
+    forced = subprocess.run([str(VCAN_UP)], capture_output=True, text=True,
+                            env={**os.environ, "VCAN_UP_FORCE_FAIL": "1"})
+    assert forced.returncode == 3, forced
+    assert forced.stdout.startswith("NOT_RUN: "), forced.stdout
+
+    # Without NET_ADMIN (dropped from the bounding set, so the shell cannot regain it).
+    setpriv = shutil.which("setpriv")
+    assert setpriv, "INCONCLUSIVE: setpriv (util-linux) not found"
+    no_cap = subprocess.run([setpriv, "--inh-caps=-net_admin", "--bounding-set=-net_admin",
+                             str(VCAN_UP)], capture_output=True, text=True)
+    assert no_cap.returncode == 3, no_cap
+    assert no_cap.stdout.startswith("NOT_RUN: "), no_cap.stdout
+
+    # The fixture turns exit 3 into a failure carrying NOT_RUN, never a skip.
+    nested = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "no:launch_testing",
+         "-p", "no:launch_ros", "-q", "-rA",
+         f"{__file__}::test_bank_boots_six_nodes"],
+        capture_output=True, text=True, cwd=ROOT, env={**os.environ, "VCAN_UP_FORCE_FAIL": "1"})
+    assert nested.returncode == 1, nested.stdout[-2000:]
+    assert "NOT_RUN: forced by VCAN_UP_FORCE_FAIL=1" in nested.stdout, nested.stdout[-2000:]
+    # A fixture failure is reported as an error; either way it is red, never skipped.
+    assert re.search(r"\b1 (failed|error)\b", nested.stdout), nested.stdout[-2000:]
+    assert "skipped" not in nested.stdout, nested.stdout[-2000:]
+
+
+def test_proxy_reports_a_dead_interface_without_spinning(proxy):
+    """A socket error (the interface goes down) is read, counted and reported; the proxy exits
+    non-zero with the reason instead of polling the pending error forever."""
+    t_down = time.monotonic()
+    down = subprocess.run(["ip", "link", "set", "dev", DEVICE_IF, "down"], capture_output=True,
+                          text=True)
+    try:
+        assert down.returncode == 0, f"INCONCLUSIVE: cannot take {DEVICE_IF} down: {down.stderr}"
+        rc = proxy.wait_exit(2.0)
+        elapsed = time.monotonic() - t_down
+    finally:
+        up = subprocess.run(["ip", "link", "set", "dev", DEVICE_IF, "up"], capture_output=True,
+                            text=True)
+        assert up.returncode == 0, up.stderr
+    assert rc != 0, "the proxy kept running with its device interface down"
+    records = proxy.trace.records
+    errors = [r for r in records if r["event"] == "error"]
+    assert errors and DEVICE_IF in errors[-1]["reason"], records[-3:]
+    snapshots = [r for r in records if r["event"] == "io"]
+    # One snapshot per second plus the final one: a spinning loop would not change this count, but
+    # the counted receive error shows the error was read, not polled forever.
+    assert len(snapshots) <= 3, f"{len(snapshots)} snapshots in {elapsed:.2f} s"
+    assert snapshots and snapshots[-1]["device"]["rx_error"] >= 1, snapshots[-1:]
+    print(f"proxy ended {elapsed * 1000:.0f} ms after the link went down: {errors[-1]}")
+
+
+def test_killed_bank_is_judged_without_an_exit_record(start_bank):
+    """B7: a process the harness kills with SIGKILL writes no exit record; the harness writes its
+    own `killed` record and the trace is judged on readiness and the records up to the kill."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "start record")
+    killed = bank.kill()
+    assert killed["event"] == "killed" and killed["signal"] == 9, killed
+    assert killed["exit_status"] == -9, killed
+    assert killed["t_mono"] <= time.monotonic()
+    harness = [json.loads(line) for line in bank.harness_path.read_text().splitlines()]
+    assert harness == [killed], harness
+    assert not bank.trace.of("exit"), "a killed process cannot have written an exit record"
+    assert bank.trace.of("start"), "records up to the kill are kept"
+    # Teardown (the traced fixture) must accept this process without an exit record.
+
+
+def test_inject_socket_applies_and_answers(start_bank, capture, inject_client):
+    cap = capture(DEVICE_IF)
+    bank = start_bank(inject=True)
+    client = inject_client(bank)
+    assert client.ask(b"fault 2 1234") == b"ok"
+    emcy = wait_frames(cap, lambda f: f[1] == 0x082 and f[2][:2] == b"\x34\x12", 1, 1.0)
+    assert emcy, "no EMCY 0x082 with error code 0x1234 on the wire"
+    bank.trace.wait_for(lambda r: r.get("event") == "inject" and r["text"] == "ok fault 2 1234",
+                        1, "inject record")
+    reply = client.ask(b"bogus")
+    assert reply.startswith(b"err "), reply
+    bank.trace.wait_for(lambda r: r.get("event") == "inject" and r["text"].startswith("err "),
+                        1, "rejected inject record")
+    exit_record = bank.stop()
+    assert exit_record["inject"] == {"recv_errors": 0, "send_errors": 0, "truncated": 0}
+    assert not bank.inject_path.exists(), "the inject socket file outlived the process"
+
+
+def test_inject_truncated_datagram_is_rejected(start_bank, capture, inject_client):
+    """A datagram longer than the command buffer is rejected and counted, never applied cut."""
+    cap = capture(DEVICE_IF)
+    bank = start_bank(inject=True)
+    client = inject_client(bank)
+    # Cut to 128 bytes and stripped of its newlines, this would be a valid command.
+    command = b"fault 3 4321" + b"\n" * 288
+    reply = client.ask(command)
+    assert reply.startswith(b"err ") and b"truncated" in reply, reply
+    time.sleep(0.2)
+    assert not [f for f in cap.frames if f[1] == 0x083], "the cut command was applied"
+    record = bank.trace.wait_for(lambda r: r.get("event") == "inject_io", 1, "inject_io record")
+    assert record["kind"] == "truncated" and record["value"] == len(command), record
+    exit_record = bank.stop()
+    assert exit_record["inject"]["truncated"] == 1, exit_record
+    assert not bank.trace.of("inject"), "a truncated datagram must not reach the bank"
+
+
+# A libc call that fails on request, interposed with LD_PRELOAD: the only way to reach the bank's
+# startup failure paths from outside the process.
+FAILING_CALLS = {
+    "signalfd": "#include <errno.h>\n#include <sys/signalfd.h>\n"
+                "int signalfd(int fd, const sigset_t* m, int f) { (void)fd; (void)m; (void)f; "
+                "errno = EMFILE; return -1; }\n",
+    "timerfd_settime": "#include <errno.h>\n#include <sys/timerfd.h>\n"
+                       "int timerfd_settime(int fd, int f, const struct itimerspec* n, "
+                       "struct itimerspec* o) { (void)fd; (void)f; (void)n; (void)o; "
+                       "errno = EINVAL; return -1; }\n",
+}
+
+
+@pytest.mark.parametrize("call", sorted(FAILING_CALLS))
+def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path, call):
+    """A failing signalfd leaves no trace file and no inject socket; a failing timerfd_settime
+    (after both exist) ends with exit 1, the final snapshots, an `exit` record and the inject
+    socket file removed."""
+    assert VDRIVE_BANK_BIN.exists(), f"NOT_RUN: {VDRIVE_BANK_BIN} not built"
+    cc = shutil.which("cc")
+    assert cc is not None, "NOT_RUN: no C compiler for the LD_PRELOAD shim"
+    source = tmp_path / "fail.c"
+    source.write_text(FAILING_CALLS[call])
+    shim = tmp_path / "fail.so"
+    build = subprocess.run([cc, "-shared", "-fPIC", "-o", str(shim), str(source)],
+                           capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr
+    trace, sock = tmp_path / "bank.jsonl", tmp_path / "bank.sock"
+    env = dict(os.environ, LD_PRELOAD=str(shim))
+    result = subprocess.run([str(VDRIVE_BANK_BIN), "--if", DEVICE_IF, "--trace", str(trace),
+                             "--inject", str(sock)], env=env, capture_output=True, text=True,
+                            timeout=5)
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    assert call.split("_")[0] in result.stderr, result.stderr
+    assert not sock.exists(), "the inject socket file outlived the process"
+    if call == "signalfd":
+        assert not trace.exists(), "a trace was opened before the failure"
+        return
+    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert records and records[-1]["event"] == "exit", records[-3:]
+    assert records[-1]["trace_overflow"] == 0, records[-1]
+    assert any(r["event"] == "start" for r in records), "no start record"

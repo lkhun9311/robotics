@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# dcfgen (dcf-tools 2.3.5) input for the Lely peer: master plus six drives on one bus.
+# Generate with `dcfgen -r -d DIR config/interop/bus.yml` from the repository root (-r: remote
+# PDO mappings 0x5800-0x5FFF). Calibrated against liblely-coapp 2.3.5 by
+# tools/interop/test_peer_config.py; each option below changed one observed behaviour.
+options:
+  # Consumer time = the slave's 0x1017 (100 ms, read from the EDS) x 2.5 = 250 ms in 0x1016.
+  # dcfgen's default multiplier 3.0 gave 300 ms.
+  heartbeat_multiplier: 2.5
+
+master:
+  node_id: 127
+  # 0x1F80 bit 3 set: the master does not start slaves after booting them. Without it Lely sent
+  # NMT Start (0x01) to each of nodes 1-6 about 0.1 s after the startup reset.
+  start_nodes: false
+  # SYNC producer every 10 ms (0x1006, microseconds). Without it no SYNC was produced.
+  sync_period: 10000
+  # Finite boot time (0x1F89, ms) for the mandatory slaves.
+  boot_time: 2000
+
+# Every drive: no configuration write (no heartbeat_producer, no PDO or sdo entries, so no
+# concise DCF and no 0x1F22 entry). boot stays true: the 'boot slave' process only uploads
+# 0x1000 to compare it with 0x1F84; with boot: false it uploaded nothing. reset_communication
+# stays true: false (0x1F81 bit 4) made Lely send Reset Communication to every node-ID 1-126
+# one by one instead of the single broadcast, nodes 1-6 included.
+.drive: &drive
+  dcf: "config/od/vdrive_arm.eds"
+  mandatory: true
+
+drive_1: {<<: *drive, node_id: 1}
+drive_2: {<<: *drive, node_id: 2}
+drive_3: {<<: *drive, node_id: 3}
+drive_4: {<<: *drive, node_id: 4}
+drive_5: {<<: *drive, node_id: 5}
+drive_6: {<<: *drive, node_id: 6}

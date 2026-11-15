@@ -24,8 +24,26 @@ jobs:
             --build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE" \
             --build-arg ROS_SNAPSHOT="$ROS_SNAPSHOT" \
             --build-arg MENAGERIE_COMMIT="$MENAGERIE_COMMIT" -t robotics-dev:ci -f docker/Dockerfile .
+      - name: vcan preflight
+        # Loads vcan on the runner (the container cannot) and writes OK or NOT_RUN: <reason>; a
+        # NOT_RUN fails the job here, after the status is uploaded by the next step.
+        run: tools/ci/vcan_preflight.sh artifacts/preflight/vcan-status.txt
+      - name: Keep the vcan preflight status
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vcan-preflight-status
+          path: artifacts/preflight/vcan-status.txt
+          if-no-files-found: error
+      - name: Fit the memory layout to ThreadSanitizer
+        # GCC 13's TSan runtime cannot place its shadow memory when mmap is randomized with more
+        # than 28 bits; the TSan stage fails loudly ("unexpected memory mapping") if this is missing.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: Run checks
-        run: docker run --rm --init -v "$PWD:/ws" -w /ws robotics-dev:ci tools/ci/run_checks.sh
+        # NET_ADMIN: the vcan stage creates vcan_host and vcan_device in the container's namespace.
+        run: >-
+          docker run --rm --init --cap-add NET_ADMIN -v "$PWD:/ws" -w /ws robotics-dev:ci
+          tools/ci/run_checks.sh
       - name: Build and smoke-run the runtime image
         # Built on the dev image checked above (BUILD_FROM), so the model is not fetched again.
         # The dev stage's build args are left out on purpose: a build that ran that stage anyway
@@ -52,23 +70,6 @@ jobs:
             artifacts/
             build/release/*/Testing/
             build/asan/*/Testing/
+            build/tsan/*/Testing/
           if-no-files-found: warn
 
-  probe-vcan:
-    # Records whether hosted runners allow vcan (spec §13). Not gating: the result is a
-    # status file that says OK or NOT_RUN with the reason, never a silent green.
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Probe vcan
-        run: |
-          set +e
-          out=$( { sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && \
-                   sudo ip link set up vcan0 && ip -details link show vcan0; } 2>&1 )
-          rc=$?
-          if [ $rc -eq 0 ]; then echo "OK" > vcan-status.txt; else echo "NOT_RUN rc=$rc" > vcan-status.txt; fi
-          echo "$out" >> vcan-status.txt
-          cat vcan-status.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: vcan-status
-          path: vcan-status.txt

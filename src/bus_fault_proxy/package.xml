@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>bus_fault_proxy</name>
+  <version>0.1.0</version>
+  <description>Fault-injection proxy core for the CAN bus between host and device: a rule parser and a logic-time engine for delay, drop, duplicate, corrupt and reorder faults.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <depend>socketcan_io</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

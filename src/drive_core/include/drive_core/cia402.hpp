@@ -52,8 +52,9 @@ class Cia402 {
   bool quick_stop(QuickStopReason reason);
 
   // Fault occurrence (transition 13): any state but Fault Reaction Active and Fault -> Fault
-  // Reaction Active. A fault while one is already being handled keeps the first code.
-  void drive_fault(std::uint16_t error_code);
+  // Reaction Active. A fault while one is already being handled keeps the first code and changes
+  // nothing. Returns whether the transition happened.
+  bool drive_fault(std::uint16_t error_code);
   // Transition 14: Fault Reaction Active -> Fault once the reaction (ramp or none) is done.
   void fault_reaction_done();
   // Loss of drive authority (D11 torque loss): Fault at once from any state (13 and 14 with no

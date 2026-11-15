@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>vdrive_bank</name>
+  <version>0.1.0</version>
+  <description>Six virtual CiA 402 drives behind one CAN interface: COB-ID routing, heartbeat and EMCY producers, fault injection, in logic time.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <depend>drive_core</depend>
+  <depend>socketcan_io</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

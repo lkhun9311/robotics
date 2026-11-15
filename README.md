@@ -8,20 +8,20 @@ A simulation-based robot system runtime, built in stages.
   ROS-free C++ core of command and permit contracts, checked by an independent judge in
   logic time, and the UR5e in MuJoCo under the stock JointTrajectoryController (no permit or
   generation guarantee).
-- **In progress (E3):** E3a, the CANopen wire contract and a ROS-free drive core, is done (see
-  below).
-- **Planned (E3b onward):** a C++ hardware abstraction layer, a partial CANopen / CiA 402
-  stack over virtual CAN, fault injection and real-time loop measurement, on ros2_control
-  and MuJoCo.
+- **In progress (E3):** E3a, the CANopen wire contract and a ROS-free drive core, is done.
+  E3b puts six of those drives on virtual CAN as a process, adds a bus fault proxy, and checks
+  them against an independent CANopen master (Lely) (see below).
+- **Planned (E3c onward):** a second independent stack (CANopenNode), a C++ hardware
+  abstraction layer on ros2_control and MuJoCo, and real-time loop measurement.
 
 ## Status
 
 | Stage | State |
 |---|---|
-| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, and the MuJoCo plugin and Menagerie model done; CANopen peers, supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
+| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, the MuJoCo plugin and Menagerie model, and the Lely CANopen peer in the dev image done; the CANopenNode peer (E3c), supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
 | E1 command and permit contracts, independent judge | done |
 | E2 official plugin baseline | done: stock JTC baseline; no permit/generation guarantee |
-| E3 | in progress: E3a wire contract and drive core done; E3b-E3d planned |
+| E3 | in progress: E3a wire contract and drive core done; E3b bus processes, fault proxy and Lely interop done; E3c-E3d planned |
 
 ## E2 baseline
 
@@ -40,6 +40,8 @@ The simulation checks (`tools/sim_checks`) show that:
 - the joints, actuators and controller joints map to each other by name;
 - the arm starts at the home pose;
 - a normal goal is accepted and reached within 0.05 rad at its end;
+- a pick-and-place-shaped goal reaches each of its five waypoints within 0.05 rad (see
+  [E2 evidence](#e2-evidence));
 - out-of-range goals behave as measured below.
 
 Out-of-range behaviour, measured with the stock JointTrajectoryController 4.42.1 on the MuJoCo UR5e:
@@ -57,6 +59,45 @@ Pinned versions: ROS snapshot 2026-10-05, `mujoco_ros2_control` 0.1.2,
 `370c43965323c0944b433b202aac5058b5f907a9` (files verified by SHA-256).
 
 This path uses the stock JointTrajectoryController. It accepts goals on its own action and topic interfaces, and nothing outside it can prove which goal produced a given output, so E2 claims no permit or generation guarantee. Those claims start with the project's own controller in E3.
+
+### E2 evidence
+
+![Replay render of the recorded joint trajectory of the pick-and-place-shaped demo](docs/media/e2-pick-place-replay-render-of-the-recorded-joint-trajectory.gif)
+
+A replay render of the recorded joint trajectory: the arm moves as MuJoCo reported it under the
+plugin, and the red ball is not grasped (there is no grasp physics; the render draws it at the
+tool only while it is carried, and on the table before and after). The goal is one
+FollowJointTrajectory goal through five waypoints, approach, pick, lift, place approach and place,
+with a dwell at each, followed by a retreat to HOME
+([MP4](docs/media/e2-pick-place-replay-render-of-the-recorded-joint-trajectory.mp4)).
+
+How it is made: `mujoco_ros2_control` 0.1.2 offers no runtime weld or mocap control (its services
+are `reset_world`, `set_free_joint_state`, `set_pause` and `step_simulation`, and the scene has no
+free body), so the live run has no object. `record_motion.py --demo pick_place` records the
+MuJoCo joint positions from `/mujoco_actuators_states` of the live run and refuses a recording that
+fails the check's conditions; `tools/evidence/pick_place_replay.py` sets them, frame by frame, on
+the same installed scene with the MuJoCo 3.12.0 Python bindings (the version the plugin links) and
+adds the ball kinematically. The floor plane the arm stands on (z = 0) is the table.
+
+![Site height during the pick-and-place-shaped demo](docs/media/e2-pick-place-height.svg)
+
+The simulation check `test_pick_place_trajectory_reaches_each_waypoint` sends the same goal and
+judges the 500 Hz MuJoCo joint positions: every waypoint is reached within 0.05 rad during its
+dwell; by the `attachment_site` height from MuJoCo's own kinematics, the site comes low enough at
+PICK and PLACE for the ball to be within 0.02 m of the table, the ball never goes more than 0.01 m
+into the table from PICK until its release at the lowest point of the PLACE dwell, and the site stays above 0.20 m from LIFT to PLACE_APPROACH. From the
+committed recording (100 Hz):
+
+    python3 tools/evidence/pick_place_replay.py           # prints the values, redraws the SVG
+    python3 tools/evidence/pick_place_replay.py --video   # also renders the MP4 and the GIF
+
+the largest joint error at its best point in each dwell was 0.0081 to 0.0122 rad; the lowest site
+point from PICK to the release was 0.0870 m, which puts the ball's lowest point 0.0020 m above the
+table; from LIFT to PLACE_APPROACH the site stayed at or above 0.2436 m. The script prints the command that
+records the trajectory again. The generic pytest stage checks that the recording is of the current
+waypoints and passes the check's conditions, that the plot draws MuJoCo's site height for every
+sample, that the ball rests, rides only between the two dwells and rests again, and that the GIF
+fits in 3 MB; the MP4 and GIF are encoder output and are not compared byte for byte.
 
 ## What E1 proves today (logic time, no robot, no ROS)
 
@@ -149,13 +190,10 @@ Measured and computed:
   (`TotalTravelWithinBoundAcrossPhases` in `src/drive_core/test/test_drive_loop.cpp`, which pins
   the value): maximum 0.097 rad, the lease interval (24 ticks at v_max, 0.048 rad) plus the
   braking ramp from v_max (0.049 rad), against an allowance of 0.100 rad (lease 48 ms at v_max
-  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values.
-- Bandwidth (`python3 tools/od/bandwidth.py config/od/vdrive_arm.eds`): per 10 ms bus cycle
-  1 SYNC + 6 x (2 RPDO + 3 TPDO) = 31 frames; RPDO3 is event-driven and not counted. At the
-  worst-case 135 bits per 8-byte frame (47 + 8n + floor((34 + 8n - 1)/4) with stuffing) the
-  cyclic load is 4185 bits per cycle, 41.85 % of 1 Mbit/s (41.05 % with the real DLC of SYNC).
-  With 6 heartbeats per 100 ms and one SDO request and response per cycle it is 44.94 %. This
-  is a computed bound: vcan does not show physical arbitration delay.
+  1 rad/s, a_stop 10 rad/s^2). These values are project-declared, not industry values. All 20
+  phases are drawn under [E3a evidence](#e3a-evidence).
+- Bandwidth: the bus-load table under [E3a evidence](#e3a-evidence), computed from the EDS. It is
+  a computed bound: vcan does not show physical arbitration delay.
 
 Residual risks and deviations:
 
@@ -216,6 +254,273 @@ Decision index (the `D<n>` references in code comments):
 | D17 | Commit transaction: attempt_id, staged values, then a CRC-32 commit; idempotent repeat; 0x2016 confirms which attempt holds the tag |
 | D18 | SYNC on 0x80, EMCY on 0x80 + node-ID, read from the EDS |
 
+### E3a evidence
+
+![Total travel against the validity-deadline phase](docs/media/e3a-total-travel.svg)
+
+Total travel of the last command from its send to rest, for each of the 20 phases of the validity
+deadline inside one W tick, in logic time. The command reaches the drive 20 ms late, so the expiry
+guard, not the command timeout, stops the joint. Nineteen phases travel 0.097 rad; the phase whose
+deadline falls exactly on a tick travels 0.095 rad; all stay under the 0.100 rad allowance. The
+values are the dump of the gtest that pins the maximum, written with:
+
+    docker compose run --rm -T dev bash -c 'DRIVE_CORE_TRAVEL_DUMP=docs/media/e3a-total-travel.json build/release/drive_core/drive_core_tests --gtest_filter=Stop.TotalTravelWithinBoundAcrossPhases'
+    python3 tools/evidence/travel_phases.py   # redraws the SVG from the dump
+
+The generic pytest stage runs that gtest again and requires the committed dump to be byte for byte
+what it writes now, and checks that the SVG plots every phase of the dump and is fresh (as the E3b
+images are).
+
+The bus load, rendered from `python3 tools/od/bandwidth.py config/od/vdrive_arm.eds` by
+`python3 tools/evidence/bandwidth_table.py --write-readme`; a test requires this table to be
+exactly what the script prints:
+
+<!-- bandwidth table: python3 tools/evidence/bandwidth_table.py --write-readme -->
+| Bus load (computed bound) | Value |
+|---|---|
+| Cyclic frames per bus cycle | 31 per 10 ms: 1 SYNC + 6 x (2 RPDO + 3 TPDO); RPDO3 is event-driven and not counted |
+| Worst-case bits of an 8-byte frame | 135, from `bits(n) = 47 + 8*n + floor((34 + 8*n - 1)/4)` (with stuffing) |
+| Cyclic load, every frame charged 8 bytes | 4185 bits per cycle, 41.85 % of 1 Mbit/s |
+| Cyclic load, real DLC (SYNC carries none) | 4105 bits per cycle, 41.05 % |
+| Plus 6 heartbeats per 100 ms and one SDO request and response per cycle | 4494 bits per cycle, 44.94 % (55.06 % free) |
+<!-- end of bandwidth table -->
+
+## E3b bus processes and Lely interop
+
+E3b runs the E3a drive as real processes on Linux virtual CAN and checks the standard part of
+the wire against an independent CANopen master, Lely 2.3.5. The drive extension (tags, leases,
+the commit) is used only to make PDO traffic happen; the interop verdicts read only standard
+observables.
+
+### Processes and topology
+
+    lely_peer --- vcan_host --- bus_fault_proxy --- vcan_device --- vdrive_bank
+    (Lely master,               (forwards both ways,               (six drives,
+     node 127)                   applies fault rules)               nodes 1-6)
+
+- `vdrive_bank` (`src/vdrive_bank`): six `drive_core` drives (node IDs 1-6) in one process on
+  one CAN socket. One control thread waits on a 2 ms timerfd release (W), the CAN socket and an
+  optional injection socket. A release that passes without a tick is skipped and counted, never
+  caught up; three skipped in a row inject 0x6100 (internal software error) into all six drives.
+  It produces the heartbeat (100 ms, 0x1017) and EMCY that `drive_core` does not. Faults are
+  injected through a separate UNIX datagram socket (`--inject PATH`: `fault`, `torque_loss`,
+  `stuck`, `hb_mute`), never from CAN. A writer thread writes the trace (JSON lines); the control
+  thread only enqueues fixed-size records. One process is one failure domain: killing it is a
+  six-node common failure.
+- `bus_fault_proxy` (`src/bus_fault_proxy`): one socket per interface, own frames never read
+  back, so a frame read on `vcan_host` is only written to `vcan_device` and the reverse. With no
+  rules it only forwards and measures its own cost (below).
+- `lely_peer` (`src/lely_peer`, dev image only): Lely `AsyncMaster` with one `FiberDriver` per
+  slave. Its DCF is generated by Lely `dcfgen -r` from `config/interop/bus.yml`, and the slave
+  description is our EDS. It prints what Lely decodes (state, boot, heartbeat, EMCY, SDO
+  results, TPDO values) as JSON lines. It is configured not to start nodes, not to write any
+  object at boot, and to produce SYNC every 10 ms; it consumes heartbeats with a 250 ms timeout.
+- `socketcan_io` (`src/socketcan_io`): the raw CAN socket shared by the two processes. RTR,
+  error and CAN FD frames are received, counted and never handed to the codec.
+
+### Running the vcan stage
+
+The vcan tests need the `vcan` kernel module on the host and `NET_ADMIN` in the container.
+`tools/ci/run_checks.sh` runs them as its vcan stage, after the build:
+
+    docker compose build dev
+    docker compose run --rm -T dev tools/ci/run_checks.sh
+
+To run only the vcan stage once the workspace is built:
+
+    docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && source install/release/setup.bash && python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q -rP tools/interop'
+
+In compose, the `robot` service owns the network namespace with `vcan_host` and `vcan_device`
+(it runs `tools/bus/vcan_up.sh` and stays up), and `dev` and the on-demand `peer` service
+(`docker compose --profile peer run --rm peer <command>`) join it. `tools/bus/topology_smoke.sh`
+proves on the host that a frame sent in `dev` arrives in `robot`.
+
+`NOT_RUN`: when the links cannot be made (no vcan module, no `NET_ADMIN`), `vcan_up.sh` prints
+`NOT_RUN: <reason>` and exits 3. The vcan stage then writes the reason to
+`artifacts/vcan-status.txt` and fails; a vcan test that cannot run is never a skip. CI checks
+the host first (`tools/ci/vcan_preflight.sh`) and uploads that status too. To see the path on
+purpose:
+
+    docker compose run --rm -T -e VCAN_UP_FORCE_FAIL=1 dev tools/bus/vcan_up.sh   # NOT_RUN: forced by VCAN_UP_FORCE_FAIL=1, exit 3
+
+### Interop matrix and proxy fault rows
+
+CI run [43657566327](https://github.com/lkhun9311/robotics/actions/runs/43657566327)
+(pull request #23 on `feat/e3b-bus-processes` at `50367b0`) passed, 124 vcan tests. The table
+is generated from that run's `pytest-vcan.xml` artifact, not from a committed file:
+
+    gh run download 43657566327 -n checks-artifacts -D ci-43657566327
+    python3 tools/evidence/matrix_table.py ci-43657566327/artifacts/pytest-vcan.xml
+
+| Row | What | Test | Result |
+|---|---|---|---|
+| M1 | NMT states and service gating | `test_matrix.py::test_nmt_states_and_service_gating` | PASS |
+| M2 | boot-up and heartbeat | `test_matrix.py::test_first_heartbeat_missing_vs_running_timeout` | PASS |
+| M3 | SDO expedited transfers and aborts | `test_matrix.py::test_sdo_expedited_and_aborts` | PASS |
+| M4 | PDO bytes and DLC | `test_matrix.py::test_pdo_bytes_and_lengths_seen_by_peer` | PASS |
+| M5 | SYNC application and sampling order | `test_matrix.py::test_sync_application_and_sampling_order` | PASS |
+| M6 | EMCY production and reception | `test_matrix.py::test_emcy_production_and_reception` | PASS |
+| F1 | all RPDO2 delayed 60 ms | `test_proxy_faults.py::test_all_late_rpdo2_times_out_to_quick_stop` | PASS |
+| F7 | every fourth RPDO2 delayed 60 ms | `test_proxy_faults.py::test_late_rpdo2_is_dropped_not_valid` | PASS |
+| F2 | every third RPDO1 dropped | `test_proxy_faults.py::test_drop_every_third_rpdo1_is_an_ordinary_gap` | PASS |
+| F3 | RPDO1 and RPDO2 duplicated | `test_proxy_faults.py::test_duplicate_fragments_change_nothing` | PASS |
+| F4 | RPDO1 and RPDO2 reordered | `test_proxy_faults.py::test_reorder_within_window_still_pairs` | PASS |
+| F5 | conflicting RPDO1 copy | `test_proxy_faults.py::test_conflicting_copy_is_an_integrity_stop` | PASS |
+| F6 | TPDO1 dropped toward the master | `test_proxy_faults.py::test_d2h_drop_hides_feedback_not_drive_state` | PASS |
+| R1 | bank restart, old-tag replay | `test_proxy_faults.py::test_restart_rejects_captured_old_tag_frames` | PASS |
+
+How a row is judged: each test captures both interfaces with `AF_CAN` sockets (what Lely saw
+on `vcan_host`, what the drives saw on `vcan_device`), each frame stamped with its kernel
+receive time (`SO_TIMESTAMPNS`, mapped to `CLOCK_MONOTONIC`), and reads Lely's own decoded
+events, the bank trace and the proxy's exit record. Expectations come from CiA 301 tables written from the
+standard (`tools/interop/cia301.py`), the independent wire encoder (`tools/od/wire.py`) and the
+EDS defaults, never from the C++ under test. Every row asserts its preconditions first (processes
+ready, traces complete with no overflow, proxy rule match counts exact, the declared commands on
+the wire); a missing one fails as `INCONCLUSIVE`, never passes. A matrix row needs both the wire
+observation and Lely's decoded event.
+
+One passing observation of each row is committed (`tools/interop/recorded/*.json.gz`) and judged
+again without vcan, together with deliberately broken copies that must FAIL or be INCONCLUSIVE.
+The numbers below come from those recordings; this prints every verdict with its notes:
+
+    python3 tools/evidence/rejudge.py            # or one row: python3 tools/evidence/rejudge.py f7
+
+The vcan stage also writes every observation it judges, passed or failed, to `artifacts/interop`,
+which CI uploads in `checks-artifacts`; a CI failure is judged again from there with
+`python3 tools/evidence/rejudge.py --dir ci-<run>/artifacts/interop f2`.
+
+What each row shows, and what it does not:
+
+| Row | Shows (from `rejudge.py`) | Does not show |
+|---|---|---|
+| M1 | Node 3 through Start, Stop, Pre-operational, Reset Communication, Reset Node: the heartbeat byte on the wire and Lely's state agree after each; boot-up after both resets; no SDO answer and no TPDO in Stopped; SDO but no TPDO in Pre-operational; TPDO1-3 after every SYNC in Operational | Other nodes than 3; how fast a command takes effect (only order and presence are judged) |
+| M2 | A node whose first heartbeat never comes: Lely's boot reports `K` for node 2 only and nothing restarts it; a running heartbeat that stops: Lely reports the timeout 0.196 s after the mute (bound 1 s from the mute; 0.250 s after the last heartbeat); the bank killed: Lely reports all six | Heartbeat-consumer timing accuracy (the bound is broad on purpose); the loss of one node alone by a crash, since six nodes share one process |
+| M3 | Uploads of 0x1000, 0x1017, 0x1018:01 equal the EDS defaults; a download of 0x6060 = 8 completes with CiA 301 expedited bytes; five aborts (0x06020000, 0x06010002 twice, 0x06090030, 0x06070010) on the wire and in Lely | A mutation (the closed profile has no multi-valued standard writable object); segmented or block transfers |
+| M4 | 69 frames of each TPDO1-3, DLC 8, each byte-equal to `wire.py` encoding the values Lely decoded; Lely's RPDO1/2 (DLC 8) and RPDO3 (DLC 2) equal `wire.py`; a DLC 7 RPDO1 raises `malformed` by one and actuates nothing, while a well-formed control pair does actuate | That the EDS itself is right: Lely and our slave both read our EDS, so a shared misreading passes |
+| M5 | Over 48 commands, RPDO1/2 of seq k between SYNC j and j+1 first appear as TPDO2 `applied_seq` = k after SYNC j+1, never after SYNC j; `sample_seq` +1 per SYNC | CAN arbitration timing (vcan has none); more than one streamed node |
+| M6 | An injected fault 0x8611 gives EMCY `1186010000000000` (register 0x01) on the wire and in Lely, and 0x1001 = 0x01; a second fault while in Fault gives no EMCY; Fault Reset gives the error-reset EMCY; in Stopped the EMCY is suppressed (traced) | Error codes other than the two injected; any meaning in the five manufacturer bytes |
+| F1 | Every RPDO2 held 60 ms: no pair completes, the command timeout stops the drive (statusword 0x0217 Quick Stop Active, policy latch set), nothing actuated; of the 69 delayed RPDO2, the 62 that reach the drive before the bus's last SYNC are each one other-tag drop at the SYNC that closes their interval, and the 7 after it (Lely's repeats of seq 60) are named as trailing, since no SYNC closes them | The not-valid drop at receipt: with every RPDO2 late the stop comes first and revokes the tag, and the drive classifies a fragment's tag before its deadline (D8), so none reaches the drive with its tag current (F7 covers that path) |
+| F7 | Every fourth RPDO2 held 60 ms: 15 delayed, 14 reached the drive with the tag current and were dropped not valid, none of those seqs actuated, the other 45 all actuated, no stop while streaming. Streamed with `valid_until` = now + 48 ms (the lease), so each 20 ms gap is 8 ms inside the previous command's validity and 10 ms inside the command timeout | Other delay values; seq 59's late RPDO2 arrived after the drive's end-of-stream stop and is named as a trailing exception; the gap at the peer's default 40 ms validity (next paragraph) |
+| F2 | Every third RPDO1 lost (seqs 1, 4, 7, ... in this recording): 20 missing-half drops, no integrity violation, the other 40 seqs actuated, no stop while streaming. Streamed with `valid_until` = now + 48 ms, so the previous command outlasts each lost update by 8 ms | Loss of RPDO2 or of both halves; the gap at the peer's default 40 ms validity (next paragraph) |
+| F3 | Both fragments duplicated: every copy received and dispatched (`pdo` 311), the actuated set equals the no-rule run's | A duplicate counter: `drive_core` has none, so the row counts dispatches and compares outcomes |
+| F4 | RPDO1 released behind RPDO2 inside one SYNC window: all 60 seqs still pair and actuate | Reordering across a SYNC |
+| F5 | One RPDO1 forwarded, then a copy with one target bit flipped: integrity violation at the copy, quick stop `integrity`, latch and integrity flags set (0x0005), nothing after seq 26 actuated | Which frame the rule hits is timing-dependent; if it hits no stream frame the row is INCONCLUSIVE, not PASS |
+| F6 | Every TPDO1 dropped toward the master: Lely decodes none, the drive actuates every seq | How a master should react to missing feedback (the peer reads the statusword by SDO instead) |
+| R1 | The bank killed and restarted with new boot IDs and a new tag; 44 captured old-tag RPDO1/2 replayed: each dropped as other tag, nothing actuated; a live new-tag control frame proves the new tag was current; a new stream then actuates 10 | Replay while the drive is in Operation Enabled (it is in Switched On, where the command-timeout and SYNC-loss guards do not run); a tag collision across the restart (the branch exists, never triggered) |
+
+The drive's policy latch and integrity bits (F1, F5) are read by one SDO upload of 0x2030:05 on
+`vcan_host` after each stream, a standard-part observable.
+
+Why F2 and F7 stream with a 48 ms validity: `pdo_stream` writes a command at one SYNC, Lely
+sends it at the next and the drive actuates it at the one after, 20 ms after the write. After one
+lost update the next command is actuated 40 ms after the previous write, so with the peer's
+default `valid_until` = now + 40 ms the previous command expires at that same instant. Whether the
+drive then stops with `expiry` depends on whether a W tick is handled before that SYNC; on a loaded
+runner it sometimes is. PR CI run 43652867358 failed F2 with that pattern (nothing actuated after
+the third gap; its bank trace was not kept, so the stop reason there is inferred); pinned to two
+loaded CPUs locally, F2 failed 1 of 10 runs and F7 2 of 10, each an `expiry` stop 0.3 to 0.9 ms
+after the deadline. That stop is correct drive behaviour, not an ordinary gap, so both rows use the
+48 ms lease, and their judges are INCONCLUSIVE for a stream valid for less than 46 ms. Which seqs a
+rule hits depends on how many frames of its identifier Lely sent during the commit, so seq 1 can
+be lost too; the drive's guards count from its entry into Operation Enabled, so the peer enables
+operation after the second update, not the first, and a lost seq 1 leaves the first actuation
+10 ms inside the 30 ms command timeout instead of on it (the judges also require that order).
+
+### Proxy rules
+
+`bus_fault_proxy --host IF --device IF [--rules FILE] --trace PATH`. One rule per line, first
+matching rule wins, no match forwards:
+
+    <dir> <id>/<mask> [every <N> [offset <K>]] [window <from_ms> <to_ms>] <action> [args]
+
+- `dir`: `h2d` (master to drives) or `d2h`. A frame matches when `(cob_id & mask) == (id & mask)`.
+- `every N offset K`: keep the n-th match (0-based, per rule) with `n mod N == K`.
+  `window`: frames received in `[from, to)` ms after the proxy started. Both apply to every
+  action.
+- Actions: `delay <ms>` (at most 80, below the drive's 100 ms boot quarantine), `drop`, `dup`,
+  `dup_corrupt <byte> <xor>` (forward, then a copy with one byte XORed), `corrupt <byte> <xor>`,
+  `reorder` (hold one frame, release it behind the next match of the same direction; flush
+  after 20 ms).
+- The parser rejects unknown words, a delay over 80, a byte over 7, `to <= from`, `K >= N` and
+  `N = 0`, naming the line. The fault rows' files are in `config/interop/faults`.
+
+### Proxy cost
+
+![bus_fault_proxy normal-path cost](docs/media/e3b-proxy-cost.svg)
+
+Per forwarded frame on the normal path (nothing held, no rule acting): `CLOCK_MONOTONIC` right
+after `recvmsg` returns to right after `write` returns. On host `genesis` at commit `649562b`,
+over 5359 frames: p50 1.41 µs, p99 5.44 µs, max 12.79 µs. This is a measurement on one host,
+not a bound, and the tail moves between runs: the same test on the CI runner of run 43651578195
+(`feat/e3b-bus-processes` at `4ddaa5b`) measured p50 5.89 µs, p99 16.28 µs, max 72.53 µs over
+5359 frames. PR CI asserts only the sample size (at least 5000) and the order
+p50 <= p99 <= max.
+
+    grep -E '"(count|p50|p99|max|host|commit)"' docs/media/e3b-proxy-cost.json
+    gh run download 43651578195 -n checks-artifacts -D ci-43651578195 && grep -E '"(count|p50|p99|max)"' ci-43651578195/artifacts/proxy-cost.json
+    python3 tools/evidence/proxy_cost_histogram.py   # redraws the SVG; prints how to measure again
+
+### One SYNC cycle on the wire
+
+[docs/media/e3b-frame-trace.txt](docs/media/e3b-frame-trace.txt) lists every frame of one
+`pdo_stream` cycle on `vcan_device` from the M5 recording, decoded through `wire.py` and
+annotated: SYNC j, RPDO1/RPDO2 of seq 21 for node 3, SYNC j+1 with the bank's actuation record,
+then TPDO1-3 whose `applied_seq` moves from 20 to 21. It also shows Lely's zero RPDOs for the
+nodes it does not stream. Regenerate it with `python3 tools/evidence/frame_trace.py`.
+
+### Two fault rows over time
+
+![F1 and F7 timelines](docs/media/e3b-fault-timeline.svg)
+
+From the F1 and F7 recordings (`python3 tools/evidence/fault_timeline.py`). Top, F1: the held
+RPDO2s never complete a pair, the lone RPDO1s are dropped as missing halves, the command timeout
+stops the drive, and the late RPDO2s arrive after the stop and are dropped as other tag. Bottom,
+F7: a held RPDO2 reaches the drive past its deadline while the tag is current and is dropped not
+valid; its seq is never actuated and the stream continues. Every image and the frame trace are
+generated by the scripts in `tools/evidence` from committed inputs. The generic pytest stage
+checks what each image plots against its input (every drive record of the window, the held
+RPDO2s, the histogram bins and the p50/p99/max markers), and that the committed file is fresh:
+the SVG records the matplotlib and font versions that drew it, and when they differ from the dev
+image's, the check asks for a regeneration instead of comparing bytes.
+
+### Residual risks and deviations
+
+1. Lely and our slave share no code, but both read our EDS: a misreading of the EDS that both
+   share passes M4.
+2. One independent master stack so far (Lely); CANopenNode is E3c.
+3. vcan has no arbitration, bit timing or bus load (spec §7.3); orderings and liveness hold on
+   vcan, CAN timing is not shown.
+4. One bank process is one failure domain for six nodes (M2 phase C).
+5. The drive extension (tags, leases, commit) is checked only against our own drive, never by
+   Lely.
+6. Lely 2.3.5 sends one NMT reset communication (`82 00`, broadcast) at master start. Its
+   `reset_communication: false` option does not remove it but sends Reset Communication to
+   each node-ID one by one instead (seen while calibrating the peer and recorded in
+   `config/interop/bus.yml`; no test reproduces it), so the broadcast is accepted and asserted
+   to be the only NMT command no scenario asked for (B15).
+7. Lely 2.3.5's `FiberDriver::Wait` on an SDO future crashed (SIGSEGV) on the first SDO
+   abort; the peer uses Lely's confirmation callbacks instead and polls for them in the fiber.
+8. Lely transmits its synchronous TPDOs (our RPDO1/RPDO2) on every SYNC, also for nodes it does
+   not stream and before and after a stream (zeros, then the last values). The drives drop
+   these as other-tag fragments or do not process them outside Operational; the rows account for
+   them.
+9. Lely reports the values of a synchronous TPDO it receives at its next SYNC, one SYNC late.
+   M1 judges Lely's PDO lines from Lely's second SYNC after a command, by the order of
+   Lely's own lines rather than a time window.
+10. The drive classifies a fragment's tag before its deadline (D8), so in F1 no late RPDO2 is a
+    not-valid drop: each one that a SYNC closes on is an other-tag drop, and those after the
+    bus's last SYNC are only named as trailing (`python3 tools/evidence/rejudge.py f1`). The
+    not-valid-at-receipt path is shown by F7 instead.
+11. Our DCF has no 0x1F85-0x1F88, so Lely's boot uploads only 0x1000; M2 uploads 0x1018:1-4
+    explicitly through Lely's SDO client.
+12. R1 commits its new tag through Lely's SDO client and leaves the drive in Switched On: in
+    Operation Enabled with no stream the drive would stop on SYNC loss or timeout and latch,
+    which would block the closing stream.
+13. The proxy cost tail varies between runs on the same host; only one measurement is
+    published, with its host and commit.
+14. `python3-matplotlib` (dev image only, for `tools/evidence`) comes from the Ubuntu archive,
+    which is not pinned to a snapshot (see Limits).
+
 ## Run everything
 
     docker compose build dev
@@ -229,15 +534,20 @@ Decision index (the `D<n>` references in code comments):
 - `tools/od` EDS loader and validator, header generator, independent wire encoder, golden vectors, bandwidth
 - `src/canopen_codec` PDO and SDO codec, checked against the golden vectors
 - `src/drive_core` ROS-free drive: CiA 402 state machine, SYNC timeline, guards, quick stop, SDO server
+- `src/socketcan_io` raw CAN socket with receive classification; `src/vdrive_bank` six drives as one process on vcan; `src/bus_fault_proxy` the forwarding and fault-rule proxy; `src/lely_peer` the Lely master test peer
+- `config/interop` Lely bus description and the fault rule files; `tools/bus` vcan links and the compose topology smoke
+- `tools/interop` vcan tests: processes, the Lely matrix, proxy faults, judges and recorded observations
+- `tools/evidence` scripts that make the E2, E3a and E3b images, the replay render, the frame trace and the tables; all from committed inputs except the interop matrix table, which is generated from a CI run's `pytest-vcan.xml` artifact
 - `src/ur5e_description` UR5e model, scene and ros2_control description
 - `src/robot_bringup` launch file and controller and plugin configuration
 - `models/` checksums of the pinned Menagerie model; `tools/models` fetch and verify
-- `tools/sim_checks` simulation checks and the motion recorder
-- `tools/env`, `tools/bench` environment manifest and cyclictest baseline
+- `tools/sim_checks` simulation checks, MuJoCo forward kinematics for them, and the motion recorder
+- `tools/env`, `tools/bench` environment manifest, cyclictest baseline and the proxy cost summary
 - `docker`, `compose.yaml`, `.github/workflows` toolchain, images and CI
 
 ## Limits
 
 E1 runs in logic time only: no OS jitter, no real IPC, no CAN. E2 adds MuJoCo physics, but its
-timing is the simulator's, not a real-time measurement. The numeric limits are project-declared,
-not industry values. Ubuntu archive packages in the image are not pinned to a snapshot.
+timing is the simulator's, not a real-time measurement. E3b runs real processes on Linux virtual
+CAN, which has no arbitration or bit timing, on shared hosts; its costs are measurements, not
+real-time bounds. The numeric limits are project-declared, not industry values. Ubuntu archive packages in the image are not pinned to a snapshot.

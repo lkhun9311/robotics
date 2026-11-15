@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every RPDO2 of node 3 held 60 ms: past its 40 ms deadline when it reaches the drive.
+h2d 0x303/0x7FF delay 60

@@ -135,12 +135,13 @@ bool Cia402::quick_stop(QuickStopReason reason) {
   return true;
 }
 
-void Cia402::drive_fault(std::uint16_t error_code) {
+bool Cia402::drive_fault(std::uint16_t error_code) {
   if (state_ == Cia402State::kFaultReactionActive || state_ == Cia402State::kFault) {
-    return;
+    return false;
   }
   enter(Cia402State::kFaultReactionActive);  // 13
   fault_code_ = error_code;
+  return true;
 }
 
 void Cia402::fault_reaction_done() {

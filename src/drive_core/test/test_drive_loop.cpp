@@ -503,7 +503,10 @@ TEST(Stop, TotalTravelWithinBoundAcrossPhases) {
   // bus), so the command timeout cannot preempt it and the expiry guard is what stops the joint.
   // The deadline sweeps 20 phases of one W. Travel counts from the joint position at the last W
   // tick at or before the send (an over-estimate) to rest.
+  // With DRIVE_CORE_TRAVEL_DUMP=<path>, the per-phase values are also written there as JSON
+  // (tools/evidence/travel_phases.py draws them); the assertions are the same either way.
   std::int64_t max_travel = 0;
+  std::string dump;
   for (int phase = 0; phase < 20; ++phase) {
     SCOPED_TRACE(phase);
     Loop l;
@@ -545,6 +548,23 @@ TEST(Stop, TotalTravelWithinBoundAcrossPhases) {
     std::printf("phase %2d: travel %.6f rad\n", phase, static_cast<double>(travel) * 1e-9);
     EXPECT_LE(travel, kEAllowNrad);
     max_travel = std::max(max_travel, travel);
+    const std::int64_t deadline_in_w = (send + milliseconds(48) - g0).ns % kW.ns;
+    dump += std::string(phase == 0 ? "" : ",\n") + "    {\"phase\": " + std::to_string(phase) +
+            ", \"send_after_sync_ns\": " + std::to_string((send - g0).ns) +
+            ", \"deadline_phase_in_w_ns\": " + std::to_string(deadline_in_w) +
+            ", \"travel_nrad\": " + std::to_string(travel) + "}";
+  }
+  if (const char* path = std::getenv("DRIVE_CORE_TRAVEL_DUMP"); path != nullptr) {
+    std::FILE* out = std::fopen(path, "w");
+    ASSERT_NE(out, nullptr) << path;
+    std::fprintf(out,
+                 "{\n  \"test\": \"Stop.TotalTravelWithinBoundAcrossPhases\",\n"
+                 "  \"w_ns\": %lld,\n  \"lease_ns\": %lld,\n  \"allowance_nrad\": %lld,\n"
+                 "  \"max_travel_nrad\": %lld,\n  \"phases\": [\n%s\n  ]\n}\n",
+                 static_cast<long long>(kW.ns), static_cast<long long>(milliseconds(48).ns),
+                 static_cast<long long>(kEAllowNrad), static_cast<long long>(max_travel),
+                 dump.c_str());
+    ASSERT_EQ(std::fclose(out), 0) << path;
   }
   std::printf("max travel over phases: %.6f rad (e_allow 0.100000)\n",
               static_cast<double>(max_travel) * 1e-9);
@@ -1049,6 +1069,36 @@ TEST(Fault, TorqueLossDuringFaultHandlingUpdatesCode) {
     l.drive.inject_torque_loss(l.now());
     EXPECT_EQ(l.state(), Cia402State::kFault);
     EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorTorqueLoss);
+  }
+}
+
+// A fault while one is already being handled changes no CiA 402 state and keeps the first code,
+// so it is not a new fault: no kFault event (the bank sends one EMCY per kFault event).
+TEST(Fault, SecondFaultWhileInFaultEmitsNothing) {
+  constexpr std::uint16_t kOtherCode = 0x5000;
+  {
+    SCOPED_TRACE("Fault Reaction Active");
+    Loop l;
+    l.run_at_vmax();
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    ASSERT_EQ(l.state(), Cia402State::kFaultReactionActive);
+    ASSERT_EQ(l.count(DriveEventKind::kFault), 1U);
+    l.drive.inject_fault(kOtherCode, l.now());
+    EXPECT_EQ(l.count(DriveEventKind::kFault), 1U);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
+  }
+  {
+    SCOPED_TRACE("Fault");
+    Loop l;
+    l.cw(0x06);
+    l.drive.inject_fault(drive_core::kErrorFollowing, l.now());
+    l.ticks(10);
+    ASSERT_EQ(l.state(), Cia402State::kFault);
+    ASSERT_EQ(l.count(DriveEventKind::kFault), 1U);
+    l.drive.inject_fault(kOtherCode, l.now());
+    EXPECT_EQ(l.state(), Cia402State::kFault);
+    EXPECT_EQ(l.count(DriveEventKind::kFault), 1U);
+    EXPECT_EQ(l.drive.cia402().fault_code(), drive_core::kErrorFollowing);
   }
 }
 

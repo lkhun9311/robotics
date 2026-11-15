@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every third RPDO1 of node 3 lost: an ordinary gap, never an integrity violation. The row
+# streams with valid_until = now + 48 ms, so the previous command outlasts each lost update by
+# 8 ms. Which seqs are lost depends on how many RPDO1 Lely sent during the commit (they count as
+# matches); a lost seq 1 is covered too, since the peer enables operation after the second update.
+h2d 0x203/0x7FF every 3 drop
