@@ -134,3 +134,23 @@ def test_probe_slave_fails_activation(start_probe, capture, procs):
                 if RPDO1 < f[1] <= RPDO1 + 6 or RPDO2 < f[1] <= RPDO2 + 6]
     assert not commands, f"command PDOs sent: {commands[:3]}"
     print(f"controlwords sent: {sorted({f[2][:2].hex() for f in controlwords})}")
+
+
+def test_console_ends_at_stdin_eof_after_its_commands(start_bank, proxy, procs):
+    """Without --duration-ms, closing stdin ends the console like `quit`: after the commands
+    before it are done (their sdo_* and cmd_done lines first), with scenario_done and exit 0."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    assert CLI_BIN.exists(), f"NOT_RUN: {CLI_BIN} not built"
+    cli = Proc("canopen_master_cli", [CLI_BIN, "--if", HOST_IF, "--nodes", "3",
+                                      "--scenario", "console"], stdin=True)
+    procs.append(cli)
+    cli.wait_for(lambda e: e.get("event") == "start", 2, "start line")
+    cli.send("read 3 0x1000 0 u32")
+    cli.proc.stdin.close()
+    rc, end = run_to_end(cli, 5)
+    assert rc == 0 and end["event"] == "scenario_done", (rc, end, cli.stderr[-500:])
+    order = [e["event"] for e in cli.events
+             if e.get("event") in ("sdo_ok", "cmd_done", "scenario_done", "scenario_failed")]
+    assert order == ["sdo_ok", "cmd_done", "scenario_done"], cli.events[-10:]
+    assert [e["value"] for e in cli.of("sdo_ok", node=3, index=0x1000)] == [0x00020192]

@@ -31,7 +31,8 @@
 // Scenarios:
 //   console       a bare master over the nodes; the commands of parse_console (args.hpp), one
 //                 per line; `quit` ends the run once every command before it is done (PR #25
-//                 rule), so do SIGTERM/SIGINT and the duration end; a line that does not parse
+//                 rule), so do SIGTERM/SIGINT and the duration end, and, without
+//                 --duration-ms, the end of stdin (like `quit`); a line that does not parse
 //                 fails the run, and so does an end with a command pending or not carried out
 //   activate_hal  the Hal over the backend on six nodes: configure, then activate through the
 //                 capability gate with --required (default none)
@@ -329,6 +330,12 @@ int run_console(cb::Worker& worker, Run& run, Out& out, std::optional<rc::MonoTi
         }
         ++pending;
       }
+      if (eof && !quit && !run.finished && !deadline) {
+        // stdin closed and no duration to end the run: end it as `quit` would (a partial last
+        // line without a newline is not a command).
+        quit = true;
+        if (pending == 0) end("stdin closed");
+      }
     }
     next = next + kLoopPeriod;
     sleep_until(next);
@@ -590,15 +597,17 @@ int run(const cli::Options& opts) {
     ids.push_back(*id);
   }
   std::unique_ptr<cb::Worker> owned;
+  cb::WorkerOptions events;
+  events.forward_events = true;  // This process reads and reports every event.
   if (console) {
     cm::MasterConfig mc;
     mc.nodes = ids;
-    owned = std::make_unique<cb::Worker>(mc, std::move(transport));
+    owned = std::make_unique<cb::Worker>(mc, std::move(transport), events);
   } else {
     cb::CanopenConfig cfg;
     for (std::size_t i = 0; i < cm::kSessionNodes; ++i) cfg.session.nodes.at(i) = ids.at(i);
     cfg.session.max_feedback_age = rc::milliseconds(30);
-    owned = std::make_unique<cb::Worker>(cfg, std::move(transport));
+    owned = std::make_unique<cb::Worker>(cfg, std::move(transport), events);
   }
   cb::Worker& worker = *owned;
   if (!worker.start(&error)) {

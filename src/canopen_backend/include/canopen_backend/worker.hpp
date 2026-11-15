@@ -37,18 +37,23 @@
 //                  channel is single-producer single-consumer and lock-free; only wait() and
 //                  await() block, on a condition variable the worker signals after each wake.
 //
-// EACH WAKE of the worker (ppoll on an absolute timerfd of period W, the socket and a wake
-// eventfd; the first step waits for the first timer expiry, so the SYNC grid lies on the timer
-// grid): the inhibit and shutdown requests, the queued ops, the cancels, the raw commands, the
-// newest command from the box, then one backend step reading at most `rx_budget` frames (B1),
-// then the dispatch records, the op table, feedback, capabilities and stats are published.
+// EACH WAKE of the worker (ppoll on an absolute timerfd, the socket and a wake eventfd; the
+// first step waits for the first timer expiry, so the SYNC grid lies on the timer grid). The
+// timer period is W (2 ms), not T_bus as C10 states: the master still produces SYNC every T_bus
+// (the grid is a multiple of W), and W is the drive's own granularity for op deadlines, retries,
+// stop polling and the dispatch margin, so none of them waits up to a whole T_bus. the inhibit and
+// shutdown requests, the queued ops, the cancels, the raw commands, the newest command from the
+// box, then one backend step reading at most `rx_budget` frames (B1), then the dispatch records,
+// the op table, feedback, capabilities and stats are published.
 //
 // OPS (C10): every op carries its id and absolute deadline from the OpTicket the caller made
 // when it posted it. The session fails an op whose deadline passed whether or not anyone waits;
-// a wait() that times out fails it too: the op reads kFailed at once on the control side, and
-// the worker cancels it in the session at its next wake (the epoch moves on, so it sends nothing
-// later; a cancelled arm fences). An op the worker had already completed when the cancel arrived
-// latches the inhibit (counted as late_completions): the caller was told it failed.
+// a wait() that times out fails it too: wait() posts the cancel and blocks (at most
+// cancel_ack_timeout, 3 W) until a wake has put it into the session (the epoch moves on, so that
+// wake and every later one send nothing of the op; a cancelled arm fences); only then does it
+// return. If no wake takes it in time, the inhibit is latched instead. An op the worker had already
+// completed when the cancel arrived latches the inhibit (counted as late_completions): the caller
+// was told it failed.
 //
 // TEARDOWN (C13): the Worker owns everything the thread touches through one shared state that
 // the thread also holds. shutdown() posts the shutdown (a group stop when arming, armed or
@@ -56,6 +61,12 @@
 // worker and joins within a timeout; false (retryable) while it still runs. The destructor does
 // the same with a 1 s timeout and otherwise detaches the thread, which keeps the shared state
 // alive until it exits. The worker releases the transport (closes the socket) when it exits.
+// Ops still queued, or posted, once the shutdown is seen fail without starting.
+//
+// FAULTS of the worker itself latch for the Worker's lifetime (a configure does not clear them;
+// a new configure cycle uses a new Worker): a full event queue (kEventOverflow) and the loss of
+// the transport (kTransportLost: a receive error, or a write error other than EAGAIN or
+// ENOBUFS, which are a full queue and only counted, spec §4 IPC policy). Both inhibit.
 // on_error_nonblocking() requests the inhibit and the shutdown without waiting.
 //
 // A master-only worker (the console of canopen_master_cli) runs a bare Master over the
@@ -138,11 +149,12 @@ struct WorkerStats {
   std::uint64_t commands_taken{};      // Commands the worker took from the box.
   std::uint64_t command_overwrites{};  // Commands overwritten in the box (superseded).
   std::uint64_t events_forwarded{};
-  std::uint64_t event_overflows{};   // Events lost to a full queue (kEventOverflow).
-  std::uint64_t ops_refused{};       // Refused on the control side (queue full, master-only).
-  std::uint64_t ops_cancelled{};     // Failed because a wait timed out.
-  std::uint64_t late_completions{};  // Cancelled after they had completed (inhibit latched).
-  std::uint64_t raw_refused{};       // Raw commands refused (queue full, backend mode).
+  std::uint64_t event_overflows{};      // Events lost to a full queue (kEventOverflow).
+  std::uint64_t ops_refused{};          // Refused on the control side (queue full, master-only).
+  std::uint64_t ops_cancelled{};        // Failed because a wait timed out.
+  std::uint64_t late_completions{};     // Cancelled after they had completed (inhibit latched).
+  std::uint64_t raw_refused{};          // Raw commands refused (queue full, backend mode).
+  std::uint64_t cancel_ack_timeouts{};  // Timed-out waits whose cancel no wake took in time.
   TransportCounts transport{};
 };
 
@@ -152,9 +164,12 @@ std::string stats_json(const WorkerStats& stats);
 
 struct WorkerOptions {
   std::size_t rx_budget{kRxBudget};
-  // Forward master events and dispatch records to the event queue. A worker with no reader
-  // leaves this off: a full queue is a fault.
-  bool forward_events{true};
+  // Forward master events and dispatch records to the event queue. Off by default: a worker
+  // with no reader would fill the queue, and a full queue is a fault. A reader turns it on.
+  bool forward_events{false};
+  // How long a timed-out wait() blocks for the worker to take its cancel (C10); past it the
+  // inhibit is requested instead.
+  runtime_core::Duration cancel_ack_timeout{3 * 2'000'000};
 };
 
 struct WorkerState;  // The channels and everything the thread owns (worker.cpp).

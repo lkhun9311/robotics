@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -77,7 +78,13 @@ class FakeBus {
       f.cob_id = static_cast<std::uint16_t>(in.can_id);
       f.dlc = in.len;
       std::memcpy(f.data.data(), in.data, in.len);
-      std::lock_guard<std::mutex> lock(mu_);
+      std::unique_lock<std::mutex> lock(mu_);
+      if (gate_ && gate_(f)) {
+        gate_ = nullptr;  // Only the first matching write waits.
+        blocked_ = true;
+        cv_.notify_all();
+        cv_.wait(lock, [&] { return gate_open_; });
+      }
       if (fail_next_ > 0) {
         --fail_next_;
         errno = fail_errno_.front();
@@ -109,6 +116,21 @@ class FakeBus {
     for (int e : errnos) fail_errno_.push_back(e);
     fail_next_ = fail_errno_.size();
   }
+  // The first write matching `pred` blocks until open_gate(): a wake held inside its step.
+  void close_gate(std::function<bool(const cc::Frame&)> pred) {
+    std::lock_guard<std::mutex> lock(mu_);
+    gate_ = std::move(pred);
+    gate_open_ = false;
+  }
+  bool wait_blocked(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, timeout, [&] { return blocked_; });
+  }
+  void open_gate() {
+    std::lock_guard<std::mutex> lock(mu_);
+    gate_open_ = true;
+    cv_.notify_all();
+  }
   std::vector<Sent> sent() {
     std::lock_guard<std::mutex> lock(mu_);
     return tx_;
@@ -132,6 +154,9 @@ class FakeBus {
   std::vector<Sent> tx_;
   std::deque<int> fail_errno_;
   std::size_t fail_next_{0};
+  std::function<bool(const cc::Frame&)> gate_;
+  bool gate_open_{true};
+  bool blocked_{false};
 };
 
 rc::MonoTime system_now() { return rc::SystemMonotonicClock{}.now(); }
@@ -220,7 +245,7 @@ TEST(Worker, CommandBoxOverwritesAreCounted) {
 TEST(Worker, EventQueueOverflowIsAFault) {
   rc::MonoTime now = kT0;
   FakeBus bus([&] { return now; });
-  cb::Worker w(config(), bus.transport());
+  cb::Worker w(config(), bus.transport(), cb::WorkerOptions{cb::kRxBudget, true});
   // A configure that nobody answers keeps the session out of idle (where nothing latches).
   w.configure(hc::OpTicket{1, now + hc::kConfigureTimeout}, now);
   w.run_once(now);
@@ -257,6 +282,12 @@ TEST(Worker, EventQueueOverflowIsAFault) {
   }
   EXPECT_EQ(popped, cb::kEventQueueCapacity);
   EXPECT_LE(last, *first_overflow) << "a newer event displaced an older one";
+  // The fault is the worker's own: a new configure does not clear it.
+  now = now + kW;
+  w.configure(hc::OpTicket{2, now + hc::kConfigureTimeout}, now);
+  w.run_once(now);
+  EXPECT_TRUE(w.poll(now).faults.has(hc::Fault::kEventOverflow));
+  EXPECT_TRUE(w.inhibited());
 }
 
 TEST(Worker, RxBudgetPerWake) {
@@ -336,24 +367,35 @@ TEST(Worker, LifecycleWaitTimesOut) {
 
 TEST(Worker, TimedOutOpCannotActLater) {
   FakeBus bus(system_now);
-  cb::Worker w(config(), bus.transport(), cb::WorkerOptions{cb::kRxBudget, false});
+  cb::WorkerOptions options{cb::kRxBudget, false};
+  options.cancel_ack_timeout = rc::milliseconds(500);  // Generous: the gate below opens in 5 ms.
+  cb::Worker w(config(), bus.transport(), options);
   std::string error;
   ASSERT_TRUE(w.start(&error)) << error;
+  // The wake that starts configure is held inside its step, at the first probe upload, while
+  // the caller's wait times out; it is let go 5 ms after the timeout. Whatever that wake still
+  // sends must leave before wait() returns, and nothing of the op after.
+  bus.close_gate(is_sdo_request);
   w.configure(hc::OpTicket{1, system_now() + hc::kConfigureTimeout}, system_now());
-  // The probe's first upload (0x1000) to each of the six nodes is on the wire.
-  ASSERT_TRUE(bus.wait_sent(is_sdo_request, 6, std::chrono::milliseconds(1000)))
+  ASSERT_TRUE(bus.wait_blocked(std::chrono::milliseconds(1000)))
       << "INCONCLUSIVE: configure sent no probe";
-  ASSERT_FALSE(w.wait(1, rc::milliseconds(20)).has_value());
-  ASSERT_TRUE(w.await([&] { return w.stats().ops_cancelled == 1; }, rc::milliseconds(1000)))
-      << "the worker never took the cancel";
-  const std::vector<Sent> at_cancel = bus.sent();
+  constexpr auto kTimeout = std::chrono::milliseconds(20);
+  const auto t_call = std::chrono::steady_clock::now();
+  std::thread opener([&] {
+    std::this_thread::sleep_until(t_call + kTimeout + std::chrono::milliseconds(5));
+    bus.open_gate();
+  });
+  const std::optional<hc::OpResult> r = w.wait(1, rc::milliseconds(kTimeout.count()));
+  const std::size_t at_return = bus.sent().size();
+  opener.join();
+  ASSERT_FALSE(r.has_value());
   std::vector<cc::Frame> requests;
-  for (const Sent& s : at_cancel) {
+  for (const Sent& s : bus.sent()) {
     if (is_sdo_request(s.frame)) requests.push_back(s.frame);
   }
   ASSERT_EQ(requests.size(), 6U) << "INCONCLUSIVE: expected one request per node";
-  // The answers to the requests already on the wire arrive after the cancel. A live op would
-  // send each node's next probe (0x1018:01) in reply; a cancelled one sends nothing.
+  // The answers to the requests on the wire arrive after the cancel. A live op would send each
+  // node's next probe (0x1018:01) in reply; a cancelled one sends nothing.
   for (const cc::Frame& req : requests) bus.deliver(upload_answer(req, 0x00020192));
   const std::uint64_t rx_before = w.stats().rx_frames;
   ASSERT_TRUE(w.await([&] { return w.stats().rx_frames >= rx_before + 6; }, rc::milliseconds(1000)))
@@ -362,15 +404,39 @@ TEST(Worker, TimedOutOpCannotActLater) {
   ASSERT_TRUE(w.await([&] { return w.stats().wakes >= wakes + 5; }, rc::milliseconds(1000)));
   std::vector<cc::Frame> later;
   const std::vector<Sent> all = bus.sent();
-  for (std::size_t k = at_cancel.size(); k < all.size(); ++k) {
+  for (std::size_t k = at_return; k < all.size(); ++k) {
     if (is_sdo_request(all[k].frame) || all[k].frame.cob_id == 0x000) {
       later.push_back(all[k].frame);
     }
   }
-  EXPECT_TRUE(later.empty()) << later.size() << " SDO/NMT frames sent for the op after its wait "
-                             << "timed out; first COB 0x" << std::hex << later.front().cob_id;
+  EXPECT_TRUE(later.empty()) << later.size() << " SDO/NMT frames of the op sent after wait() "
+                             << "returned; first COB 0x" << std::hex
+                             << (later.empty() ? 0 : later.front().cob_id);
+  EXPECT_EQ(w.stats().ops_cancelled, 1U);
   EXPECT_EQ(w.op_state(1), hc::OpState::kFailed);
   EXPECT_TRUE(w.inhibited()) << "a failed op latches the inhibit (C17)";
+  EXPECT_TRUE(w.shutdown(rc::milliseconds(1000)));
+}
+
+TEST(Worker, UnackedCancelLatchesTheInhibit) {
+  FakeBus bus(system_now);
+  cb::Worker w(config(), bus.transport());  // cancel_ack_timeout: the default 3 W.
+  std::string error;
+  ASSERT_TRUE(w.start(&error)) << error;
+  // The worker is held inside a step for longer than the wait and its ack bound together.
+  bus.close_gate(is_sdo_request);
+  w.configure(hc::OpTicket{1, system_now() + hc::kConfigureTimeout}, system_now());
+  ASSERT_TRUE(bus.wait_blocked(std::chrono::milliseconds(1000)))
+      << "INCONCLUSIVE: configure sent no probe";
+  ASSERT_FALSE(w.inhibited()) << "INCONCLUSIVE: inhibited before the wait";
+  const auto t_call = std::chrono::steady_clock::now();
+  const std::optional<hc::OpResult> r = w.wait(1, rc::milliseconds(20));
+  const auto waited = std::chrono::steady_clock::now() - t_call;
+  EXPECT_FALSE(r.has_value());
+  EXPECT_GE(waited, std::chrono::milliseconds(26)) << "returned before the ack bound";
+  EXPECT_EQ(w.stats().cancel_ack_timeouts, 1U);
+  EXPECT_TRUE(w.inhibited()) << "an unacknowledged cancel must latch the inhibit at once";
+  bus.open_gate();
   EXPECT_TRUE(w.shutdown(rc::milliseconds(1000)));
 }
 
@@ -394,4 +460,43 @@ TEST(Worker, SocketWriteErrorsAreCounted) {
   EXPECT_NE(json.find("\"tx_enobufs\":3"), std::string::npos) << json;
   EXPECT_NE(json.find("\"tx_eagain\":2"), std::string::npos) << json;
   EXPECT_NE(json.find("\"tx_other_error\":0"), std::string::npos) << json;
+  // A full queue is transient: counted, never a transport loss.
+  EXPECT_FALSE(w.poll(now).faults.has(hc::Fault::kTransportLost));
+}
+
+TEST(Worker, OtherWriteErrorIsTransportLoss) {
+  rc::MonoTime now = kT0;
+  FakeBus bus([&] { return now; });
+  cb::Worker w(config(), bus.transport());
+  w.run_once(now);
+  ASSERT_FALSE(w.poll(now).faults.has(hc::Fault::kTransportLost)) << "INCONCLUSIVE: lost at start";
+  ASSERT_FALSE(w.inhibited()) << "INCONCLUSIVE: inhibited at start";
+  bus.fail_writes({ENETDOWN});
+  for (int k = 0; k < 10; ++k) {  // 20 ms: at least one SYNC is written, the first fails.
+    now = now + kW;
+    w.run_once(now);
+  }
+  ASSERT_EQ(w.stats().transport.tx_other_error, 1U) << "INCONCLUSIVE: the failure was not hit";
+  EXPECT_TRUE(w.poll(now).faults.has(hc::Fault::kTransportLost));
+  EXPECT_TRUE(w.inhibited());
+}
+
+TEST(Worker, OpsQueuedWithShutdownDoNotStart) {
+  rc::MonoTime now = kT0;
+  FakeBus bus([&] { return now; });
+  cb::Worker w(config(), bus.transport());
+  w.run_once(now);
+  // on_error_nonblocking requests the shutdown; a configure posted with it must not start.
+  w.on_error_nonblocking();
+  w.configure(hc::OpTicket{1, now + hc::kConfigureTimeout}, now);
+  now = now + kW;
+  w.run_once(now);
+  EXPECT_EQ(w.op_state(1), hc::OpState::kFailed);
+  const std::optional<hc::OpResult> r = w.wait(1, rc::Duration{});
+  ASSERT_TRUE(r.has_value());
+  EXPECT_NE(r->error.find("shutting down"), std::string::npos) << r->error;
+  for (const Sent& sent : bus.sent()) {
+    EXPECT_FALSE(is_sdo_request(sent.frame) || sent.frame.cob_id == 0x000)
+        << "the configure sent COB 0x" << std::hex << sent.frame.cob_id;
+  }
 }

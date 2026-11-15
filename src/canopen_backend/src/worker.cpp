@@ -116,6 +116,8 @@ struct OpSlot {
 constexpr std::int64_t kNoSync = std::numeric_limits<std::int64_t>::min();
 
 constexpr const char* kWaitTimedOut = "the wait for the op timed out (C10)";
+constexpr const char* kShuttingDown = "the worker is shutting down";
+constexpr const char* kTooManyOps = "too many ops in flight in the worker";
 constexpr const char* kWorkerExited = "the worker exited before the op ended";
 constexpr const char* kQueueFull = "the worker's op queue is full";
 constexpr const char* kMasterOnly = "a master-only worker has no session";
@@ -192,6 +194,9 @@ struct WorkerState {
   std::array<OpSlot, kOpTable> table{};
   std::atomic<std::int64_t> last_sync_ns{kNoSync};
   std::atomic<bool> session_inhibited{false};
+  // A fault of the worker itself (event overflow, transport loss): inhibits for good.
+  std::atomic<bool> worker_fault{false};
+  std::atomic<std::uint64_t> cancels_taken{0};  // Cancels the worker has applied.
   Ring<WorkerEvent, kEventQueueCapacity> events;
   std::atomic<bool> exited{false};
   std::atomic<bool> fatal{false};  // The thread ended on an error of its own (ppoll, timerfd).
@@ -233,9 +238,18 @@ struct WorkerState {
   }
 
   void post_op(const PostedOp& op, rc::MonoTime now) {
-    if (op.kind == OpKind::kConfigure) {
-      overflowed = false;  // A new configure starts a fresh fault picture.
+    std::uint64_t* free_slot = nullptr;
+    for (std::uint64_t& slot : inflight) {
+      if (slot == 0) {
+        free_slot = &slot;
+        break;
+      }
     }
+    if (free_slot == nullptr) {
+      publish_end(op.ticket.op_id, kStateFailed, kTooManyOps);  // Refused, never started.
+      return;
+    }
+    *free_slot = op.ticket.op_id;
     switch (op.kind) {
       case OpKind::kConfigure:
         backend->configure(op.ticket, now);
@@ -250,14 +264,6 @@ struct WorkerState {
         backend->deactivate(op.ticket, now);
         break;
     }
-    for (std::uint64_t& slot : inflight) {
-      if (slot == 0) {
-        slot = op.ticket.op_id;
-        return;
-      }
-    }
-    // More ops in flight than the table holds: the oldest is forgotten (the Hal keeps 8).
-    inflight[op.ticket.op_id % kOpTable] = op.ticket.op_id;
   }
 
   void cancel(std::uint64_t id, rc::MonoTime now) {
@@ -430,11 +436,21 @@ struct WorkerState {
     }
     PostedOp op;
     while (ops.pop(op)) {
-      if (backend) post_op(op, now);
+      if (shutting_down) {
+        publish_end(op.ticket.op_id, kStateFailed, kShuttingDown);  // Never started.
+      } else if (backend) {
+        post_op(op, now);
+      }
     }
     std::uint64_t cancel_id = 0;
+    bool took_cancel = false;
     while (cancels.pop(cancel_id)) {
       if (backend) cancel(cancel_id, now);
+      cancels_taken.fetch_add(1, std::memory_order_acq_rel);
+      took_cancel = true;
+    }
+    if (took_cancel) {
+      notify();  // A timed-out wait() returns once its cancel is in the session (C10).
     }
     RawCommand rc_cmd;
     while (raw.pop(rc_cmd)) {
@@ -463,10 +479,14 @@ struct WorkerState {
     if (handled >= options.rx_budget) ++stats.rx_budget_hits;
 
     stats.transport = transport->counts();
-    if (!lost && stats.transport.rx_error > 0) {
-      lost = true;  // The socket reported an error: the bus is gone for us.
+    // Receive errors and write errors other than EAGAIN/ENOBUFS mean the bus is gone for us;
+    // EAGAIN and ENOBUFS are a full queue, counted and not retried (spec §4 IPC policy).
+    if (!lost && (stats.transport.rx_error > 0 || stats.transport.tx_other_error > 0)) {
+      lost = true;
+      worker_fault.store(true, std::memory_order_release);
       if (backend) backend->on_error_nonblocking();
     }
+    if (overflowed) worker_fault.store(true, std::memory_order_release);
 
     forward_dispatches(now);
     hc::Feedback fb{};
@@ -551,6 +571,8 @@ struct Worker::Local {
   std::uint64_t command_overwrites{0};
   std::uint64_t ops_refused{0};
   std::uint64_t raw_refused{0};
+  std::uint64_t cancels_posted{0};
+  std::uint64_t cancel_ack_timeouts{0};
   hc::Feedback feedback{};
   rc::DeviceCapabilities caps{};
   WorkerStats stats{};
@@ -758,12 +780,25 @@ std::optional<hc::OpResult> Worker::wait(std::uint64_t op_id, rc::Duration timeo
     local_->refuse(op_id, kWorkerExited);
     return hc::OpResult{false, kWorkerExited, {}};
   }
-  // C10: the wait timed out, so the op fails: here at once, in the session at the next wake.
+  // C10: the wait timed out, so the op fails. wait() returns once a wake has put the cancel
+  // into the session (that wake and every later one send nothing of the op); if no wake does
+  // within cancel_ack_timeout, the inhibit is requested and latched here instead.
   local_->refuse(op_id, kWaitTimedOut);
-  if (!state_->cancels.push(op_id)) {
-    state_->inhibit_request.store(true, std::memory_order_release);  // Fail safe.
+  bool acked = false;
+  if (state_->cancels.push(op_id)) {
+    const std::uint64_t posted = ++local_->cancels_posted;
+    wake();
+    std::unique_lock<std::mutex> lock(state_->mu);
+    acked = state_->cv.wait_until(lock, deadline_after(state_->options.cancel_ack_timeout), [&] {
+      return state_->cancels_taken.load(std::memory_order_acquire) >= posted;
+    });
   }
-  wake();
+  if (!acked) {
+    ++local_->cancel_ack_timeouts;
+    local_->local_inhibit = true;
+    state_->inhibit_request.store(true, std::memory_order_release);
+    wake();
+  }
   return std::nullopt;
 }
 
@@ -796,7 +831,8 @@ void Worker::on_error_nonblocking() {
 
 bool Worker::inhibited() const {
   return local_->master_only || !local_->has_session || local_->local_inhibit ||
-         state_->session_inhibited.load(std::memory_order_acquire);
+         state_->session_inhibited.load(std::memory_order_acquire) ||
+         state_->worker_fault.load(std::memory_order_acquire);
 }
 
 bool Worker::can_apply(rc::MonoTime valid_until, rc::MonoTime now) const {
@@ -830,6 +866,7 @@ WorkerStats Worker::stats() const {
   s.command_overwrites = local_->command_overwrites;
   s.ops_refused = local_->ops_refused;
   s.raw_refused = local_->raw_refused;
+  s.cancel_ack_timeouts = local_->cancel_ack_timeouts;
   return s;
 }
 
@@ -859,6 +896,7 @@ std::string stats_json(const WorkerStats& s) {
   add("ops_cancelled", s.ops_cancelled);
   add("late_completions", s.late_completions);
   add("raw_refused", s.raw_refused);
+  add("cancel_ack_timeouts", s.cancel_ack_timeouts);
   add("tx", s.transport.tx);
   add("tx_eagain", s.transport.tx_eagain);
   add("tx_enobufs", s.transport.tx_enobufs);
