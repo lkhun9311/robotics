@@ -5,6 +5,7 @@ project(canopen_master LANGUAGES CXX)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/robotics_flags.cmake)
 find_package(runtime_core REQUIRED)
 find_package(canopen_codec REQUIRED)
+find_package(hal_contract REQUIRED)
 
 file(GLOB CANOPEN_MASTER_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 add_library(canopen_master ${CANOPEN_MASTER_SOURCES})
@@ -16,7 +17,7 @@ target_include_directories(canopen_master PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(canopen_master PUBLIC
-  runtime_core::runtime_core canopen_codec::canopen_codec)
+  runtime_core::runtime_core canopen_codec::canopen_codec hal_contract::hal_contract)
 
 # Consumable package: find_package(canopen_master REQUIRED) -> canopen_master::canopen_master.
 install(TARGETS canopen_master EXPORT canopen_masterTargets ARCHIVE DESTINATION lib)
@@ -27,10 +28,13 @@ install(FILES cmake/canopen_masterConfig.cmake DESTINATION share/canopen_master/
 include(CTest)
 if(BUILD_TESTING)
   find_package(GTest REQUIRED)
+  # The vdrive session tests run against in-memory drive_core::Drive instances.
+  find_package(drive_core REQUIRED)
   file(GLOB CANOPEN_MASTER_TESTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/*.cpp)
   add_executable(canopen_master_tests ${CANOPEN_MASTER_TESTS})
   robotics_apply_flags(canopen_master_tests)
-  target_link_libraries(canopen_master_tests PRIVATE canopen_master GTest::gtest_main)
+  target_link_libraries(canopen_master_tests PRIVATE canopen_master drive_core::drive_core
+    GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(canopen_master_tests)
 endif()

@@ -3,4 +3,5 @@
 include(CMakeFindDependencyMacro)
 find_dependency(runtime_core)
 find_dependency(canopen_codec)
+find_dependency(hal_contract)
 include("${CMAKE_CURRENT_LIST_DIR}/canopen_masterTargets.cmake")

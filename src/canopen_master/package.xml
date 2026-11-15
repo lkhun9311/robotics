@@ -2,13 +2,15 @@
 <package format="3">
   <name>canopen_master</name>
   <version>0.1.0</version>
-  <description>ROS-free CANopen master core in logic time: NMT master, heartbeat consumer, expedited SDO client, SYNC producer, EMCY consumer and received-PDO decoding.</description>
+  <description>ROS-free CANopen master core in logic time: NMT master, heartbeat consumer, expedited SDO client, SYNC producer, EMCY consumer and received-PDO decoding; the vdrive session on top of it.</description>
   <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>cmake</buildtool_depend>
   <depend>runtime_core</depend>
   <depend>canopen_codec</depend>
+  <depend>hal_contract</depend>
   <test_depend>gtest</test_depend>
+  <test_depend>drive_core</test_depend>
   <export>
     <build_type>cmake</build_type>
   </export>
