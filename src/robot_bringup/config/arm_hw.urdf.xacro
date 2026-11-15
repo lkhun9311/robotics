@@ -1,0 +1,112 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  The six-joint arm under ros2_control with an arm_hw plugin (C12): the UR5e joint names, no
+  geometry. Every GPIO command interface has an explicit initial_value of 0 (ros2_control 4.48.1
+  would otherwise start an integer handle at its maximum); 64-bit values travel as uint32 halves.
+  xacro arm_hw.urdf.xacro plugin:=arm_hw/CanopenArmHw can_interface:=vcan_host ...
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="arm">
+  <xacro:arg name="plugin" default="arm_hw/CanopenArmHw"/>
+  <xacro:arg name="can_interface" default="vcan_host"/>
+  <xacro:arg name="node_ids" default="1,2,3,4,5,6"/>
+  <xacro:arg name="required_capabilities" default="all"/>
+  <xacro:arg name="backend_profile_limit" default="none"/>
+  <xacro:arg name="bus_period_ms" default="10"/>
+  <xacro:arg name="lease_ms" default="48"/>
+  <xacro:arg name="max_feedback_age_ms" default="30"/>
+
+  <xacro:macro name="arm_joint" params="name parent child">
+    <link name="${child}"/>
+    <joint name="${name}" type="revolute">
+      <parent link="${parent}"/>
+      <child link="${child}"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-6.28319" upper="6.28319" effort="150" velocity="1.0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="position_joint" params="name">
+    <joint name="${name}">
+      <command_interface name="position">
+        <param name="min">-6.28319</param>
+        <param name="max">6.28319</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- One 64-bit field as two uint32 halves, initial value 0. -->
+  <xacro:macro name="wide" params="field kind">
+    <xacro:if value="${kind == 'command'}">
+      <command_interface name="${field}_lo" data_type="uint32"><param name="initial_value">0</param></command_interface>
+      <command_interface name="${field}_hi" data_type="uint32"><param name="initial_value">0</param></command_interface>
+    </xacro:if>
+    <xacro:if value="${kind == 'state'}">
+      <state_interface name="${field}_lo" data_type="uint32"><param name="initial_value">0</param></state_interface>
+      <state_interface name="${field}_hi" data_type="uint32"><param name="initial_value">0</param></state_interface>
+    </xacro:if>
+  </xacro:macro>
+
+  <link name="base_link"/>
+  <xacro:arm_joint name="shoulder_pan_joint" parent="base_link" child="shoulder_link"/>
+  <xacro:arm_joint name="shoulder_lift_joint" parent="shoulder_link" child="upper_arm_link"/>
+  <xacro:arm_joint name="elbow_joint" parent="upper_arm_link" child="forearm_link"/>
+  <xacro:arm_joint name="wrist_1_joint" parent="forearm_link" child="wrist_1_link"/>
+  <xacro:arm_joint name="wrist_2_joint" parent="wrist_1_link" child="wrist_2_link"/>
+  <xacro:arm_joint name="wrist_3_joint" parent="wrist_2_link" child="wrist_3_link"/>
+
+  <ros2_control name="arm" type="system">
+    <hardware>
+      <plugin>$(arg plugin)</plugin>
+      <param name="can_interface">$(arg can_interface)</param>
+      <param name="node_ids">$(arg node_ids)</param>
+      <param name="required_capabilities">$(arg required_capabilities)</param>
+      <param name="backend_profile_limit">$(arg backend_profile_limit)</param>
+      <param name="bus_period_ms">$(arg bus_period_ms)</param>
+      <param name="lease_ms">$(arg lease_ms)</param>
+      <param name="max_feedback_age_ms">$(arg max_feedback_age_ms)</param>
+    </hardware>
+    <!-- Joint order is node order: node_ids[0] drives shoulder_pan_joint. -->
+    <xacro:position_joint name="shoulder_pan_joint"/>
+    <xacro:position_joint name="shoulder_lift_joint"/>
+    <xacro:position_joint name="elbow_joint"/>
+    <xacro:position_joint name="wrist_1_joint"/>
+    <xacro:position_joint name="wrist_2_joint"/>
+    <xacro:position_joint name="wrist_3_joint"/>
+    <gpio name="arm">
+      <xacro:wide field="manager" kind="command"/>
+      <xacro:wide field="session" kind="command"/>
+      <xacro:wide field="generation" kind="command"/>
+      <xacro:wide field="hold_until_ns" kind="command"/>
+      <xacro:wide field="request_id" kind="command"/>
+    </gpio>
+    <gpio name="permit">
+      <xacro:wide field="manager" kind="command"/>
+      <xacro:wide field="session" kind="command"/>
+      <xacro:wide field="generation" kind="command"/>
+      <xacro:wide field="expires_ns" kind="command"/>
+      <command_interface name="present" data_type="uint8"><param name="initial_value">0</param></command_interface>
+    </gpio>
+    <gpio name="setpoint">
+      <xacro:wide field="manager" kind="command"/>
+      <xacro:wide field="session" kind="command"/>
+      <xacro:wide field="generation" kind="command"/>
+      <xacro:wide field="seq" kind="command"/>
+    </gpio>
+    <gpio name="hal">
+      <state_interface name="verdict" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="arm_state" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <xacro:wide field="armed_request_id" kind="state"/>
+      <xacro:wide field="applied_seq" kind="state"/>
+      <state_interface name="faults" data_type="uint32"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_1" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_2" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_3" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_4" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_5" data_type="uint8"><param name="initial_value">0</param></state_interface>
+      <state_interface name="stop_status_6" data_type="uint8"><param name="initial_value">0</param></state_interface>
+    </gpio>
+  </ros2_control>
+</robot>

@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<package format="3">
+  <name>arm_hw</name>
+  <version>0.1.0</version>
+  <description>ros2_control SystemInterface plugins arm_hw/CanopenArmHw (the CANopen backend on its socket I/O worker) and arm_hw/DirectArmHw (the in-process backend), thin shells over the hal_contract Hal.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>runtime_core</depend>
+  <depend>hal_contract</depend>
+  <depend>direct_backend</depend>
+  <depend>canopen_codec</depend>
+  <depend>canopen_master</depend>
+  <depend>canopen_backend</depend>
+  <depend>socketcan_io</depend>
+  <test_depend>gtest</test_depend>
+  <test_depend>drive_core</test_depend>
+  <test_depend>class_loader</test_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
