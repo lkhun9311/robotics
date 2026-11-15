@@ -767,6 +767,30 @@ TEST(DriveFlags, IntegrityBit) {
   EXPECT_EQ(w.flags(), 0U);
 }
 
+// 1001h as the bank writes it into an EMCY (Drive::error_register()) and as an SDO upload reads
+// it agree in every state that changes it: no fault, a fault reaction, Fault, after Fault Reset,
+// and torque loss.
+TEST(Drive, ErrorRegisterMatchesSdo) {
+  Wire w;
+  const auto same = [&w](std::uint32_t expected) {
+    EXPECT_EQ(w.drive.error_register(), expected);
+    EXPECT_EQ(w.value(od::addr::error_register), expected);
+  };
+  same(0x00U);
+  w.cw(0x06);
+  w.cw(0x07);
+  w.drive.inject_fault(drive_core::kErrorFollowing, w.now());
+  same(0x01U);  // Fault Reaction Active already holds the code.
+  w.ticks(10);
+  ASSERT_EQ(w.state(), Cia402State::kFault);
+  same(0x01U);
+  w.cw(0x80);
+  ASSERT_EQ(w.state(), Cia402State::kSwitchOnDisabled);
+  same(0x00U);
+  w.drive.inject_torque_loss(w.now());
+  same(0x01U);
+}
+
 TEST(DriveFlags, StopUnconfirmedBit) {
   Wire w;
   w.run();

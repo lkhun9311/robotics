@@ -176,6 +176,9 @@ class Drive {
   std::uint16_t statusword() const;
   // 0x2030:05 (bit layout in drive_flag).
   std::uint16_t drive_flags() const;
+  // 1001h as read by SDO and sent in EMCY byte 2: bit 0 (generic error) while a fault code is
+  // held.
+  std::uint8_t error_register() const { return cia402_.fault_code() ? 0x01U : 0x00U; }
   // 0x2016: attempt_id of the last successful commit in this boot (D17).
   std::uint32_t committed_attempt() const { return staging_.committed_attempt(); }
   // The command being tracked; nullopt when nothing actuates.

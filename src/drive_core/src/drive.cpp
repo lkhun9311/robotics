@@ -640,7 +640,7 @@ class Drive::Objects final : public ObjectAccess {
       return d.staging_.staged(e.sub);
     }
     if (at(e, addr::error_register)) {
-      return d.cia402_.fault_code() ? 1U : 0U;  // Bit 0: generic error.
+      return d.error_register();
     }
     if (at(e, addr::controlword)) {
       return d.controlword_;
