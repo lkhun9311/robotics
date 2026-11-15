@@ -48,6 +48,7 @@ INTEGRATION_FLOOR=11
 SIM_FLOOR=32
 VCAN_FLOOR=483
 TSAN_FLOOR=33
+TSAN_HAL_FLOOR=105
 
 require_at_least() {
   local label=$1 found=$2 floor=$3
@@ -319,26 +320,53 @@ echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) ==
   verdict="OK"
 )
 
-echo "== thread sanitizer (vdrive_bank: control thread, trace ring and writer thread) =="
+echo "== thread sanitizer (vdrive_bank threads; the HAL: worker, boxes, op epochs, teardown) =="
+# vdrive_bank: control thread, trace ring and writer thread. hal_contract, direct_backend,
+# canopen_backend and arm_hw: the I/O worker and the control thread sharing the C10 boxes, the
+# op epochs, and worker teardown in the plugin. Every package the stage builds must have its
+# production sources compiled with -fsanitize=thread (the worker runs canopen_master code).
 TSAN=(--build-base build/tsan --install-base install/tsan)
-colcon build --base-paths src "${TSAN[@]}" --packages-up-to vdrive_bank \
+TSAN_TESTED=(vdrive_bank hal_contract direct_backend canopen_backend arm_hw)
+colcon build --base-paths src "${TSAN[@]}" --packages-up-to "${TSAN_TESTED[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=Debug -DROBOTICS_SANITIZE=thread -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-require_sanitized src/vdrive_bank/src build/tsan/vdrive_bank/compile_commands.json -fsanitize=thread
+tsan_built=0
+for pkg_dir in build/tsan/*/; do
+  pkg=$(basename "$pkg_dir")
+  [ -d "src/$pkg/src" ] || continue
+  require_sanitized "src/$pkg/src" "build/tsan/$pkg/compile_commands.json" -fsanitize=thread
+  tsan_built=$((tsan_built + 1))
+done
+# vdrive_bank and the four HAL packages, plus what they build on: at least these ten.
+if [ "$tsan_built" -lt 10 ]; then
+  echo "FAIL: tsan: checked the flags of $tsan_built packages, expected at least 10" >&2
+  exit 1
+fi
 (
   export TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
   rc=0
-  colcon test --base-paths src "${TSAN[@]}" --packages-select vdrive_bank \
+  colcon test --base-paths src "${TSAN[@]}" --packages-select "${TSAN_TESTED[@]}" \
     --return-code-on-test-failure || rc=$?
-  colcon test-result --test-result-base build/tsan/vdrive_bank --verbose | tee build/tsan/test-result.txt
+  hal_total=0
+  for pkg in "${TSAN_TESTED[@]}"; do
+    colcon test-result --test-result-base "build/tsan/$pkg" --verbose | tee "build/tsan/test-result-$pkg.txt"
+  done
   [ "$rc" -eq 0 ] || exit "$rc"
-  summary=$(grep '^Summary: ' build/tsan/test-result.txt | tail -1)
-  total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
-  skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
-  if [ "${skipped:-x}" != 0 ]; then
-    echo "FAIL: tsan: skipped tests or unreadable summary ('$summary')" >&2
-    exit 1
-  fi
-  require_at_least "tsan (vdrive_bank)" "$total" "$TSAN_FLOOR"
+  for pkg in "${TSAN_TESTED[@]}"; do
+    summary=$(grep '^Summary: ' "build/tsan/test-result-$pkg.txt" | tail -1)
+    total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
+    skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
+    if [ "${skipped:-x}" != 0 ] || ! [[ $total =~ ^[0-9]+$ ]] || [ "$total" -eq 0 ]; then
+      echo "FAIL: tsan ($pkg): no tests, skipped tests or unreadable summary ('$summary')" >&2
+      exit 1
+    fi
+    if [ "$pkg" = vdrive_bank ]; then
+      require_at_least "tsan (vdrive_bank)" "$total" "$TSAN_FLOOR"
+    else
+      hal_total=$((hal_total + total))
+    fi
+  done
+  require_at_least "tsan (hal_contract, direct_backend, canopen_backend, arm_hw)" "$hal_total" \
+    "$TSAN_HAL_FLOOR"
 )
 
 echo "== all checks passed =="
