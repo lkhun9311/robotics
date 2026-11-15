@@ -259,7 +259,11 @@ struct Run {
 
 // ---- console (master-only worker) ----
 
-int run_console(cb::Worker& worker, Run& run, Out& out, std::optional<rc::MonoTime> deadline) {
+// `duration` zero: no deadline. A plain time and flag, not an optional MonoTime: GCC 13's
+// Release build reports a false maybe-uninitialized on an optional passed across this call.
+int run_console(cb::Worker& worker, Run& run, Out& out, rc::Duration duration) {
+  const bool timed = duration.ns > 0;
+  const rc::MonoTime deadline = now() + duration;
   const int flags = ::fcntl(STDIN_FILENO, F_GETFL);
   if (flags < 0 || ::fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) < 0) {
     std::fprintf(stderr, "canopen_master_cli: console: stdin: %s\n", std::strerror(errno));
@@ -298,7 +302,7 @@ int run_console(cb::Worker& worker, Run& run, Out& out, std::optional<rc::MonoTi
       end("stopped by a signal");
       break;
     }
-    if (deadline && now() >= *deadline) {
+    if (timed && now() >= deadline) {
       end("the duration ended");
       break;
     }
@@ -339,7 +343,7 @@ int run_console(cb::Worker& worker, Run& run, Out& out, std::optional<rc::MonoTi
         }
         ++pending;
       }
-      if (eof && !quit && !run.finished && !deadline) {
+      if (eof && !quit && !run.finished && !timed) {
         // stdin closed and no duration to end the run: end it as `quit` would (a partial last
         // line without a newline is not a command).
         quit = true;
@@ -704,11 +708,7 @@ int run(const cli::Options& opts) {
   int status = 0;
   std::unique_ptr<hc::Hal> hal;
   if (console) {
-    const std::optional<rc::MonoTime> deadline =
-        duration_ms > 0 ? std::optional<rc::MonoTime>(
-                              now() + rc::milliseconds(static_cast<std::int64_t>(duration_ms)))
-                        : std::nullopt;
-    status = run_console(worker, r, out, deadline);
+    status = run_console(worker, r, out, rc::milliseconds(static_cast<std::int64_t>(duration_ms)));
   } else {
     const bool stream = scenario.scenario == cli::Scenario::kStream;
     const std::uint64_t ms = duration_ms > 0 ? duration_ms : (stream ? 2000 : 15000);
