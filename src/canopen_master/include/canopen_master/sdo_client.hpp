@@ -16,7 +16,7 @@
 // server abort 0x05040000. A response that does not answer the request (other index or subindex,
 // other command, a segmented initiate) fails the request as a protocol error; when the server may
 // still be inside a transfer (segmented initiate, an unknown or wrong command, a wrong DLC) the
-// client sends abort 0x05040001.
+// client sends abort 0x05040001; a segmented initiate is aborted at the object the server named.
 namespace canopen_master {
 
 namespace sdo_abort {
@@ -68,7 +68,9 @@ class SdoClient {
   };
 
   bool push(Request request);
-  SdoCompletion finish(SdoStatus status, std::uint32_t abort_code, bool send_abort);
+  // The abort, when sent, names `abort_at`, or the request's own object when it is empty.
+  SdoCompletion finish(SdoStatus status, std::uint32_t abort_code, bool send_abort,
+                       std::optional<canopen_codec::od::Address> abort_at = std::nullopt);
 
   canopen_codec::NodeId node_;
   runtime_core::Duration timeout_;

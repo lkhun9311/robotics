@@ -7,6 +7,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <span>
+#include <stdexcept>
 #include <variant>
 #include <vector>
 
@@ -212,6 +213,28 @@ TEST(Master, ConsumerTimePerNodeAndZeroDisables) {
   EXPECT_EQ(boot[0].node, 2);
 }
 
+TEST(Master, PreResetHeartbeatIsNotTheFirstAfterReset) {
+  // A heartbeat already received when on_frame is called predates a Reset Communication queued
+  // before that call: it must not satisfy the boot window the reset opens (C7).
+  Master m(config({kNode2}));
+  m.tick(at(0));
+  m.on_frame(frame(0x702, {0x05}), at(10));
+  ASSERT_TRUE(m.nmt(cc::NmtCommand::kResetCommunication, kNode2));
+  EXPECT_EQ(m.on_frame(frame(0x702, {0x05}), at(20)),
+            std::vector<cc::Frame>{frame(0x000, {0x82, 0x02})});
+  EXPECT_EQ(m.heartbeat_status(kNode2), HeartbeatStatus::kAwaitingBoot);
+  EXPECT_EQ(m.nmt_state(kNode2), std::nullopt);
+  m.drain_events();
+  for (std::int64_t ms = 21; ms <= 1100; ++ms) {
+    m.tick(at(ms));
+  }
+  const auto events = m.drain_events();
+  EXPECT_TRUE(of_kind(events, MasterEventKind::kHeartbeatLost).empty());
+  const auto boot = of_kind(events, MasterEventKind::kBootTimeout);
+  ASSERT_EQ(boot.size(), 1U);
+  EXPECT_EQ(boot[0].at, at(1020));
+}
+
 // ---- Expedited SDO client (C8) ----
 
 struct Recorder {
@@ -350,6 +373,15 @@ TEST(Master, SegmentedInitiateRefused) {
   EXPECT_EQ(rec.results[0], (SdoResult{2, 0x1008, 0x00, SdoStatus::kProtocol, 0, 0, 0x05040001}));
   EXPECT_EQ(m.counts().sdo_protocol_errors, 1U);
   EXPECT_EQ(of_kind(m.drain_events(), MasterEventKind::kSdoProtocol).size(), 1U);
+
+  // A segmented initiate for another object: the abort names the object the server is
+  // transferring (0x1009:00), not the one requested.
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1008, 0x00, rec.done()));
+  m.tick(at(10));
+  EXPECT_EQ(m.on_frame(frame(0x582, {0x41, 0x09, 0x10, 0x00, 0x1A, 0x00, 0x00, 0x00}), at(12)),
+            std::vector<cc::Frame>{frame(0x602, {0x80, 0x09, 0x10, 0x00, 0x01, 0x00, 0x04, 0x05})});
+  ASSERT_EQ(rec.results.size(), 2U);
+  EXPECT_EQ(rec.results[1], (SdoResult{2, 0x1008, 0x00, SdoStatus::kProtocol, 0, 0, 0x05040001}));
 }
 
 TEST(Master, SdoQueueOverflowRefused) {
@@ -372,6 +404,41 @@ TEST(Master, SdoQueueOverflowRefused) {
   EXPECT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00, rec.done()));
   EXPECT_EQ(m.counts().sdo_refused, 5U);
   ASSERT_EQ(rec.results.size(), 1U);  // Refused requests are never called back.
+}
+
+TEST(Master, StaleSdoResponseNotMatchedToQueuedRequest) {
+  // A response already received when on_frame is called cannot answer a request that this
+  // call only now puts on the wire.
+  Master m(config({kNode2}));
+  Recorder rec;
+  m.tick(at(0));
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00, rec.done()));
+  EXPECT_EQ(m.on_frame(frame(0x582, {0x43, 0x00, 0x10, 0x00, 0x92, 0x01, 0x02, 0x00}), at(1)),
+            std::vector<cc::Frame>{frame(0x602, {0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0})});
+  EXPECT_TRUE(rec.results.empty());
+  EXPECT_EQ(m.counts().sdo_unexpected, 1U);
+  // The real answer, received after the request went out, completes it.
+  m.on_frame(frame(0x582, {0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x02, 0x00}), at(2));
+  ASSERT_EQ(rec.results.size(), 1U);
+  EXPECT_EQ(rec.results[0], (SdoResult{2, 0x1000, 0x00, SdoStatus::kOk, 4, 0x00020191, 0}));
+}
+
+TEST(Master, ThrowingCallbackLeavesMasterUsable) {
+  Master m(config({kNode2, kNode3}));
+  Recorder rec;
+  ASSERT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00,
+                           [](const SdoResult&) { throw std::runtime_error("callback"); }));
+  ASSERT_TRUE(m.sdo_upload(kNode3, 0x1000, 0x00, rec.done()));
+  m.tick(at(0));
+  // Both time out in the same call; node 2's callback runs first and throws.
+  EXPECT_THROW(m.tick(at(200)), std::runtime_error);
+  EXPECT_TRUE(rec.results.empty());
+  // The master still works, and node 3's callback, not yet called, runs at the next call.
+  ASSERT_TRUE(m.nmt(cc::NmtCommand::kStart, kNode3));
+  EXPECT_EQ(m.tick(at(201)), std::vector<cc::Frame>{frame(0x000, {0x01, 0x03})});
+  ASSERT_EQ(rec.results.size(), 1U);
+  EXPECT_EQ(rec.results[0].status, SdoStatus::kTimeout);
+  EXPECT_EQ(rec.results[0].node, 3);
 }
 
 // ---- SYNC producer ----
@@ -450,6 +517,22 @@ TEST(Master, SyncPauseStep) {
   ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));
   ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kPause));
   EXPECT_TRUE(sync_ticks(m, range(101, 130)).empty());
+}
+
+TEST(Master, SyncStepRefusedWhenPendingOrDisabled) {
+  Master m(config({kNode2}, kSyncPeriod));
+  EXPECT_EQ(sync_ticks(m, {0}), (std::vector<std::int64_t>{0}));
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kPause));
+  EXPECT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));
+  EXPECT_FALSE(m.sync_control(canopen_master::SyncControl::kStep));  // One already pending.
+  EXPECT_EQ(sync_ticks(m, {10, 20}), (std::vector<std::int64_t>{10}));
+  EXPECT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));  // Produced: a new one is fine.
+  EXPECT_EQ(sync_ticks(m, {30}), (std::vector<std::int64_t>{30}));
+
+  Master off(config({kNode2}, Duration{}));  // No SYNC production at all.
+  ASSERT_TRUE(off.sync_control(canopen_master::SyncControl::kPause));
+  EXPECT_FALSE(off.sync_control(canopen_master::SyncControl::kStep));
+  EXPECT_TRUE(sync_ticks(off, range(0, 30)).empty());
 }
 
 // ---- EMCY consumer ----

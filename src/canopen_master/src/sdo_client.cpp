@@ -74,7 +74,8 @@ std::optional<cc::Frame> SdoClient::start(MonoTime now) {
   return frame;
 }
 
-SdoCompletion SdoClient::finish(SdoStatus status, std::uint32_t abort_code, bool send_abort) {
+SdoCompletion SdoClient::finish(SdoStatus status, std::uint32_t abort_code, bool send_abort,
+                                std::optional<cc::od::Address> abort_at) {
   Request& r = ring_.at(head_);
   SdoCompletion c{};
   c.result.node = node_.value();
@@ -89,7 +90,7 @@ SdoCompletion SdoClient::finish(SdoStatus status, std::uint32_t abort_code, bool
   if (send_abort) {
     cc::Sdo sdo{};
     sdo.type = cc::SdoType::kAbortToServer;
-    sdo.address = {r.index, r.sub};
+    sdo.address = abort_at.value_or(cc::od::Address{r.index, r.sub});
     sdo.abort_code = abort_code;
     c.abort = cc::encode_sdo(node_, sdo);
   }
@@ -122,8 +123,10 @@ std::optional<SdoCompletion> SdoClient::on_response(const cc::Frame& frame) {
   }
   if (r.upload && specifier == kUploadResponse) {
     if ((command & kExpedited) == 0) {
-      // Segmented initiate: the server now waits for segment requests. Expedited only (C8).
-      return finish(SdoStatus::kProtocol, sdo_abort::kInvalidCommand, true);
+      // Segmented initiate: the server now waits for segment requests of the object it named.
+      // Expedited only (C8).
+      return finish(SdoStatus::kProtocol, sdo_abort::kInvalidCommand, true,
+                    cc::od::Address{index, frame.data[3]});
     }
     if (!same_object) {
       return finish(SdoStatus::kProtocol, 0, false);

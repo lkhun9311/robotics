@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "canopen_master/master.hpp"
 
+#include <cstddef>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
@@ -174,8 +176,8 @@ bool Master::sync_control(SyncControl control) {
       }
       return true;
     case SyncControl::kStep:
-      if (!sync_paused_) {
-        return false;
+      if (!sync_paused_ || sync_step_ || config_.sync_period.ns <= 0) {
+        return false;  // Running, a step not yet produced, or no SYNC production at all.
       }
       sync_step_ = true;
       return true;
@@ -346,10 +348,19 @@ void Master::handle(const cc::Frame& frame, std::vector<cc::Frame>& out) {
 
 void Master::run_callbacks() {
   // Taken out before any is called: a callback only queues commands, but the list must not be
-  // the one a later completion appends to.
+  // the one a later completion appends to. If a callback throws, the ones not yet called go
+  // back to the front of the list and run at the next call.
   auto done = std::exchange(pending_done_, {});
-  for (Done& d : done) {
-    d.done(d.result);
+  for (std::size_t i = 0; i < done.size(); ++i) {
+    try {
+      done[i].done(done[i].result);
+    } catch (...) {
+      done.erase(done.begin(), done.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+      done.insert(done.end(), std::make_move_iterator(pending_done_.begin()),
+                  std::make_move_iterator(pending_done_.end()));
+      pending_done_ = std::move(done);
+      throw;
+    }
   }
 }
 
@@ -392,7 +403,15 @@ std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now, bool p
   if (in_step_) {
     throw std::logic_error("canopen_master: on_frame or tick called from an SDO callback");
   }
-  in_step_ = true;
+  // Cleared however the call ends, so an exception never leaves the master refusing every
+  // later call.
+  struct StepGuard {
+    bool& flag;
+    explicit StepGuard(bool& f) : flag(f) { flag = true; }
+    StepGuard(const StepGuard&) = delete;
+    StepGuard& operator=(const StepGuard&) = delete;
+    ~StepGuard() { flag = false; }
+  } guard{in_step_};
   now_ = now;
   std::vector<cc::Frame> out;
   if (!started_) {
@@ -401,22 +420,22 @@ std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now, bool p
       n.heartbeat.start(now);
     }
   }
-  apply_commands(now, out);
-  expire(now, out);
   if (frame != nullptr) {
+    // A received frame was on the bus before this call: it is matched against the state from
+    // before the commands queued since the last call (a reset, a new SDO request) take effect.
+    expire(now, out);
     handle(*frame, out);
-  }
-  try {
     run_callbacks();
-  } catch (...) {
-    in_step_ = false;
-    throw;
+    apply_commands(now, out);
+  } else {
+    apply_commands(now, out);
+    expire(now, out);
+    run_callbacks();
+    apply_commands(now, out);
   }
-  apply_commands(now, out);
   if (produce) {
     produce_sync(now, out);
   }
-  in_step_ = false;
   return out;
 }
 

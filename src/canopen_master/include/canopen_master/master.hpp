@@ -23,8 +23,13 @@
 // Commands (nmt, sdo_upload, sdo_download, set_heartbeat_consumer) are queued and take effect at
 // the next on_frame or tick, whose `now` they use and whose returned frames carry them.
 //
-// Each call first expires what is due at `now` (equality is expired), then handles its frame;
-// tick then produces a SYNC when one is due.
+// on_frame expires what is due at `now` (equality is expired), handles its frame against the
+// state from before any queued command, runs the SDO callbacks, then applies the queued commands:
+// a frame received before the call never answers a request or reset that the call sends.
+// tick applies the queued commands, expires, runs the callbacks, applies what they queued, then
+// produces a SYNC when one is due. If an SDO callback throws, the exception leaves the call and
+// the callbacks not yet called run at the next call.
+//
 // The master sends an NMT command only when asked through nmt(): a lost heartbeat or a boot
 // timeout is an event, never a reset or a stop (roadmap boot policy).
 //
@@ -119,7 +124,8 @@ class Master {
   bool register_rx_pdo(canopen_codec::NodeId node, std::uint32_t cob, PdoLayout layout);
 
   // SYNC production (for the N5 interop row): pause, resume or step once. kStep returns false
-  // unless paused; a pause drops a step not yet produced.
+  // unless paused, while a step is not yet produced, or with sync_period zero; a pause drops a
+  // step not yet produced.
   bool sync_control(SyncControl control);
   std::uint64_t syncs_produced() const { return syncs_; }
 
