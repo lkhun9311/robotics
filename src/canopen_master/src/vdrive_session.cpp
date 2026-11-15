@@ -244,6 +244,9 @@ void VdriveSession::before(MonoTime now) {
 
 std::vector<cc::Frame> VdriveSession::after(std::vector<cc::Frame> frames, MonoTime now) {
   for (const MasterEvent& e : master_.drain_events()) {
+    if (observer_) {
+      observer_(e);
+    }
     handle(e, now);
   }
   frames.insert(frames.end(), extra_.begin(), extra_.end());
@@ -1029,12 +1032,18 @@ bool VdriveSession::open_at_slot(MonoTime valid_until, MonoTime slot) const {
          (slot + config_.bus_period + kDriveTick + kDeliveryAllowance).ns;
 }
 
-bool VdriveSession::can_apply(MonoTime valid_until, MonoTime now) const {
+bool command_can_apply(std::optional<MonoTime> last_sync, Duration bus_period, MonoTime valid_until,
+                       MonoTime now) {
   MonoTime next_slot = now;
-  if (last_sync_) {
-    next_slot = std::max(now, *last_sync_ + config_.bus_period);
+  if (last_sync) {
+    next_slot = std::max(now, *last_sync + bus_period);
   }
-  return open_at_slot(valid_until, next_slot);
+  // The open_at_slot rule at the next slot.
+  return floor_us_ns(valid_until) > (next_slot + bus_period + kDriveTick + kDeliveryAllowance).ns;
+}
+
+bool VdriveSession::can_apply(MonoTime valid_until, MonoTime now) const {
+  return command_can_apply(last_sync_, config_.bus_period, valid_until, now);
 }
 
 void VdriveSession::stop_streaming() {
@@ -1201,6 +1210,18 @@ void VdriveSession::latch(std::optional<Fault> fault, MonoTime now, bool cancell
 }
 
 void VdriveSession::inhibit(MonoTime now) { latch(std::nullopt, now); }
+
+void VdriveSession::cancel(std::uint64_t op_id, const char* why, MonoTime now) {
+  if (posted_ && posted_->id == op_id) {
+    posted_.reset();  // Never started: nothing of it was sent.
+    record(op_id, OpState::kFailed, why);
+    latch(std::nullopt, now);  // C17: a failed op.
+    return;
+  }
+  if (op_ && op_->id == op_id) {
+    fail(why, now);
+  }
+}
 
 void VdriveSession::begin_stop(std::size_t i, std::uint8_t accept, MonoTime now) {
   NodeState& n = nodes_[i];

@@ -7,6 +7,8 @@ find_package(runtime_core REQUIRED)
 find_package(canopen_codec REQUIRED)
 find_package(hal_contract REQUIRED)
 find_package(canopen_master REQUIRED)
+find_package(socketcan_io REQUIRED)
+find_package(Threads REQUIRED)
 
 file(GLOB CANOPEN_BACKEND_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 add_library(canopen_backend ${CANOPEN_BACKEND_SOURCES})
@@ -19,7 +21,7 @@ target_include_directories(canopen_backend PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(canopen_backend PUBLIC
   runtime_core::runtime_core canopen_codec::canopen_codec hal_contract::hal_contract
-  canopen_master::canopen_master)
+  canopen_master::canopen_master socketcan_io::socketcan_io Threads::Threads)
 
 # Consumable package: find_package(canopen_backend REQUIRED) -> canopen_backend::canopen_backend.
 install(TARGETS canopen_backend EXPORT canopen_backendTargets ARCHIVE DESTINATION lib)

@@ -93,11 +93,11 @@ void CanopenBackend::send_all(const std::vector<cc::Frame>& frames) {
   for (const cc::Frame& f : frames) transport_->send(f);
 }
 
-void CanopenBackend::step(rc::MonoTime now) {
+std::size_t CanopenBackend::step(rc::MonoTime now, std::size_t max_frames) {
   now_ = now;
   std::size_t handled = 0;
   const auto drain = [&] {
-    while (handled < kMaxFramesPerStep) {
+    while (handled < max_frames) {
       const std::vector<cc::Frame> received = transport_->poll();
       if (received.empty()) return;
       handled += received.size();
@@ -109,6 +109,21 @@ void CanopenBackend::step(rc::MonoTime now) {
   if (session_) send_all(session_->tick(now));
   // The replies to this tick, the TPDOs answering its SYNC among them, reach poll() now.
   drain();
+  return handled;
+}
+
+void CanopenBackend::cancel(std::uint64_t op_id, const char* why, rc::MonoTime now) {
+  now_ = now;
+  if (session_) session_->cancel(op_id, why, now);
+}
+
+const char* CanopenBackend::op_error(std::uint64_t op_id) const {
+  if (const Refusal* r = refusal(op_id)) return r->error;
+  return session_ ? session_->op_error(op_id) : nullptr;
+}
+
+void CanopenBackend::set_event_observer(cm::VdriveSession::EventObserver observer) {
+  if (session_) session_->set_event_observer(std::move(observer));
 }
 
 // ---- ops ----

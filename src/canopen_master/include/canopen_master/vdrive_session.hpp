@@ -4,7 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "canopen_codec/codec.hpp"
@@ -169,6 +171,14 @@ struct SessionCounts {
   std::uint32_t quarantine_retries{};
 };
 
+// C6 for a session that is not at hand (the I/O worker's control side): whether a command closing
+// at `valid_until`, offered at `now`, can still be dispatched when the master's last SYNC was at
+// `last_sync` (std::nullopt before the first) on a grid of `bus_period`. VdriveSession::can_apply
+// is this with its own last SYNC.
+bool command_can_apply(std::optional<runtime_core::MonoTime> last_sync,
+                       runtime_core::Duration bus_period, runtime_core::MonoTime valid_until,
+                       runtime_core::MonoTime now);
+
 class VdriveSession {
  public:
   // Registers the TPDO1-3 layouts of every node with the master. Throws std::invalid_argument
@@ -204,6 +214,16 @@ class VdriveSession {
   bool can_apply(runtime_core::MonoTime valid_until, runtime_core::MonoTime now) const;
   // on_error: latches the inhibit at `now`; its frames leave with the next call.
   void inhibit(runtime_core::MonoTime now);
+  // C10: fails the op `op_id` now, as its deadline would (the caller's wait timed out). It ends
+  // with `why` (static storage), the epoch moves on, the inhibit latches and a cancelled arm
+  // fences; its frames leave with the next call. Nothing for an op that ended or is not known.
+  void cancel(std::uint64_t op_id, const char* why, runtime_core::MonoTime now);
+  // Called with every master event, inside on_frame and tick, before the session handles it
+  // (the I/O worker forwards them). It must not call into the session or the master.
+  using EventObserver = std::function<void(const MasterEvent&)>;
+  void set_event_observer(EventObserver observer) { observer_ = std::move(observer); }
+  // The instant of the master's last SYNC; std::nullopt before the first.
+  std::optional<runtime_core::MonoTime> last_sync() const { return last_sync_; }
   bool inhibited() const { return inhibited_; }
 
   // The robot snapshot (C4) with faults, stop states and counters.
@@ -414,6 +434,7 @@ class VdriveSession {
   std::array<SeqEntry, kSeqRing> seqs_{};
   std::size_t seqs_next_{0};
   std::optional<runtime_core::MonoTime> last_sync_;
+  EventObserver observer_;
 };
 
 }  // namespace canopen_master

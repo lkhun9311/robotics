@@ -69,9 +69,11 @@ class CanopenBackend final : public hal_contract::Backend {
 
   // Time passes to `now`: every received frame to the session, then the session's tick, then
   // what arrived in reply (the TPDOs answering this tick's SYNC included), until nothing more
-  // arrives. kMaxFramesPerStep is a soft bound, checked between poll() batches: a step stops
-  // polling once that many frames were handled, but a batch already taken is handled whole.
-  void step(runtime_core::MonoTime now);
+  // arrives. `max_frames` (kMaxFramesPerStep by default; the I/O worker passes its per-wake
+  // budget, B1) is a soft bound over both drains, checked between poll() batches: a step stops
+  // polling once that many frames were handled, but a batch already taken is handled whole; the
+  // tick runs either way. Returns the number of frames handled.
+  std::size_t step(runtime_core::MonoTime now, std::size_t max_frames = kMaxFramesPerStep);
 
   // ---- hal_contract::Backend ----
   void configure(const hal_contract::OpTicket& ticket, runtime_core::MonoTime now) override;
@@ -93,6 +95,21 @@ class CanopenBackend final : public hal_contract::Backend {
   bool can_apply(runtime_core::MonoTime valid_until, runtime_core::MonoTime now) const override {
     return session_ && session_->can_apply(valid_until, now);
   }
+
+  // ---- for the I/O worker (the one thread that steps the backend) ----
+  // C10: fails a pending op now (the caller's wait timed out); see VdriveSession::cancel.
+  void cancel(std::uint64_t op_id, const char* why, runtime_core::MonoTime now);
+  // Why the op failed: a refusal's reason or the session's (storage that lives as long as the
+  // backend); nullptr unless it failed.
+  const char* op_error(std::uint64_t op_id) const;
+  // Every master event the session handles (VdriveSession::set_event_observer); nothing for a
+  // backend built from a refused configuration.
+  void set_event_observer(canopen_master::VdriveSession::EventObserver observer);
+  // The master's last SYNC; std::nullopt before the first or without a session.
+  std::optional<runtime_core::MonoTime> last_sync() const {
+    return session_ ? session_->last_sync() : std::nullopt;
+  }
+  runtime_core::Duration bus_period() const { return config_.session.bus_period; }
 
   // ---- observation (tests, traces) ----
   // Throw std::logic_error for a backend built from a refused configuration.
