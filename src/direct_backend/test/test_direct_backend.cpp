@@ -103,6 +103,26 @@ TEST(DirectBackend, ExpiredCommandBrakesAndLatches) {
   EXPECT_TRUE(rig.backend.inhibited());
 }
 
+// A documented divergence from the vdrive, which E4 settles: here a new configure clears a
+// latched policy stop (the joints are reset), while a drive_core drive keeps its D11 policy latch
+// until an explicit policy reset (0x2015, drive_core Latch.PolicyResetOverSdo), so on CANopen
+// every contract case that stops the device starts from a fresh fixture.
+TEST(DirectBackend, ConfigureClearsALatchedPolicyStop) {
+  Rig rig;
+  rig.command(1, rig.t + rc::milliseconds(20));
+  for (int i = 0; i < 100; ++i) rig.tick();  // expired, braked to rest
+  ASSERT_TRUE(rig.backend.poll(rig.t).faults.has(hc::Fault::kPolicyStop)) << "INCONCLUSIVE";
+  ASSERT_TRUE(rig.backend.inhibited()) << "INCONCLUSIVE";
+  rig.backend.configure({++rig.ids, rig.t + rc::milliseconds(3000)}, rig.t);
+  rig.tick();
+  EXPECT_EQ(rig.backend.op_state(rig.ids), hc::OpState::kSucceeded);
+  EXPECT_FALSE(rig.backend.inhibited());
+  EXPECT_FALSE(rig.backend.poll(rig.t).faults.has(hc::Fault::kPolicyStop));
+  rig.backend.activate({++rig.ids, rig.t + rc::milliseconds(1000)}, rig.t);
+  rig.tick();
+  EXPECT_EQ(rig.backend.op_state(rig.ids), hc::OpState::kSucceeded);
+}
+
 TEST(DirectBackend, NoCommandFor30msBrakes) {
   Rig rig;
   rig.command(1, rig.t + rc::milliseconds(500));  // valid for long: only the silence stops it

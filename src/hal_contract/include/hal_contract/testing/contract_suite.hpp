@@ -20,10 +20,12 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <vector>
 
 #include "hal_contract/backend.hpp"
@@ -261,14 +263,26 @@ class Contract : public ::testing::Test {
     ASSERT_EQ(hal_.op_state(a), OpState::kSucceeded) << "INCONCLUSIVE: activate failed";
   }
 
-  // Arms `id` with a hold of `hold`; returns the arm latency.
+  // Arms `id` with a hold of `hold`; returns the arm latency (recorded as arm_latency_ms; a
+  // case that arms twice records the last).
   runtime_core::Duration arm(const AuthorityId& id, runtime_core::Duration hold) {
     const OpHandle h = hal_.arm(ArmRequest{id, now() + hold, ++request_id_}, now());
     const runtime_core::Duration latency = settle(h, kArmTimeout);
     EXPECT_EQ(hal_.op_state(h), OpState::kSucceeded) << "arm did not complete";
     feedback_ = hal_.read(now());
+    measure("arm_latency_ms", ms(latency));
     return latency;
   }
+
+  // A measured value of this case, as a property of the gtest XML report (the README's backend
+  // table is generated from it, tools/evidence/backend_table.py). Logic time: the values are
+  // the same on every run.
+  static void measure(const char* key, double value) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(3) << value;
+    ::testing::Test::RecordProperty(key, text.str());
+  }
+  static double ms(runtime_core::Duration d) { return static_cast<double>(d.ns) / 1e6; }
 
   Ramp ramp_from_here(const AuthorityId& id) {
     feedback_ = hal_.read(now());
@@ -316,11 +330,15 @@ class Contract : public ::testing::Test {
     EXPECT_LE((end - last_approval).ns, kStopBound.ns)
         << "motion ended " << (end - last_approval).ns << " ns after the last approval";
     const DeviceState final_state = trace_.back().device;
+    double travel = 0.0;
     for (std::size_t i = 0; i < kJoints; ++i) {
+      travel = std::max(travel, std::abs(final_state.position[i] - at.device.position[i]));
       EXPECT_LE(std::abs(final_state.position[i] - at.device.position[i]), kMaxTravelAfterApproval)
           << "joint " << i;
       EXPECT_LT(std::abs(final_state.velocity[i]), kRestVelocity) << "joint " << i;
     }
+    measure("motion_end_ms", ms(end - last_approval));
+    measure("travel_rad", travel);
   }
 
   static constexpr AuthorityId kA{runtime_core::ManagerInstance{1}, runtime_core::SessionId{1},
@@ -436,11 +454,16 @@ TYPED_TEST_P(Contract, TracksApprovedCommandsWithinVmax) {
     EXPECT_LE(std::abs(e.target - ramp.at(*e.source_seq).snapshot.position[e.node]), 1e-6)
         << "node " << e.node;
   }
+  double fastest_sampled = 0.0;  // The device's own velocity, every W.
   for (const TraceSample& s : this->trace_) {
-    for (double v : s.device.velocity) EXPECT_LE(std::abs(v), kVMax + 1e-9);
+    for (double v : s.device.velocity) {
+      EXPECT_LE(std::abs(v), kVMax + 1e-9);
+      fastest_sampled = std::max(fastest_sampled, std::abs(v));
+    }
   }
   ASSERT_GT(approved, 0U) << "INCONCLUSIVE: no approved command was applied";
   EXPECT_GE(fastest, 0.5) << "INCONCLUSIVE: the device never moved";
+  this->measure("fastest_rad_s", fastest_sampled);
   EXPECT_TRUE(this->events_of(DeviceEventKind::kLocalStop).empty());
 }
 
@@ -597,15 +620,18 @@ TYPED_TEST_P(Contract, SteadyAcceptanceLatency) {
     if (!seen.has_value()) seen = s.at;
   }
   std::size_t seen_count = 0;
+  runtime_core::Duration slowest{};
   for (std::size_t k = 0; k < approved_at.size(); ++k) {
     if (!first_seen[k].has_value()) continue;
     ++seen_count;
+    slowest = std::max(slowest, *first_seen[k] - approved_at[k]);
     EXPECT_LE((*first_seen[k] - approved_at[k]).ns,
               runtime_core::Duration{TypeParam::Traits::kAcceptanceLatency}.ns)
         << "seq " << k + 1;
   }
   const std::uint64_t superseded = this->feedback_.counters.superseded - superseded_before;
   ASSERT_GT(seen_count, 0U) << "INCONCLUSIVE: no command was ever reported applied";
+  this->measure("acceptance_latency_ms", this->ms(slowest));
   EXPECT_EQ(seen_count + superseded, approved_at.size())
       << "a command was neither applied nor counted as superseded";
 }
@@ -735,8 +761,10 @@ TYPED_TEST_P(Contract, InhibitStopsEveryAxisAndConfirms) {
   const std::vector<DeviceEvent> local = this->events_of(DeviceEventKind::kLocalStop);
   ASSERT_FALSE(local.empty()) << "INCONCLUSIVE: the injected stop did not happen";
   EXPECT_EQ(local.front().node, kNode);
+  runtime_core::Duration group_stop{};
   for (std::size_t i = 0; i < kJoints; ++i) {
     ASSERT_TRUE(stopped_at[i].has_value()) << "axis " << i << " never got a stop";
+    group_stop = std::max(group_stop, *stopped_at[i] - injected);
     EXPECT_LE((*stopped_at[i] - injected).ns, kGroupStopLatency.ns) << "axis " << i;
     for (const DeviceEvent& e : this->events_of(DeviceEventKind::kActuated)) {
       if (e.node == i) {
@@ -745,6 +773,7 @@ TYPED_TEST_P(Contract, InhibitStopsEveryAxisAndConfirms) {
     }
     EXPECT_EQ(this->feedback_.stop[i], StopStatus::kConfirmed) << "axis " << i;
   }
+  this->measure("group_stop_latency_ms", this->ms(group_stop));
   EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
   EXPECT_FALSE(this->feedback_.faults.has(Fault::kStopUnconfirmed));
   this->expect_stopped_within_bound(injected);

@@ -154,3 +154,43 @@ def test_console_ends_at_stdin_eof_after_its_commands(start_bank, proxy, procs):
              if e.get("event") in ("sdo_ok", "cmd_done", "scenario_done", "scenario_failed")]
     assert order == ["sdo_ok", "cmd_done", "scenario_done"], cli.events[-10:]
     assert [e["value"] for e in cli.of("sdo_ok", node=3, index=0x1000)] == [0x00020192]
+
+
+def test_fresh_master_over_operational_drives_fails_configure(start_bank, proxy, procs):
+    """A documented E3c limit, not a wanted behaviour: a new master process (a fresh session)
+    that meets drives a previous master left Operational, stopped on their own after its stream,
+    fails configure, because their Quick Stop Active TPDOs under the old tag latch its inhibit.
+    Clearing that, and the drives' policy latch from an expiry or timeout stop, is the explicit
+    recovery of E4; until then a master ends its stream with a deactivate (as the arm_hw process
+    test does). If this ever passes configure, the limit is gone and the README must change."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    first = start_cli(procs, "stream", "--duration-ms", "500")
+    rc, end = run_to_end(first, 20)
+    if rc != 0 or end["event"] != "scenario_done" or not step_done(first, "arm") or \
+            not step_done(first, "arm")["ok"]:
+        inconclusive(f"the first master's stream did not run: {rc} {end}")
+    deactivated = step_done(first, "deactivate")
+    if deactivated is not None:
+        inconclusive(f"the first master deactivated, so the drives are not left Operational: "
+                     f"{deactivated}")
+    t_second = bank.trace.wait_for(lambda r: r.get("event") == "drive" and
+                                   r.get("kind") == "quick_stop", 2, "the drives' own stop")
+    nmt = {}
+    for r in bank.trace.poll():
+        if r.get("event") == "nmt":
+            nmt[r["node"]] = r["state"]
+    if any(nmt.get(n) != 0x05 for n in NODES):
+        inconclusive(f"not every drive was left Operational: {nmt}")
+
+    second = start_cli(procs, "stream", "--duration-ms", "500")
+    rc, end = run_to_end(second, 20)
+    configure = step_done(second, "configure")
+    assert configure is not None, f"configure never ended: {end}"
+    assert not configure["ok"], f"configure passed over drives left Operational: {configure}"
+    assert "unexpected event latched the inhibit" in configure.get("error", ""), configure
+    assert rc == 1 and end["event"] == "scenario_failed", (rc, end)
+    late = [r for r in bank.trace.poll() if r.get("event") == "drive" and
+            r.get("kind") == "actuated" and r["t_ns"] > t_second["t_ns"]]
+    assert not late, f"a drive actuated under the second master: {late[:3]}"
+    print(f"second master's configure failed: {configure['error']}")

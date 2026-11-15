@@ -9,6 +9,7 @@ import pytest
 import common
 import fault_timeline
 import frame_trace
+import backend_table
 import bandwidth_table
 import master_frame_trace
 import matrix_table
@@ -345,3 +346,10 @@ def test_capture_parsing_is_shared_between_judges_and_evidence():
     data = next(d for _, _, d in judges.frames(obs, "device", rpdo1) if len(d) == 8)
     assert common.decode("RPDO1", data) == judges.decode("RPDO1", data)
     assert common.drive_records(obs) == judges.drive_records(obs)
+
+
+def test_backend_table_never_reports_a_missing_or_failed_case_as_pass():
+    assert backend_table.cell(None) == "MISSING"
+    assert backend_table.cell(("FAIL", {"motion_end_ms": "200.000"})) == \
+        "FAIL: motion ended 200.000 ms after the reference"
+    assert backend_table.cell(("PASS", {})) == "PASS"
