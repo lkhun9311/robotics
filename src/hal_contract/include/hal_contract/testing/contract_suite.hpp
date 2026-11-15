@@ -416,7 +416,9 @@ TYPED_TEST_P(Contract, TracksApprovedCommandsWithinVmax) {
   this->arm(this->kA, runtime_core::milliseconds(500));
   Ramp ramp = this->ramp_from_here(this->kA);
   for (int i = 0; i < 50; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
-  this->step(runtime_core::Duration{TypeParam::Traits::kAcceptanceLatency});
+  // One W past the acceptance bound: the device applies the last command within the bound and
+  // needs up to one W step to reach it (on CANopen the last ramp step ends on that W).
+  this->step(plus(TypeParam::Traits::kAcceptanceLatency, kW));
   const HalSetpoint last = ramp.at(ramp.seq);
   const DeviceState d = this->fx_.device();
   for (std::size_t i = 0; i < kJoints; ++i) {
@@ -443,7 +445,7 @@ TYPED_TEST_P(Contract, TracksApprovedCommandsWithinVmax) {
 }
 
 TYPED_TEST_P(Contract, ExpiredPermitStopsWithinBound) {
-  // (a) The permit expires while the controller keeps writing the ramp.
+  // The permit expires while the controller keeps writing the ramp.
   this->bring_up();
   this->arm(this->kA, runtime_core::milliseconds(500));
   Ramp ramp = this->ramp_from_here(this->kA);
@@ -459,11 +461,11 @@ TYPED_TEST_P(Contract, ExpiredPermitStopsWithinBound) {
   this->expect_stopped_within_bound(last_approval);
   EXPECT_FALSE(this->events_of(DeviceEventKind::kLocalStop).empty());
   EXPECT_TRUE(this->feedback_.faults.has(Fault::kPolicyStop));
+}
 
-  // (b) Commands keep being approved but stop reaching the device.
-  this->trace_.clear();
-  this->events_.clear();
-  this->writes_.clear();
+// Commands keep being approved but stop reaching the device. A fresh fixture: recovery after a
+// latched device policy stop (policy reset) is E4, so this never re-arms a stopped device.
+TYPED_TEST_P(Contract, LostCommandsStopWithinBound) {
   this->bring_up();
   const AuthorityId b{runtime_core::ManagerInstance{1}, runtime_core::SessionId{1},
                       runtime_core::Generation{2}};
@@ -785,10 +787,10 @@ TYPED_TEST_P(Contract, StaleAtRestSampleConfirmsNothing) {
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
-                            RepeatedSnapshotDoesNotExtendLife, OldIdentityRefusedAfterReadoption,
-                            LostFeedbackTurnsStale, SteadyAcceptanceLatency,
-                            SupersededCommandsAreCountedNotAcknowledged, SourceTimeNotReceiveTime,
-                            ReArmDisablesBeforeCommit, InhibitStopsEveryAxisAndConfirms,
-                            StaleAtRestSampleConfirmsNothing);
+                            LostCommandsStopWithinBound, RepeatedSnapshotDoesNotExtendLife,
+                            OldIdentityRefusedAfterReadoption, LostFeedbackTurnsStale,
+                            SteadyAcceptanceLatency, SupersededCommandsAreCountedNotAcknowledged,
+                            SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
+                            InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing);
 
 }  // namespace hal_contract::testing
