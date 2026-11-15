@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "vdrive_bank/loop.hpp"
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -112,6 +117,49 @@ Bank::InjectResult BankLoop::inject(std::string_view command) {
   Bank::InjectResult res = bank_.inject(command, observe(Call::kInject, now_()));
   send(res.frames);
   return res;
+}
+
+int BankLoop::serve_inject(int fd) {
+  using Kind = trace::InjectIo::Kind;
+  int served = 0;
+  for (;;) {
+    std::array<char, 128> buf{};
+    sockaddr_un peer{};
+    socklen_t peer_len = sizeof peer;
+    // MSG_TRUNC: the return value is the datagram's real length, even when it did not fit.
+    const ssize_t n = ::recvfrom(fd, buf.data(), buf.size(), MSG_TRUNC,
+                                 reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        note_inject_io(Kind::kRecvError, errno);
+      }
+      return served;
+    }
+    ++served;
+    std::string reply;
+    if (static_cast<std::size_t>(n) > buf.size()) {
+      note_inject_io(Kind::kTruncated, n);
+      reply = "err datagram truncated: " + std::to_string(n) + " bytes, at most " +
+              std::to_string(buf.size());
+    } else {
+      std::string_view command(buf.data(), static_cast<std::size_t>(n));
+      while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
+        command.remove_suffix(1);
+      }
+      const Bank::InjectResult res = inject(command);
+      reply = res.ok ? std::string("ok") : "err " + res.error;
+    }
+    if (peer_len <= sizeof(sa_family_t)) {
+      continue;  // An unbound sender cannot be answered.
+    }
+    if (::sendto(fd, reply.data(), reply.size(), MSG_DONTWAIT,
+                 reinterpret_cast<const sockaddr*>(&peer), peer_len) < 0) {
+      note_inject_io(Kind::kSendError, errno);
+    }
+  }
 }
 
 std::vector<TraceRecord> BankLoop::snapshot(MonoTime at) const {

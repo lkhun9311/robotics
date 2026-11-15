@@ -44,6 +44,12 @@ class BankLoop {
   void run_once();
   // B6: applies one command at the current instant and sends the frames it produces.
   Bank::InjectResult inject(std::string_view command);
+  // Every datagram waiting on the non-blocking UNIX datagram socket `fd`: applied in order
+  // (inject), each answered to its sender with "ok" or "err <reason>". Failures of the socket
+  // itself are counted and traced (note_inject_io): a receive error, a reply that cannot be
+  // sent, and a datagram longer than the buffer, which is rejected rather than applied cut
+  // short. Returns the number of datagrams read.
+  int serve_inject(int fd);
 
   runtime_core::MonoTime next_release() const;
   const LoopCounts& counts() const { return counts_; }

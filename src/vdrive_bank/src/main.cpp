@@ -159,51 +159,6 @@ int bind_inject(const std::string& path, std::string* error) {
   return fd;
 }
 
-// Every datagram waiting on the inject socket: applied in order, each answered to its sender.
-// Failures of the socket itself are counted and traced (BankLoop::note_inject_io): a receive
-// error, a reply that cannot be sent, and a datagram longer than the buffer, which is rejected
-// rather than applied cut short.
-void serve_inject(int fd, vdrive_bank::BankLoop& loop) {
-  using Kind = vdrive_bank::trace::InjectIo::Kind;
-  for (;;) {
-    std::array<char, 128> buf{};
-    sockaddr_un peer{};
-    socklen_t peer_len = sizeof peer;
-    // MSG_TRUNC: the return value is the datagram's real length, even when it did not fit.
-    const ssize_t n = ::recvfrom(fd, buf.data(), buf.size(), MSG_TRUNC,
-                                 reinterpret_cast<sockaddr*>(&peer), &peer_len);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        loop.note_inject_io(Kind::kRecvError, errno);
-      }
-      return;
-    }
-    std::string reply;
-    if (static_cast<std::size_t>(n) > buf.size()) {
-      loop.note_inject_io(Kind::kTruncated, n);
-      reply = "err datagram truncated: " + std::to_string(n) + " bytes, at most " +
-              std::to_string(buf.size());
-    } else {
-      std::string_view command(buf.data(), static_cast<std::size_t>(n));
-      while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
-        command.remove_suffix(1);
-      }
-      const vdrive_bank::Bank::InjectResult res = loop.inject(command);
-      reply = res.ok ? std::string("ok") : "err " + res.error;
-    }
-    if (peer_len <= sizeof(sa_family_t)) {
-      continue;  // An unbound sender cannot be answered.
-    }
-    if (::sendto(fd, reply.data(), reply.size(), MSG_DONTWAIT,
-                 reinterpret_cast<const sockaddr*>(&peer), peer_len) < 0) {
-      loop.note_inject_io(Kind::kSendError, errno);
-    }
-  }
-}
-
 // The bound inject socket: closed and its file removed on every way out of run(), exceptions
 // included.
 struct InjectSocket {
@@ -328,7 +283,7 @@ int run(const Args& args) {
       [[maybe_unused]] const ssize_t n = ::read(timer_fd, &expirations, sizeof expirations);
     }
     if (inject_fd >= 0 && (fds[3].revents & POLLIN) != 0) {
-      serve_inject(inject_fd, loop);
+      loop.serve_inject(inject_fd);
     }
     loop.run_once();
   }
