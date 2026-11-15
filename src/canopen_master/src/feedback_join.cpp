@@ -37,7 +37,8 @@ MonoTime unwrap_us(std::uint32_t stamp_us, MonoTime reference) {
   return MonoTime{(ref_us + delta) * 1000};
 }
 
-FeedbackJoin::FeedbackJoin(Duration skew_limit) : skew_limit_(skew_limit) {}
+FeedbackJoin::FeedbackJoin(Duration skew_limit, Duration alignment)
+    : skew_limit_(skew_limit), alignment_(alignment) {}
 
 FeedbackJoin::Partial& FeedbackJoin::slot(Node& n, std::uint16_t seq) {
   Partial* free = nullptr;
@@ -71,6 +72,11 @@ std::optional<NodeSample> FeedbackJoin::complete(Node& n, Partial& p) {
     return std::nullopt;  // Completed late: an older sample than the one already published.
   }
   n.latest = sample;
+  for (std::size_t k = kHistory - 1; k > 0; --k) {
+    n.history[k] = n.history[k - 1];
+  }
+  n.history[0] = sample;
+  n.kept = std::min(n.kept + 1, kHistory);
   return sample;
 }
 
@@ -128,12 +134,25 @@ const std::optional<NodeSample>& FeedbackJoin::node(std::size_t node) const {
 
 std::optional<hal_contract::Feedback> FeedbackJoin::latest() const {
   hal_contract::Feedback f{};
-  MonoTime oldest{};
-  MonoTime newest{};
+  MonoTime aligned{};
   for (std::size_t i = 0; i < kSessionNodes; ++i) {
     const std::optional<NodeSample>& s = nodes_[i].latest;
     if (!s) {
       return std::nullopt;
+    }
+    aligned = i == 0 ? s->sampled_at : std::min(aligned, s->sampled_at);
+  }
+  const MonoTime limit = aligned + alignment_;
+  MonoTime oldest{};
+  MonoTime newest{};
+  for (std::size_t i = 0; i < kSessionNodes; ++i) {
+    const Node& n = nodes_[i];
+    const NodeSample* s = &n.history[n.kept - 1];  // Oldest kept, if none is aligned.
+    for (std::size_t k = 0; k < n.kept; ++k) {
+      if (n.history[k].sampled_at <= limit) {
+        s = &n.history[k];
+        break;
+      }
     }
     f.position[i] = static_cast<double>(s->position_urad) * kMicro;
     f.velocity[i] = static_cast<double>(s->velocity_urad_s) * kMicro;

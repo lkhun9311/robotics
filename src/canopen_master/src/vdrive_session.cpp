@@ -167,7 +167,9 @@ Identity eds_identity() {
 // ---- construction and calls ----
 
 VdriveSession::VdriveSession(Master& master, SessionConfig config)
-    : master_(master), config_(config), join_(Duration{config.bus_period.ns + kDriveTick.ns}) {
+    : master_(master),
+      config_(config),
+      join_(Duration{config.bus_period.ns + kDriveTick.ns}, kDriveTick) {
   if (config_.bus_period != kBusPeriod || config_.lease.ns <= 0 || config_.lease > kMaxLease ||
       config_.max_feedback_age < kMinFeedbackAge || config_.max_feedback_age > kMaxFeedbackAge) {
     throw std::invalid_argument(

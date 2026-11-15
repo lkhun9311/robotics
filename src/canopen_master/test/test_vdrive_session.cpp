@@ -1345,6 +1345,66 @@ TEST(FeedbackJoin, SampleTimeUnwrapsAcrossWrap) {
   EXPECT_EQ(canopen_master::unwrap_us(wire_us(rx + microseconds(5)), rx), rx + microseconds(5));
 }
 
+TEST(FeedbackJoin, MidBurstAfterLateSyncIsNotSkewed) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t0 = kT0 + milliseconds(500);
+  for (std::size_t n = 0; n < kNodes; ++n) {
+    feed(j, n, 1, t0, t0, static_cast<std::int32_t>(100 + n));
+  }
+  // The next SYNC comes one worker tick late plus jitter (13 ms), and only nodes 1-3 have
+  // answered it when the snapshot is read.
+  const MonoTime t1 = t0 + milliseconds(13);
+  for (std::size_t n = 0; n < 3; ++n) {
+    feed(j, n, 2, t1, t1, static_cast<std::int32_t>(200 + n));
+  }
+  const auto f = j.latest();
+  ASSERT_TRUE(f);
+  EXPECT_FALSE(f->skewed) << "a healthy burst read mid-way is not skew";
+  EXPECT_EQ(f->sampled_at, t0);
+  for (std::size_t n = 0; n < kNodes; ++n) {
+    // Every node from the previous SYNC's set, the early ones included.
+    EXPECT_EQ(f->node_sampled_at[n], t0) << n;
+    EXPECT_DOUBLE_EQ(f->position[n], static_cast<double>(100 + n) * 1e-6) << n;
+  }
+  // The burst completes: the snapshot moves to the new SYNC as one set.
+  for (std::size_t n = 3; n < kNodes; ++n) {
+    feed(j, n, 2, t1, t1, static_cast<std::int32_t>(200 + n));
+  }
+  ASSERT_TRUE(j.latest());
+  EXPECT_FALSE(j.latest()->skewed);
+  EXPECT_EQ(j.latest()->sampled_at, t1);
+  EXPECT_DOUBLE_EQ(j.latest()->position[0], 200e-6);
+}
+
+TEST(FeedbackJoin, LaggingNodeIsStillSkewedOrStale) {
+  const MonoTime t0 = kT0 + milliseconds(500);
+  // (a) Node 6 lags three SYNCs: the aligned set is the old one, so its age shows the lag.
+  {
+    FeedbackJoin j(kSkew);
+    for (std::uint16_t k = 0; k < 4; ++k) {
+      const MonoTime t = t0 + milliseconds(10 * k);
+      for (std::size_t n = 0; n < kNodes; ++n) {
+        if (n != 5 || k == 0) feed(j, n, static_cast<std::uint16_t>(k + 1), t, t);
+      }
+    }
+    ASSERT_TRUE(j.latest());
+    EXPECT_EQ(j.latest()->sampled_at, t0) << "the snapshot is as old as its oldest node";
+  }
+  // (b) Node 6 lags further than the others' history reaches: the set cannot be aligned.
+  {
+    FeedbackJoin j(kSkew);
+    for (std::uint16_t k = 0; k < 8; ++k) {
+      const MonoTime t = t0 + milliseconds(10 * k);
+      for (std::size_t n = 0; n < kNodes; ++n) {
+        if (n != 5 || k == 0) feed(j, n, static_cast<std::uint16_t>(k + 1), t, t);
+      }
+    }
+    ASSERT_TRUE(j.latest());
+    EXPECT_TRUE(j.latest()->skewed);
+    EXPECT_EQ(j.latest()->sampled_at, t0);
+  }
+}
+
 TEST(FeedbackJoin, OldestSourceTimeIsSnapshotTime) {
   FeedbackJoin j(kSkew);
   const MonoTime rx = kT0 + milliseconds(500);

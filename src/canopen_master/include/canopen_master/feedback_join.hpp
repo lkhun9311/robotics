@@ -51,10 +51,14 @@ class FeedbackJoin {
  public:
   // Partial samples held per node; a fourth sample_seq evicts the oldest partial one.
   static constexpr std::size_t kPartials = 4;
+  // Complete samples kept per node for aligning a snapshot on one SYNC.
+  static constexpr std::size_t kHistory = 4;
 
   // `skew_limit`: a snapshot whose newest and oldest node source times differ by more than
   // this is marked skewed (C4: T_bus + W).
-  explicit FeedbackJoin(runtime_core::Duration skew_limit);
+  // `alignment`: how far after the aligned instant a sample still counts as the same SYNC (W).
+  explicit FeedbackJoin(runtime_core::Duration skew_limit,
+                        runtime_core::Duration alignment = runtime_core::Duration{2'000'000});
 
   // Each returns the node's sample this TPDO completed, when it is the node's newest complete
   // one; std::nullopt otherwise (still partial, or older than the newest). `node` is 0..5;
@@ -74,8 +78,13 @@ class FeedbackJoin {
   // The node's newest complete sample.
   const std::optional<NodeSample>& node(std::size_t node) const;
 
-  // The robot snapshot from each node's newest complete sample: position and velocity (rad,
-  // rad/s), node_sampled_at, sampled_at = the oldest of the six source times, and skewed.
+  // The robot snapshot from an aligned set: t* = the oldest of the six nodes' newest complete
+  // source times; each node contributes its newest complete sample with source time <= t* +
+  // alignment (its oldest kept one if none is). So a snapshot read while a SYNC's TPDO burst is
+  // only partly in is the previous SYNC's set, never a mix of two SYNCs. position and velocity
+  // (rad, rad/s), node_sampled_at; sampled_at = the oldest chosen source time (t* whenever every
+  // node has a sample of t*'s SYNC, older otherwise); skewed when the chosen times differ by more
+  // than skew_limit (a node lagging beyond the others' history).
   // std::nullopt until every node has a complete sample. The other Feedback fields are left at
   // their defaults; the session fills them.
   std::optional<hal_contract::Feedback> latest() const;
@@ -90,12 +99,15 @@ class FeedbackJoin {
   struct Node {
     std::array<Partial, kPartials> partials{};
     std::optional<NodeSample> latest{};
+    std::array<NodeSample, kHistory> history{};  // Newest first.
+    std::size_t kept{0};
   };
 
   Partial& slot(Node& n, std::uint16_t seq);
   std::optional<NodeSample> complete(Node& n, Partial& p);
 
   runtime_core::Duration skew_limit_;
+  runtime_core::Duration alignment_;
   std::array<Node, kSessionNodes> nodes_{};
   std::uint64_t order_{0};
 };
