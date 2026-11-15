@@ -665,6 +665,31 @@ A deliberate data race in a scratch test made the stage fail before the race was
 
 ### Master fault rows and the CANopenNode matrix
 
+CI run [43706394332](https://github.com/lkhun9311/robotics/actions/runs/43706394332)
+(dispatched on `feat/e3c-host-hal` at `97c81eb`, which differs from the commit that adds this
+paragraph only in this README) passed, 484 vcan tests with no failure. The table is generated
+from that run's `pytest-vcan.xml` artifact, not from a committed file:
+
+    gh run download 43706394332 -n checks-artifacts -D ci-43706394332
+    python3 tools/evidence/matrix_table.py ci-43706394332/artifacts/pytest-vcan.xml --stage e3c
+
+| Row | What | Test | Result |
+|---|---|---|---|
+| X1 | node 3 TPDOs lost 35 ms | `test_master_faults.py::test_short_feedback_outage_latches_inhibit` | PASS |
+| X2 | node 3 TPDOs lost 100 ms | `test_master_faults.py::test_dropped_tpdos_make_feedback_stale` | PASS |
+| X3 | node 3 RPDO2 dropped | `test_master_faults.py::test_one_node_command_loss_stops_the_group` | PASS |
+| X4 | node 4 heartbeats dropped | `test_master_faults.py::test_heartbeat_loss_raises_fault_without_reset` | PASS |
+| X5 | node 5 SDO answer dropped during arm | `test_master_faults.py::test_sdo_timeout_during_arm_fails_arming` | PASS |
+| X6 | all RPDO2 delayed 60 ms | `test_master_faults.py::test_all_commands_delayed_stop_the_group` | PASS |
+| X7 | some node 3 RPDO2 delayed 60 ms | `test_master_faults.py::test_minority_delayed_commands_never_actuate_late` | PASS |
+| N1 | NMT states and service gating | `test_master_matrix.py::test_master_nmt_states_and_service_gating` | PASS |
+| N2 | boot-up and heartbeat | `test_master_matrix.py::test_master_first_heartbeat_missing_vs_running_timeout` | PASS |
+| N3 | SDO expedited transfers and aborts | `test_master_matrix.py::test_master_sdo_expedited_and_aborts` | PASS |
+| N4 | PDO bytes and DLC | `test_master_matrix.py::test_master_pdo_bytes_and_lengths` | PASS |
+| N5 | SYNC application and sampling order | `test_master_matrix.py::test_master_sync_application_and_sampling_order` | PASS |
+| N6 | EMCY reception | `test_master_matrix.py::test_master_emcy_reception` | PASS |
+| N7 | activation refused on missing capabilities | `test_master_matrix.py::test_master_refuses_activation_on_canopennode` | PASS |
+
 X1-X7 run `canopen_master_cli` against `vdrive_bank` through `bus_fault_proxy`, whose rules
 (`config/interop/faults/master_*.rules`) inject the fault after the arm and a moving baseline.
 N1-N7 run it against `canopend` through the proxy with no rules. They are judged like the E3b
