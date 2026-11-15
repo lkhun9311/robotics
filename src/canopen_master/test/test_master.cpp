@@ -101,7 +101,8 @@ TEST(Master, HeartbeatLossAt250msAndSendsNothing) {
   append(out, m.tick(at(0)));
   // Node 2 keeps sending a TPDO and an unknown frame after its last heartbeat: neither is a
   // heartbeat, so neither may keep the consumer alive.
-  for (std::int64_t ms = 1; ms <= 2010; ++ms) {
+  // Loss at 260 ms; the loop runs to loss + 2 s inclusive.
+  for (std::int64_t ms = 1; ms <= 2260; ++ms) {
     append(out, m.tick(at(ms)));
     if (ms == 10) {
       append(out, m.on_frame(frame(0x702, {0x05}), at(ms)));  // The last heartbeat.
@@ -122,10 +123,10 @@ TEST(Master, HeartbeatLossAt250msAndSendsNothing) {
   EXPECT_EQ(lost[0].at, at(260));  // Last heartbeat at 10 ms + 250 ms; equality is expired.
   EXPECT_TRUE(of_kind(events, MasterEventKind::kBootTimeout).empty());
   EXPECT_EQ(m.heartbeat_status(kNode2), HeartbeatStatus::kLost);
-  EXPECT_FALSE(has_cob(out, 0x000));  // No NMT command in reaction, from start to loss + 1.75 s.
+  EXPECT_FALSE(has_cob(out, 0x000));  // No NMT command in reaction, from start to loss + 2 s.
   EXPECT_EQ(m.nmt_state(kNode2), cc::NmtState::kOperational);
 
-  m.on_frame(frame(0x702, {0x05}), at(2100));
+  m.on_frame(frame(0x702, {0x05}), at(2300));
   EXPECT_EQ(of_kind(m.drain_events(), MasterEventKind::kHeartbeatResumed).size(), 1U);
   EXPECT_EQ(m.heartbeat_status(kNode2), HeartbeatStatus::kAlive);
 }
