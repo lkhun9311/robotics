@@ -19,8 +19,9 @@
 //   dispatch {seq, approved, source_seq}        the session sent a new wire command_seq (C6):
 //                                               an approved command or an arm hold
 //   stop {stop:[...]}                           the per-node stop status changed (C18)
-//   feedback {fresh, age_ns}                    the published feedback's age (now - the oldest
-//                                               node sample) crossed --max-feedback-age (30 ms)
+//   feedback {fresh, skewed, age_ns}            the published feedback's age (now - the oldest
+//                                               node sample) crossed 30 ms, or its skew flag
+//                                               changed
 //   faults {bits, faults:[...]}                 the Feedback fault set changed
 //   verdict {seq, verdict, age_ns}              stream: the HalVerdict of a write differs from the
 //                                               one before (the first write included)
@@ -535,9 +536,11 @@ class HalRun {
   void report_feedback(rc::MonoTime t) {
     if (feedback_.sampled_at.ns != 0) {
       const bool fresh = age_ns(t) <= static_cast<std::uint64_t>(kFeedbackAge.ns);
-      if (!last_fresh_ || *last_fresh_ != fresh) {
-        last_fresh_ = fresh;
-        out_.emit("feedback", std::string("\"fresh\":") + (fresh ? "true" : "false") + "," +
+      const int state = (fresh ? 1 : 0) | (feedback_.skewed ? 2 : 0);
+      if (!last_fresh_ || *last_fresh_ != state) {
+        last_fresh_ = state;
+        out_.emit("feedback", std::string("\"fresh\":") + (fresh ? "true" : "false") +
+                                  ",\"skewed\":" + (feedback_.skewed ? "true" : "false") + "," +
                                   num("age_ns", age_ns(t)));
       }
     }
@@ -574,7 +577,7 @@ class HalRun {
   std::optional<rc::MonoTime> arm_at_;
   bool waiting_arm_{false};
   std::optional<hc::HalVerdict> last_verdict_;
-  std::optional<bool> last_fresh_;
+  std::optional<int> last_fresh_;
   std::uint32_t last_faults_{0};
   Stage stage_{Stage::kConfigure};
   hc::OpHandle op_{};
