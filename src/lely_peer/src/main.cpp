@@ -46,9 +46,9 @@
 //   console            the commands of lely_peer::parse_console, one per line on stdin, each
 //                      performed in order on the driver of its node; `quit`, SIGTERM/SIGINT or
 //                      the duration end it with scenario_done; a line that does not parse fails it
-//   pdo_stream         commit_and_enable, then K updates of RPDO1/RPDO2 (one per SYNC, seq + 1,
-//                      valid_until = now + --validity-ms) that Lely sends as synchronous PDOs;
-//                      then stop
+//   pdo_stream         commit_and_enable with controlword 0x0F written right after the second
+//                      of K updates of RPDO1/RPDO2 (one per SYNC, seq + 1, valid_until = now +
+//                      --validity-ms) that Lely sends as synchronous PDOs; then stop
 // Every PDO is encoded by Lely from the remote-mapped objects of the master DCF (dcfgen -r); the
 // peer writes values, never frames.
 #include <lely/coapp/fiber_driver.hpp>
@@ -302,9 +302,13 @@ class PeerDriver : public canopen::FiberDriver {
                        num("valid_until", until) + num("tag", tag_));
     --remaining_;
     ++sent_;
-    if (enable_pending_) {
-      // Enable Operation right after the first update: its fragments go out at the next SYNC
-      // and are actuated at the one after, inside the drive's 30 ms command timeout.
+    if (enable_pending_ && (sent_ == 2 || remaining_ == 0)) {
+      // Enable Operation right after the second update. Lely sent the first one at this SYNC,
+      // ahead of this controlword, so the drive enters Operation Enabled with a command in its
+      // window and actuates it at the next SYNC, 10 ms after the entry. The guards count from
+      // the entry: were the first update lost, the second is actuated 20 ms after it, still
+      // 10 ms inside the 30 ms command timeout (enabling after the first update would put that
+      // case on the timeout itself).
       enable_pending_ = false;
       if (!Controlword(0x0F)) {
         streaming_ = false;

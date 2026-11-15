@@ -397,11 +397,11 @@ What each row shows, and what it does not:
 | M2 | A node whose first heartbeat never comes: Lely's boot reports `K` for node 2 only and nothing restarts it; a running heartbeat that stops: Lely reports the timeout 0.196 s after the mute (bound 1 s from the mute; 0.250 s after the last heartbeat); the bank killed: Lely reports all six | Heartbeat-consumer timing accuracy (the bound is broad on purpose); the loss of one node alone by a crash, since six nodes share one process |
 | M3 | Uploads of 0x1000, 0x1017, 0x1018:01 equal the EDS defaults; a download of 0x6060 = 8 completes with CiA 301 expedited bytes; five aborts (0x06020000, 0x06010002 twice, 0x06090030, 0x06070010) on the wire and in Lely | A mutation (the closed profile has no multi-valued standard writable object); segmented or block transfers |
 | M4 | 69 frames of each TPDO1-3, DLC 8, each byte-equal to `wire.py` encoding the values Lely decoded; Lely's RPDO1/2 (DLC 8) and RPDO3 (DLC 2) equal `wire.py`; a DLC 7 RPDO1 raises `malformed` by one and actuates nothing, while a well-formed control pair does actuate | That the EDS itself is right: Lely and our slave both read our EDS, so a shared misreading passes |
-| M5 | Over 49 commands, RPDO1/2 of seq k between SYNC j and j+1 first appear as TPDO2 `applied_seq` = k after SYNC j+1, never after SYNC j; `sample_seq` +1 per SYNC | CAN arbitration timing (vcan has none); more than one streamed node |
+| M5 | Over 48 commands, RPDO1/2 of seq k between SYNC j and j+1 first appear as TPDO2 `applied_seq` = k after SYNC j+1, never after SYNC j; `sample_seq` +1 per SYNC | CAN arbitration timing (vcan has none); more than one streamed node |
 | M6 | An injected fault 0x8611 gives EMCY `1186010000000000` (register 0x01) on the wire and in Lely, and 0x1001 = 0x01; a second fault while in Fault gives no EMCY; Fault Reset gives the error-reset EMCY; in Stopped the EMCY is suppressed (traced) | Error codes other than the two injected; any meaning in the five manufacturer bytes |
 | F1 | Every RPDO2 held 60 ms: no pair completes, the command timeout stops the drive (statusword 0x0217 Quick Stop Active, policy latch set), nothing actuated; of the 69 delayed RPDO2, the 62 that reach the drive before the bus's last SYNC are each one other-tag drop at the SYNC that closes their interval, and the 7 after it (Lely's repeats of seq 60) are named as trailing, since no SYNC closes them | The not-valid drop at receipt: with every RPDO2 late the stop comes first and revokes the tag, and the drive classifies a fragment's tag before its deadline (D8), so none reaches the drive with its tag current (F7 covers that path) |
 | F7 | Every fourth RPDO2 held 60 ms: 15 delayed, 14 reached the drive with the tag current and were dropped not valid, none of those seqs actuated, the other 45 all actuated, no stop while streaming. Streamed with `valid_until` = now + 48 ms (the lease), so each 20 ms gap is 8 ms inside the previous command's validity and 10 ms inside the command timeout | Other delay values; seq 59's late RPDO2 arrived after the drive's end-of-stream stop and is named as a trailing exception; the gap at the peer's default 40 ms validity (next paragraph) |
-| F2 | Every third RPDO1 lost (seqs 2, 5, 8, ...): 20 missing-half drops, no integrity violation, the other 40 seqs actuated, no stop while streaming. Streamed with `valid_until` = now + 48 ms, so the previous command outlasts each lost update by 8 ms; seq 1 is kept, so the first actuation is 10 ms inside the command timeout after Enable Operation | Loss of RPDO2 or of both halves; the gap at the peer's default 40 ms validity (next paragraph) |
+| F2 | Every third RPDO1 lost (seqs 1, 4, 7, ... in this recording): 20 missing-half drops, no integrity violation, the other 40 seqs actuated, no stop while streaming. Streamed with `valid_until` = now + 48 ms, so the previous command outlasts each lost update by 8 ms | Loss of RPDO2 or of both halves; the gap at the peer's default 40 ms validity (next paragraph) |
 | F3 | Both fragments duplicated: every copy received and dispatched (`pdo` 311), the actuated set equals the no-rule run's | A duplicate counter: `drive_core` has none, so the row counts dispatches and compares outcomes |
 | F4 | RPDO1 released behind RPDO2 inside one SYNC window: all 60 seqs still pair and actuate | Reordering across a SYNC |
 | F5 | One RPDO1 forwarded, then a copy with one target bit flipped: integrity violation at the copy, quick stop `integrity`, latch and integrity flags set (0x0005), nothing after seq 26 actuated | Which frame the rule hits is timing-dependent; if it hits no stream frame the row is INCONCLUSIVE, not PASS |
@@ -416,13 +416,15 @@ sends it at the next and the drive actuates it at the one after, 20 ms after the
 lost update the next command is actuated 40 ms after the previous write, so with the peer's
 default `valid_until` = now + 40 ms the previous command expires at that same instant. Whether the
 drive then stops with `expiry` depends on whether a W tick is handled before that SYNC; on a loaded
-runner it sometimes is (PR CI run 43652867358 failed F2 with that pattern, nothing actuated
-after the third gap; its bank trace was not kept, so the stop reason there is inferred; pinned to two loaded CPUs locally,
-F2 failed 1 of 10 runs and F7 2 of 10, each an `expiry` stop 0.3 to 0.9 ms after the deadline). That
-stop is correct drive behaviour, not an ordinary gap, so both rows use the 48 ms lease and their
-judges are INCONCLUSIVE for a stream valid for less than 46 ms or for a lost seq 1 (Enable
-Operation goes out with seq 1 and the guards count from the entry, so losing it puts the first
-actuation on the 30 ms command timeout).
+runner it sometimes is. PR CI run 43652867358 failed F2 with that pattern (nothing actuated after
+the third gap; its bank trace was not kept, so the stop reason there is inferred); pinned to two
+loaded CPUs locally, F2 failed 1 of 10 runs and F7 2 of 10, each an `expiry` stop 0.3 to 0.9 ms
+after the deadline. That stop is correct drive behaviour, not an ordinary gap, so both rows use the
+48 ms lease, and their judges are INCONCLUSIVE for a stream valid for less than 46 ms. Which seqs a
+rule hits depends on how many frames of its identifier Lely sent during the commit, so seq 1 can
+be lost too; the drive's guards count from its entry into Operation Enabled, so the peer enables
+operation after the second update, not the first, and a lost seq 1 leaves the first actuation
+10 ms inside the 30 ms command timeout instead of on it (the judges also require that order).
 
 ### Proxy rules
 

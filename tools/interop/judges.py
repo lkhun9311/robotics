@@ -969,19 +969,25 @@ def applied_matches(obs, act):
 # write at the next SYNC and the drive actuates it at the one after, so after one lost update
 # the next command is actuated 4 T_bus = 40 ms after the previous write: a validity of 40 ms
 # expires at that instant, and whether the drive stops depends on which comes first in its loop.
-# The rows with a gap need a validity longer by at least 3 W (the lease allows 48 ms), and the
-# first update must not be lost: Enable Operation goes out with it, and the guards count from
-# the entry, so losing it puts the first actuation on the 30 ms command timeout.
+# The rows with a gap need a validity longer by at least 3 W (the lease allows 48 ms). Which
+# seqs a rule hits depends on how many frames of its identifier Lely sent during the commit, so
+# the first update may be lost too: the guards count from the entry into Operation Enabled, and
+# the entry must come after Lely sent the first update (the peer enables after the second), or a
+# lost first update puts the first actuation on the 30 ms command timeout.
 GAP_VALIDITY_MIN_US = 40_000 + 3 * 2_000
 
 
-def gap_margins(obs, lost):
-    """Preconditions of a row whose stream has gaps (F2, F7); `lost` the seqs not actuated."""
+def gap_margins(obs, tag):
+    """Preconditions of a row whose stream has gaps (F2, F7)."""
     short = [e["seq"] for e in events(obs, "stream", node=NODE)
              if (e["valid_until"] - int(e["t"] * 1e6)) % 2**32 < GAP_VALIDITY_MIN_US]
     need(not short, f"stream seqs {short[:3]}.. valid for less than "
                     f"{GAP_VALIDITY_MIN_US // 1000} ms: a lost update lands on the expiry")
-    need(1 not in lost, "seq 1 lost: the first actuation lands on the command timeout")
+    first = min(t for t, s, _ in rpdo_seqs(obs, "host", 1, tag) if s == 1)
+    enable = [t for t, _, d in frames(obs, "host", cia301.RPDO_BASE[3] + NODE)
+              if d[:2] == b"\x0f\x00"]
+    need(enable and enable[-1] > first, "Enable Operation was not sent after the first update: "
+                                        "a lost first update lands on the command timeout")
 
 
 def judge_f2(obs):
@@ -990,7 +996,7 @@ def judge_f2(obs):
     reached = {s for _, s, _ in rpdo_seqs(obs, "device", 1, tag)}
     lost = [s for s in seqs if s not in reached]
     need(len(lost) >= len(seqs) // 3 - 1, f"only {len(lost)} stream RPDO1 lost: {lost}")
-    gap_margins(obs, lost)
+    gap_margins(obs, tag)
     no_integrity(obs)
     act = actuated_once(obs, tag)
     last = seqs[-1]
@@ -1230,6 +1236,9 @@ JUDGES["R1"] = judge_r1
 
 
 DELAY_TAIL_SEQS = 6  # F7: 60 ms of delay is six SYNC periods of stream.
+# F7: a held frame reaches vcan_device its delay after it was read on vcan_host, within this
+# (both captures stamp in one CLOCK_MONOTONIC; well under the 10 ms between Lely's repeats).
+HELD_SLACK_S = 0.004
 
 
 def judge_f7(obs):
@@ -1247,10 +1256,21 @@ def judge_f7(obs):
     delayed_seqs = {s for s, d in first_rpdo2.items() if d in delayed}
     need(len(delayed_seqs - {last}) >= len(seqs) // rules[0]["every"] - 1,
          f"only {len(delayed_seqs)} stream seqs had their RPDO2 delayed")
-    gap_margins(obs, delayed_seqs)
-    on_device = [(t, s) for t, s, d in rpdo_seqs(obs, "device", 2, tag) if d in delayed]
+    gap_margins(obs, tag)
+    # The delayed copy of each held frame: the same bytes on vcan_device one delay later. Lely
+    # repeats seq 60's frame at every SYNC after the stream, so a held repeat has identical
+    # copies that were forwarded at once; those are not the held one.
+    delay_s = int(rules[0]["args"][0]) / 1000
+    device_rpdo2 = rpdo_seqs(obs, "device", 2, tag)
+    on_device = []
+    for t_held, _, d in matched[0]:
+        if decode("RPDO2", d)["exec_tag"] != tag:
+            continue
+        late = [(t, s) for t, s, dd in device_rpdo2
+                if dd == d and delay_s - HELD_SLACK_S <= t - t_held <= delay_s + HELD_SLACK_S]
+        on_device += late[:1]
     need(len(on_device) == len(delayed), f"{len(delayed)} RPDO2 delayed, {len(on_device)} on "
-                                         f"vcan_device")
+                                         f"vcan_device one delay later")
     act = actuated_once(obs, tag)
     t_last_act = max(r["t_ns"] for r in drive_records(obs, "actuated") if r["tag"] == tag) / 1e9
     early = drive_records(obs, "quick_stop", t1=t_last_act)

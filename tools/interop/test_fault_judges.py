@@ -95,7 +95,7 @@ def test_stream_seq_missing_on_host_is_inconclusive():
 
 def test_f1_delayed_seq_actuated_fails():
     obs = load("F1")
-    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=5, tag=stream_tag(obs)))
+    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=4, tag=stream_tag(obs)))
     status, text = verdict(obs)
     assert status == "FAIL" and "delayed seqs actuated" in text, f"{status}: {text}"
 
@@ -125,9 +125,9 @@ def test_integrity_where_none_is_allowed_fails(row):
 
 def test_f2_lost_seq_actuated_fails():
     obs = load("F2")
-    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=5, tag=stream_tag(obs)))
+    add_record(obs, record_like(obs, "actuated", mid_time(obs), seq=4, tag=stream_tag(obs)))
     status, text = verdict(obs)
-    assert status == "FAIL" and "actuated minus expected [5]" in text, f"{status}: {text}"
+    assert status == "FAIL" and "actuated minus expected [4]" in text, f"{status}: {text}"
 
 
 @pytest.mark.parametrize("row", ("F2", "F7"))
@@ -140,14 +140,25 @@ def test_gap_row_streamed_with_the_default_validity_is_inconclusive(row):
     assert status == "INCONCLUSIVE" and "lands on the expiry" in text, f"{status}: {text}"
 
 
-def test_f2_first_seq_lost_is_inconclusive():
-    obs = load("F2")
+@pytest.mark.parametrize("row", ("F2", "F7"))
+def test_gap_row_enabled_before_the_first_update_is_inconclusive(row):
+    obs = load(row)
     tag = stream_tag(obs).to_bytes(2, "little")
-    first = next(f for f in obs["device"] if f[1] == 0x203 and bytes.fromhex(f[2])[4:8] ==
-                 (1).to_bytes(2, "little") + tag)
-    obs["device"].remove(first)
+    first = next(f[0] for f in obs["host"] if f[1] == 0x203 and
+                 bytes.fromhex(f[2])[4:8] == (1).to_bytes(2, "little") + tag)
+    for f in obs["host"]:
+        if f[1] == 0x403 and f[2].startswith("0f00"):
+            f[0] = first - 0.001  # 0x0F sent with the first update, not after it
     status, text = verdict(obs)
-    assert status == "INCONCLUSIVE" and "seq 1 lost" in text, f"{status}: {text}"
+    assert status == "INCONCLUSIVE" and "after the first update" in text, f"{status}: {text}"
+
+
+def test_f7_held_copy_missing_on_device_is_inconclusive():
+    obs = load("F7")
+    _, i = delayed_stream_rpdo2(obs)[len(delayed_stream_rpdo2(obs)) // 2]
+    del obs["device"][i]
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "one delay later" in text, f"{status}: {text}"
 
 
 def test_f3_actuated_set_differs_from_no_rule_run_fails():
