@@ -4,7 +4,9 @@
 // One control thread waits in ppoll on the release timerfd (absolute CLOCK_MONOTONIC, period W),
 // the CAN socket, the inject socket and a signalfd, and runs BankLoop::run_once on every wake
 // (B1). A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX
-// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". SIGTERM or
+// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". At most
+// kInjectBudget commands are served per wake, so a client that keeps the socket full cannot
+// hold off the releases, the CAN drain or a signal. SIGTERM or
 // SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
 // Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
 // is on stderr). Exit 1: a failure while running; once the trace is open it still ends with the
@@ -282,10 +284,10 @@ int run(const Args& args) {
       // The count is not used: releases are counted from the clock (B1).
       [[maybe_unused]] const ssize_t n = ::read(timer_fd, &expirations, sizeof expirations);
     }
-    if (inject_fd >= 0 && (fds[3].revents & POLLIN) != 0) {
-      loop.serve_inject(inject_fd);
-    }
-    loop.run_once();
+    // A backlog left by the inject budget keeps the socket readable: the next ppoll returns at
+    // once and the next wake serves it.
+    const bool inject_ready = inject_fd >= 0 && (fds[3].revents & POLLIN) != 0;
+    loop.run_once(inject_ready ? inject_fd : -1);
   }
 
   writer.stop();

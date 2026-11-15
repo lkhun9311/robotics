@@ -89,11 +89,17 @@ void BankLoop::overload(MonoTime now) {
   }
 }
 
-void BankLoop::run_once() {
+void BankLoop::run_once(int inject_fd) {
   ++counts_.wakes;
   const MonoTime now = now_();
   if (now >= next_release()) {
     release(now);
+  }
+  // The inject drain comes after the release and before the CAN drain: the CAN drain runs to
+  // the release deadline under sustained traffic, so served before the release or after the CAN
+  // drain the injects would get only the one datagram a late wake allows.
+  if (inject_fd >= 0) {
+    serve_inject(inject_fd);
   }
   // The drain: bounded by the next release deadline and by kRxBudget frames. Backlog waits for
   // the next wake (the socket stays readable, so ppoll returns at once).
@@ -121,8 +127,11 @@ Bank::InjectResult BankLoop::inject(std::string_view command) {
 
 int BankLoop::serve_inject(int fd) {
   using Kind = trace::InjectIo::Kind;
+  // Bounded like the CAN drain: at most kInjectBudget datagrams, and none after the next release
+  // is due, except the first, so a wake that starts late still makes progress. The rest stays
+  // queued in the socket, in order, for the next wake (the socket stays readable).
   int served = 0;
-  for (;;) {
+  while (served < kInjectBudget && (served == 0 || now_() < next_release())) {
     std::array<char, 128> buf{};
     sockaddr_un peer{};
     socklen_t peer_len = sizeof peer;
@@ -160,6 +169,7 @@ int BankLoop::serve_inject(int fd) {
       note_inject_io(Kind::kSendError, errno);
     }
   }
+  return served;
 }
 
 std::vector<TraceRecord> BankLoop::snapshot(MonoTime at) const {

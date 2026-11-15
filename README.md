@@ -304,7 +304,8 @@ observables.
   caught up; three skipped in a row inject 0x6100 (internal software error) into all six drives.
   It produces the heartbeat (100 ms, 0x1017) and EMCY that `drive_core` does not. Faults are
   injected through a separate UNIX datagram socket (`--inject PATH`: `fault`, `torque_loss`,
-  `stuck`, `hb_mute`), never from CAN. A writer thread writes the trace (JSON lines); the control
+  `stuck`, `hb_mute`), never from CAN; a wake serves at most 16 of them and stops at the next
+  release, so a client that keeps the socket full cannot hold off the releases. A writer thread writes the trace (JSON lines); the control
   thread only enqueues fixed-size records. One process is one failure domain: killing it is a
   six-node common failure.
 - `bus_fault_proxy` (`src/bus_fault_proxy`): one socket per interface, own frames never read
