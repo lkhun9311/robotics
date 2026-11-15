@@ -3,10 +3,11 @@
 <package format="3">
   <name>robot_bringup</name>
   <version>0.1.0</version>
-  <description>Launches the UR5e in MuJoCo under ros2_control with the stock joint trajectory controller.</description>
+  <description>Launches the UR5e in MuJoCo under ros2_control with the stock joint trajectory controller; holds the URDF of the arm under the arm_hw plugins.</description>
   <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>arm_hw</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>

@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <variant>
@@ -92,6 +93,15 @@ struct InjectIo {
   InjectCounts totals;
 };
 
+// A start that failed after the trace was opened (the loop never ran): the reason, cut to fit
+// and NUL-terminated. Written once, before the final snapshots and the exit record, so such a
+// trace never reads as a run that ended normally.
+struct StartFailed {
+  runtime_core::MonoTime at;
+  std::array<char, 64> reason;
+};
+StartFailed start_failed(runtime_core::MonoTime at, std::string_view reason);
+
 // Normal end of the process: the last record of a complete trace.
 struct Exit {
   runtime_core::MonoTime at;
@@ -103,9 +113,9 @@ struct Exit {
 }  // namespace trace
 
 // A tagged union: the variant index is the tag.
-using TraceRecord =
-    std::variant<BankRecord, trace::Start, trace::Overload, trace::LoopSnapshot,
-                 trace::DispatchSnapshot, trace::IoSnapshot, trace::InjectIo, trace::Exit>;
+using TraceRecord = std::variant<BankRecord, trace::Start, trace::Overload, trace::LoopSnapshot,
+                                 trace::DispatchSnapshot, trace::IoSnapshot, trace::InjectIo,
+                                 trace::StartFailed, trace::Exit>;
 static_assert(std::is_trivially_copyable_v<TraceRecord>);
 static_assert(sizeof(TraceRecord) <= 128);
 

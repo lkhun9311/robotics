@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master-side fault rows (E3c): see master_tpdo_outage_35ms.rules for the timing.
+# Every heartbeat of node 4 lost on its way to the master from 2300 ms on.
+d2h 0x704/0x7FF window 2300 5000 drop

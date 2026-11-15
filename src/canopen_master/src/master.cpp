@@ -1,0 +1,457 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "canopen_master/master.hpp"
+
+#include <cstddef>
+#include <iterator>
+#include <stdexcept>
+#include <utility>
+
+namespace canopen_master {
+
+namespace cc = canopen_codec;
+using runtime_core::Duration;
+using runtime_core::MonoTime;
+
+namespace {
+
+constexpr std::uint16_t kNmtCobId = 0x000;
+constexpr std::uint16_t kHeartbeatBase = 0x700;
+constexpr std::uint16_t kSdoResponseBase = 0x580;
+constexpr std::uint16_t kSdoRequestBase = 0x600;
+constexpr std::uint16_t kMaxCobId = 0x7FF;
+
+// A COB-ID that another service of the predefined connection set (or this master's SYNC and
+// EMCY handling) already consumes.
+bool reserved_cob(std::uint32_t cob) {
+  const auto in = [cob](std::uint32_t base) { return cob >= base && cob <= base + 0x7FU; };
+  return cob == kNmtCobId || in(cc::od::kSyncCobId) || in(cc::od::kEmcyCobIdBase) ||
+         in(kSdoResponseBase) || in(kSdoRequestBase) || in(kHeartbeatBase);
+}
+
+MasterEventKind sdo_kind(SdoStatus status) {
+  switch (status) {
+    case SdoStatus::kOk:
+      return MasterEventKind::kSdoOk;
+    case SdoStatus::kAbort:
+      return MasterEventKind::kSdoAbort;
+    case SdoStatus::kTimeout:
+      return MasterEventKind::kSdoTimeout;
+    case SdoStatus::kProtocol:
+      break;
+  }
+  return MasterEventKind::kSdoProtocol;
+}
+
+}  // namespace
+
+Master::Master(MasterConfig config) : config_(std::move(config)) {
+  if (config_.nodes.empty()) {
+    throw std::invalid_argument("canopen_master: no nodes");
+  }
+  if (config_.boot_timeout.ns <= 0 || config_.sdo_timeout.ns <= 0) {
+    throw std::invalid_argument("canopen_master: boot and SDO timeouts must be positive");
+  }
+  slot_.fill(-1);
+  nodes_.reserve(config_.nodes.size());
+  for (const cc::NodeId id : config_.nodes) {
+    if (slot_.at(id.value()) != -1) {
+      throw std::invalid_argument("canopen_master: duplicate node");
+    }
+    slot_.at(id.value()) = static_cast<std::int16_t>(nodes_.size());
+    nodes_.push_back(Node{id, HeartbeatConsumer{config_.heartbeat_timeout, config_.boot_timeout},
+                          SdoClient{id, config_.sdo_timeout}, std::nullopt, std::nullopt});
+  }
+}
+
+Master::Node* Master::find(cc::NodeId node) {
+  const std::int16_t slot = slot_.at(node.value());
+  return slot < 0 ? nullptr : &nodes_.at(static_cast<std::size_t>(slot));
+}
+
+const Master::Node* Master::find(cc::NodeId node) const {
+  const std::int16_t slot = slot_.at(node.value());
+  return slot < 0 ? nullptr : &nodes_.at(static_cast<std::size_t>(slot));
+}
+
+// The configured node whose COB-ID for the service at `base` is `cob`.
+Master::Node* Master::find(std::uint16_t cob, std::uint16_t base) {
+  if (cob <= base || cob > base + cc::NodeId::kMax) {
+    return nullptr;
+  }
+  const auto id = cc::NodeId::make(static_cast<std::uint8_t>(cob - base));
+  return id ? find(*id) : nullptr;
+}
+
+void Master::emit(MasterEventKind kind, std::uint8_t node, EventDetail detail) {
+  events_.push_back(MasterEvent{kind, node, now_, std::move(detail)});
+}
+
+std::vector<MasterEvent> Master::drain_events() { return std::exchange(events_, {}); }
+
+bool Master::nmt(cc::NmtCommand command, cc::NodeId node) {
+  if (find(node) == nullptr) {
+    return false;
+  }
+  pending_nmt_.push_back(cc::NmtMessage{command, node});
+  return true;
+}
+
+bool Master::sdo_upload(cc::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done,
+                        std::uint64_t tag) {
+  Node* n = find(node);
+  if (n == nullptr || !n->sdo.upload(index, sub, std::move(done), tag)) {
+    ++counts_.sdo_refused;
+    return false;
+  }
+  return true;
+}
+
+bool Master::sdo_download(cc::NodeId node, std::uint16_t index, std::uint8_t sub,
+                          std::span<const std::uint8_t> bytes, SdoDone done, std::uint64_t tag) {
+  Node* n = find(node);
+  if (n == nullptr || !n->sdo.download(index, sub, bytes, std::move(done), tag)) {
+    ++counts_.sdo_refused;
+    return false;
+  }
+  return true;
+}
+
+std::size_t Master::cancel_sdo(std::uint64_t tag) {
+  std::size_t dropped = 0;
+  for (Node& n : nodes_) {
+    dropped += n.sdo.cancel(tag);
+  }
+  return dropped;
+}
+
+bool Master::set_heartbeat_consumer(cc::NodeId node, Duration consumer_time) {
+  if (find(node) == nullptr) {
+    return false;
+  }
+  pending_consumer_.emplace_back(node, consumer_time);
+  return true;
+}
+
+std::optional<cc::NmtState> Master::nmt_state(cc::NodeId node) const {
+  const Node* n = find(node);
+  return n == nullptr ? std::nullopt : n->state;
+}
+
+std::optional<EmcyDetail> Master::last_emcy(cc::NodeId node) const {
+  const Node* n = find(node);
+  return n == nullptr ? std::nullopt : n->last_emcy;
+}
+
+bool Master::register_rx_pdo(cc::NodeId node, std::uint32_t cob, PdoLayout layout) {
+  if (find(node) == nullptr || cob > kMaxCobId || reserved_cob(cob) || layout.fields.empty()) {
+    return false;
+  }
+  unsigned bits = 0;
+  for (const PdoField& f : layout.fields) {
+    if (f.bit_length == 0 || f.bit_length > 64) {
+      return false;
+    }
+    bits += f.bit_length;
+  }
+  if (bits > 64) {
+    return false;
+  }
+  RxPdo pdo{static_cast<std::uint16_t>(cob), node.value(),
+            static_cast<std::uint8_t>((bits + 7) / 8), std::move(layout)};
+  for (RxPdo& existing : rx_pdos_) {
+    if (existing.cob == pdo.cob) {
+      existing = std::move(pdo);
+      return true;
+    }
+  }
+  rx_pdos_.push_back(std::move(pdo));
+  return true;
+}
+
+bool Master::sync_control(SyncControl control) {
+  switch (control) {
+    case SyncControl::kPause:
+      sync_paused_ = true;
+      sync_step_ = false;
+      return true;
+    case SyncControl::kResume:
+      if (sync_paused_) {
+        sync_paused_ = false;
+        sync_step_ = false;
+        sync_reanchor_ = true;
+        if (last_sync_) {
+          sync_due_ = *last_sync_ + config_.sync_period;
+        }
+      }
+      return true;
+    case SyncControl::kStep:
+      if (!sync_paused_ || sync_step_ || config_.sync_period.ns <= 0) {
+        return false;  // Running, a step not yet produced, or no SYNC production at all.
+      }
+      sync_step_ = true;
+      return true;
+  }
+  return false;
+}
+
+std::optional<HeartbeatStatus> Master::heartbeat_status(cc::NodeId node) const {
+  const Node* n = find(node);
+  if (n == nullptr) {
+    return std::nullopt;
+  }
+  return n->heartbeat.status();
+}
+
+void Master::apply_commands(MonoTime now, std::vector<cc::Frame>& out) {
+  // Nothing called from here queues commands, so the vectors are iterated in place and keep
+  // their capacity.
+  for (const auto& [id, time] : pending_consumer_) {
+    find(id)->heartbeat.set_consumer_time(time, now);
+  }
+  pending_consumer_.clear();
+  for (const cc::NmtMessage& message : pending_nmt_) {
+    out.push_back(cc::encode_nmt(message));
+    if (message.command == cc::NmtCommand::kResetNode ||
+        message.command == cc::NmtCommand::kResetCommunication) {
+      Node* n = find(*message.target);
+      n->heartbeat.start(now);
+      n->state.reset();
+    }
+  }
+  pending_nmt_.clear();
+  for (Node& n : nodes_) {
+    if (auto frame = n.sdo.start(now)) {
+      out.push_back(*frame);
+    }
+  }
+}
+
+void Master::complete(SdoCompletion completion, std::vector<cc::Frame>& out) {
+  if (completion.abort) {
+    out.push_back(*completion.abort);
+  }
+  if (completion.result.status == SdoStatus::kProtocol) {
+    ++counts_.sdo_protocol_errors;
+  }
+  emit(sdo_kind(completion.result.status), completion.result.node, completion.result);
+  if (completion.done) {
+    pending_done_.push_back(Done{std::move(completion.done), completion.result});
+  }
+}
+
+void Master::expire(MonoTime now, std::vector<cc::Frame>& out) {
+  for (Node& n : nodes_) {
+    switch (n.heartbeat.expire(now)) {
+      case HeartbeatChange::kBootTimeout:
+        emit(MasterEventKind::kBootTimeout, n.id.value());
+        break;
+      case HeartbeatChange::kLost:
+        emit(MasterEventKind::kHeartbeatLost, n.id.value());
+        break;
+      default:
+        break;
+    }
+    if (auto completion = n.sdo.expire(now)) {
+      complete(std::move(*completion), out);
+    }
+  }
+}
+
+void Master::handle_heartbeat(Node& node, const cc::Frame& frame) {
+  const auto heartbeat = cc::decode_heartbeat(frame);
+  if (!heartbeat) {
+    ++counts_.malformed;
+    return;
+  }
+  if (node.heartbeat.on_heartbeat(now_) == HeartbeatChange::kResumed) {
+    emit(MasterEventKind::kHeartbeatResumed, node.id.value());
+  }
+  if (heartbeat->state == cc::NmtState::kBootUp) {
+    node.state = cc::NmtState::kBootUp;
+    emit(MasterEventKind::kBoot, node.id.value());
+  } else if (node.state != heartbeat->state) {
+    node.state = heartbeat->state;
+    emit(MasterEventKind::kState, node.id.value(), StateDetail{heartbeat->state});
+  }
+}
+
+void Master::handle_emcy(Node& node, const cc::Frame& frame) {
+  const auto emcy = cc::decode_emcy(frame);
+  if (!emcy) {
+    ++counts_.malformed;
+    return;
+  }
+  EmcyDetail detail{emcy->error_code, emcy->error_register, emcy->manufacturer};
+  node.last_emcy = detail;
+  emit(MasterEventKind::kEmcy, node.id.value(), detail);
+}
+
+void Master::handle_pdo(const RxPdo& pdo, const cc::Frame& frame) {
+  if (frame.dlc != pdo.bytes) {
+    ++counts_.pdo_length_errors;
+    emit(MasterEventKind::kPdoLengthError, pdo.node,
+         PdoLengthDetail{pdo.cob, frame.dlc, pdo.bytes});
+    return;
+  }
+  std::uint64_t bits = 0;
+  for (std::size_t i = 0; i < pdo.bytes; ++i) {
+    bits |= static_cast<std::uint64_t>(frame.data.at(i)) << (8U * i);
+  }
+  PdoDetail detail{pdo.cob, syncs_, {}};
+  detail.fields.reserve(pdo.layout.fields.size());
+  unsigned offset = 0;
+  for (const PdoField& f : pdo.layout.fields) {
+    if (offset >= 64) {
+      break;  // Unreachable: register_rx_pdo refuses layouts above 64 bits.
+    }
+    const std::uint64_t mask =
+        f.bit_length >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << f.bit_length) - 1U;
+    detail.fields.push_back(
+        PdoValue{f.index, f.sub, f.bit_length, f.is_signed, (bits >> offset) & mask});
+    offset += f.bit_length;
+  }
+  emit(MasterEventKind::kPdo, pdo.node, std::move(detail));
+}
+
+void Master::handle(const cc::Frame& frame, std::vector<cc::Frame>& out) {
+  const std::uint16_t cob = frame.cob_id;
+  if (cob == kNmtCobId || cob == cc::od::kSyncCobId) {
+    ++counts_.foreign;  // Another master's NMT or SYNC.
+    return;
+  }
+  for (const RxPdo& pdo : rx_pdos_) {
+    if (pdo.cob == cob) {
+      handle_pdo(pdo, frame);
+      return;
+    }
+  }
+  if (cob > cc::od::kEmcyCobIdBase && cob <= cc::od::kEmcyCobIdBase + cc::NodeId::kMax) {
+    if (Node* n = find(cob, cc::od::kEmcyCobIdBase)) {
+      handle_emcy(*n, frame);
+    } else {
+      ++counts_.foreign;
+    }
+    return;
+  }
+  if (cob > kHeartbeatBase && cob <= kHeartbeatBase + cc::NodeId::kMax) {
+    if (Node* n = find(cob, kHeartbeatBase)) {
+      handle_heartbeat(*n, frame);
+    } else {
+      ++counts_.foreign;
+    }
+    return;
+  }
+  if (cob > kSdoResponseBase && cob <= kSdoResponseBase + cc::NodeId::kMax) {
+    Node* n = find(cob, kSdoResponseBase);
+    if (n == nullptr) {
+      ++counts_.foreign;
+    } else if (auto completion = n->sdo.on_response(frame)) {
+      complete(std::move(*completion), out);
+    } else {
+      ++counts_.sdo_unexpected;
+    }
+    return;
+  }
+  ++counts_.unregistered_cob;
+}
+
+void Master::run_callbacks() {
+  // Taken out before any is called: a callback only queues commands, but the list must not be
+  // the one a later completion appends to. If a callback throws, the ones not yet called go
+  // back to the front of the list and run at the next call.
+  auto done = std::exchange(pending_done_, {});
+  for (std::size_t i = 0; i < done.size(); ++i) {
+    try {
+      done[i].done(done[i].result);
+    } catch (...) {
+      done.erase(done.begin(), done.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+      done.insert(done.end(), std::make_move_iterator(pending_done_.begin()),
+                  std::make_move_iterator(pending_done_.end()));
+      pending_done_ = std::move(done);
+      throw;
+    }
+  }
+}
+
+void Master::produce_sync(MonoTime now, std::vector<cc::Frame>& out) {
+  const Duration period = config_.sync_period;
+  if (period.ns <= 0) {
+    return;
+  }
+  const Duration half{period.ns / 2};
+  bool due = false;
+  if (!sync_paused_) {
+    due = (sync_reanchor_ && !last_sync_) || now >= sync_due_;
+  } else if (sync_step_) {
+    due = !last_sync_ || now >= *last_sync_ + half;
+  }
+  if (!due) {
+    return;
+  }
+  out.push_back(cc::encode_sync());
+  ++syncs_;
+  last_sync_ = now;
+  emit(MasterEventKind::kSync, 0, SyncDetail{syncs_});
+  if (sync_paused_) {
+    sync_step_ = false;
+    return;
+  }
+  // The next slot of the grid that is at least half a period after this SYNC: a late tick never
+  // produces two SYNCs closer than that (drive_core drops such a SYNC as a duplicate, D7).
+  MonoTime next = (sync_reanchor_ ? now : sync_due_) + period;
+  sync_reanchor_ = false;
+  const MonoTime earliest = now + half;
+  if (next < earliest) {
+    const std::int64_t k = ((earliest - next).ns + period.ns - 1) / period.ns;
+    next = next + Duration{k * period.ns};
+  }
+  sync_due_ = next;
+}
+
+std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now, bool produce) {
+  if (in_step_) {
+    throw std::logic_error("canopen_master: on_frame or tick called from an SDO callback");
+  }
+  // Cleared however the call ends, so an exception never leaves the master refusing every
+  // later call.
+  struct StepGuard {
+    bool& flag;
+    explicit StepGuard(bool& f) : flag(f) { flag = true; }
+    StepGuard(const StepGuard&) = delete;
+    StepGuard& operator=(const StepGuard&) = delete;
+    ~StepGuard() { flag = false; }
+  } guard{in_step_};
+  now_ = now;
+  std::vector<cc::Frame> out;
+  if (!started_) {
+    started_ = true;
+    for (Node& n : nodes_) {
+      n.heartbeat.start(now);
+    }
+  }
+  if (frame != nullptr) {
+    // A received frame was on the bus before this call: it is matched against the state from
+    // before the commands queued since the last call (a reset, a new SDO request) take effect.
+    expire(now, out);
+    handle(*frame, out);
+    run_callbacks();
+    apply_commands(now, out);
+  } else {
+    apply_commands(now, out);
+    expire(now, out);
+    run_callbacks();
+    apply_commands(now, out);
+  }
+  if (produce) {
+    produce_sync(now, out);
+  }
+  return out;
+}
+
+std::vector<cc::Frame> Master::on_frame(const cc::Frame& frame, MonoTime now) {
+  return step(&frame, now, false);
+}
+
+std::vector<cc::Frame> Master::tick(MonoTime now) { return step(nullptr, now, true); }
+
+}  // namespace canopen_master

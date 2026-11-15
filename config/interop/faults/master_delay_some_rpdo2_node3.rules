@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master-side fault rows (E3c): see master_tpdo_outage_35ms.rules for the timing.
+# Every fourth RPDO2 of node 3 held 60 ms between 2300 and 3000 ms (as E3b F7): past its deadline
+# when it reaches the drive, while the drive stays enabled on the others.
+h2d 0x303/0x7FF every 4 offset 1 window 2300 3000 delay 60

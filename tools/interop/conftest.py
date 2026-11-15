@@ -22,6 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 sys.path.insert(0, str(ROOT / "tools" / "od"))
 
+import canopend as co  # noqa: E402
 import wire  # noqa: E402
 
 BUS_YML = ROOT / "config" / "interop" / "bus.yml"
@@ -102,7 +103,10 @@ def probe_eds(tmp_path_factory):
 _SO_TIMESTAMPNS = 35
 _TIMESPEC = struct.Struct("=qq")
 CLOCK_OFFSET_SAMPLES = 50
-CLOCK_DRIFT_LIMIT_NS = 1_000_000  # Realtime - monotonic may move this much during a capture.
+# Realtime - monotonic may move this much during a capture. An NTP slew changes the rate of both
+# clocks alike, so only a step of CLOCK_REALTIME moves the difference; what is left is the error
+# of the bracket reads (best of CLOCK_OFFSET_SAMPLES, microseconds), well inside 100 us.
+CLOCK_DRIFT_LIMIT_NS = 100_000
 
 
 def realtime_minus_monotonic_ns(samples=CLOCK_OFFSET_SAMPLES):
@@ -475,8 +479,11 @@ class TracedProc:
             self.proc.wait()
             inconclusive(f"{self.name} did not exit within {timeout} s of SIGTERM")
         self._err.join(timeout=2)
-        assert rc == 0, f"{self.name} exited {rc}; stderr: {self.stderr[-500:]!r}"
         records = self.trace.poll()
+        failed = [r for r in records if r.get("event") == "start_failed"]
+        if failed:
+            inconclusive(f"{self.name}: start failed ({failed[0].get('reason')}), exit {rc}")
+        assert rc == 0, f"{self.name} exited {rc}; stderr: {self.stderr[-500:]!r}"
         if not records or records[-1].get("event") != "exit":
             inconclusive(f"{self.name}: trace has no final exit record: {records[-3:]}")
         self.exit = records[-1]
@@ -614,3 +621,40 @@ def inject_client(tmp_path):
     yield open_client
     for c in clients:
         c.close()
+
+
+@pytest.fixture(scope="session")
+def seed_dir(vcan, tmp_path_factory):
+    """The pre-seeded canopend storage (0x1017 = 100 ms; canopend.seed_storage), made once."""
+    assert co.BIN.exists() or shutil.which(str(co.BIN)), \
+        f"NOT_RUN: canopend ({co.BIN}) not found; build the dev image"
+    try:
+        return co.seed_storage(tmp_path_factory.mktemp("canopend_seed"))
+    except (RuntimeError, OSError, co.SdoAbort, co.SdoTimeout) as e:
+        pytest.fail(f"NOT_RUN: cannot seed the canopend storage: {e}", pytrace=False)
+
+
+@pytest.fixture
+def start_canopend(vcan, seed_dir, tmp_path):
+    """start(seeded=True, storage_dir=None, node_id=2) -> Canopend on vcan_device, ready, with
+    its own copy of the storage (or the given one, as a restart after Reset Node uses);
+    stopped at teardown."""
+    started, counter = [], [0]
+
+    def start(seeded=True, storage_dir=None, node_id=co.NODE_ID):
+        if storage_dir is None:
+            counter[0] += 1
+            storage_dir = tmp_path / f"store{counter[0]}"
+            if seeded:
+                shutil.copytree(seed_dir, storage_dir)
+            else:
+                storage_dir.mkdir()
+        d = co.Canopend(DEVICE_IF, storage_dir, node_id=node_id)
+        started.append(d)
+        if not co.ready(d):
+            inconclusive(f"canopend (node {node_id}) did not report running: {d.lines()[-5:]}; "
+                         f"exit {d.proc.poll()}")
+        return d
+    yield start
+    for d in started:
+        d.stop()

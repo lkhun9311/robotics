@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>canopen_backend</name>
+  <version>0.1.0</version>
+  <description>ROS-free CANopen HAL backend: the vdrive session of canopen_master behind the hal_contract Backend interface, over a frame transport; stepped in logic time or by an I/O worker thread on SocketCAN.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <depend>hal_contract</depend>
+  <depend>canopen_master</depend>
+  <depend>socketcan_io</depend>
+  <test_depend>gtest</test_depend>
+  <test_depend>drive_core</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

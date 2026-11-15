@@ -42,12 +42,13 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=295
-PYTEST_FLOOR=245
+GTEST_FLOOR=469
+PYTEST_FLOOR=252
 INTEGRATION_FLOOR=11
 SIM_FLOOR=32
-VCAN_FLOOR=136
+VCAN_FLOOR=484
 TSAN_FLOOR=33
+TSAN_HAL_FLOOR=106
 
 require_at_least() {
   local label=$1 found=$2 floor=$3
@@ -155,27 +156,39 @@ colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 echo "== exported targets (an outside consumer at the compiler's default C++ standard) =="
 # The consumer sets no standard of its own: whatever its headers need must come from the
-# imported targets (INTERFACE_COMPILE_FEATURES). It includes every installed public header.
+# imported targets (INTERFACE_COMPILE_FEATURES). One executable per package includes every
+# installed public header of that package and links only that package's target, so a header that
+# needs a package its Config does not find_dependency fails here instead of passing because the
+# consumer happened to link it too.
+# Test utilities are not library headers and are not included: hal_contract/testing/ (the gtest
+# contract suite) and canopen_master/testing/ (the in-memory drive bus, which needs drive_core,
+# a test dependency of canopen_master only).
 consumer=build/release/export_consumer
 rm -rf "$consumer"
 mkdir -p "$consumer"
-cat > "$consumer/CMakeLists.txt" <<'EOF'
-cmake_minimum_required(VERSION 3.22)
-project(export_consumer LANGUAGES CXX)
-find_package(drive_core REQUIRED)
-find_package(socketcan_io REQUIRED)
-find_package(vdrive_bank REQUIRED)
-find_package(bus_fault_proxy REQUIRED)
-add_executable(consumer main.cpp)
-target_link_libraries(consumer PRIVATE drive_core::drive_core socketcan_io::socketcan_io
-  vdrive_bank::vdrive_bank bus_fault_proxy::bus_fault_proxy)
-EOF
+CONSUMED=(runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy hal_contract
+  direct_backend canopen_master canopen_backend)
 {
-  for pkg in runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy; do
-    (cd "install/release/$pkg/include" && find . -name '*.hpp' | sort | sed 's|^\./\(.*\)|#include "\1"|')
+  echo 'cmake_minimum_required(VERSION 3.22)'
+  echo 'project(export_consumer LANGUAGES CXX)'
+  for pkg in "${CONSUMED[@]}"; do
+    echo "find_package($pkg REQUIRED)"
+    echo "add_executable(consumer_$pkg main_$pkg.cpp)"
+    echo "target_link_libraries(consumer_$pkg PRIVATE $pkg::$pkg)"
   done
-  echo 'int main() { return 0; }'
-} > "$consumer/main.cpp"
+} > "$consumer/CMakeLists.txt"
+for pkg in "${CONSUMED[@]}"; do
+  {
+    (cd "install/release/$pkg/include" &&
+      find . -name '*.hpp' -not -path './hal_contract/testing/*' -not -path './canopen_master/testing/*' |
+      sort | sed 's|^\./\(.*\)|#include "\1"|')
+    echo 'int main() { return 0; }'
+  } > "$consumer/main_$pkg.cpp"
+  if ! grep -q '^#include' "$consumer/main_$pkg.cpp"; then
+    echo "FAIL: exported targets: no installed header of $pkg" >&2
+    exit 1
+  fi
+done
 (
   set +u
   # shellcheck disable=SC1091
@@ -184,6 +197,7 @@ EOF
   cmake -S "$consumer" -B "$consumer/build" -DCMAKE_BUILD_TYPE=Release > "$consumer/configure.log"
   cmake --build "$consumer/build"
 )
+echo "exported targets: ${#CONSUMED[@]} packages, each linking only its own target"
 
 echo "== unit tests (release) =="
 run_tests build/release
@@ -306,26 +320,53 @@ echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) ==
   verdict="OK"
 )
 
-echo "== thread sanitizer (vdrive_bank: control thread, trace ring and writer thread) =="
+echo "== thread sanitizer (vdrive_bank threads; the HAL: worker, boxes, op epochs, teardown) =="
+# vdrive_bank: control thread, trace ring and writer thread. hal_contract, direct_backend,
+# canopen_backend and arm_hw: the I/O worker and the control thread sharing the C10 boxes, the
+# op epochs, and worker teardown in the plugin. Every package the stage builds must have its
+# production sources compiled with -fsanitize=thread (the worker runs canopen_master code).
 TSAN=(--build-base build/tsan --install-base install/tsan)
-colcon build --base-paths src "${TSAN[@]}" --packages-up-to vdrive_bank \
+TSAN_TESTED=(vdrive_bank hal_contract direct_backend canopen_backend arm_hw)
+colcon build --base-paths src "${TSAN[@]}" --packages-up-to "${TSAN_TESTED[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=Debug -DROBOTICS_SANITIZE=thread -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-require_sanitized src/vdrive_bank/src build/tsan/vdrive_bank/compile_commands.json -fsanitize=thread
+tsan_built=0
+for pkg_dir in build/tsan/*/; do
+  pkg=$(basename "$pkg_dir")
+  [ -d "src/$pkg/src" ] || continue
+  require_sanitized "src/$pkg/src" "build/tsan/$pkg/compile_commands.json" -fsanitize=thread
+  tsan_built=$((tsan_built + 1))
+done
+# vdrive_bank and the four HAL packages, plus what they build on: at least these ten.
+if [ "$tsan_built" -lt 10 ]; then
+  echo "FAIL: tsan: checked the flags of $tsan_built packages, expected at least 10" >&2
+  exit 1
+fi
 (
   export TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
   rc=0
-  colcon test --base-paths src "${TSAN[@]}" --packages-select vdrive_bank \
+  colcon test --base-paths src "${TSAN[@]}" --packages-select "${TSAN_TESTED[@]}" \
     --return-code-on-test-failure || rc=$?
-  colcon test-result --test-result-base build/tsan/vdrive_bank --verbose | tee build/tsan/test-result.txt
+  hal_total=0
+  for pkg in "${TSAN_TESTED[@]}"; do
+    colcon test-result --test-result-base "build/tsan/$pkg" --verbose | tee "build/tsan/test-result-$pkg.txt"
+  done
   [ "$rc" -eq 0 ] || exit "$rc"
-  summary=$(grep '^Summary: ' build/tsan/test-result.txt | tail -1)
-  total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
-  skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
-  if [ "${skipped:-x}" != 0 ]; then
-    echo "FAIL: tsan: skipped tests or unreadable summary ('$summary')" >&2
-    exit 1
-  fi
-  require_at_least "tsan (vdrive_bank)" "$total" "$TSAN_FLOOR"
+  for pkg in "${TSAN_TESTED[@]}"; do
+    summary=$(grep '^Summary: ' "build/tsan/test-result-$pkg.txt" | tail -1)
+    total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
+    skipped=$(sed -n 's/.* \([0-9]*\) skipped.*/\1/p' <<<"$summary")
+    if [ "${skipped:-x}" != 0 ] || ! [[ $total =~ ^[0-9]+$ ]] || [ "$total" -eq 0 ]; then
+      echo "FAIL: tsan ($pkg): no tests, skipped tests or unreadable summary ('$summary')" >&2
+      exit 1
+    fi
+    if [ "$pkg" = vdrive_bank ]; then
+      require_at_least "tsan (vdrive_bank)" "$total" "$TSAN_FLOOR"
+    else
+      hal_total=$((hal_total + total))
+    fi
+  done
+  require_at_least "tsan (hal_contract, direct_backend, canopen_backend, arm_hw)" "$hal_total" \
+    "$TSAN_HAL_FLOOR"
 )
 
 echo "== all checks passed =="

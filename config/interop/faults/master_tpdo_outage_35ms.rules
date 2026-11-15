@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master-side fault rows (E3c): windows are relative to the proxy's start, and the harness holds the
+# arm until 1500 ms, so a window opening at 2300 ms starts after the arm and the moving baseline.
+# Node 3's TPDO1-TPDO3 lost on their way to the master for 35 ms: longer than max_feedback_age
+# (30 ms), shorter than the 48 ms lease.
+d2h 0x183/0x7FF window 2300 2335 drop
+d2h 0x283/0x7FF window 2300 2335 drop
+d2h 0x383/0x7FF window 2300 2335 drop

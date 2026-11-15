@@ -4,7 +4,8 @@ EDS layout of tools/od/wire.py, and the commands that reproduce each input.
 
 The inputs are the observations the interop tests record (tools/interop/recorded/*.json.gz,
 written with INTEROP_RECORD_DIR) and the proxy cost JSON written by tools/bench/proxy_cost.py.
-Nothing here judges: the verdicts stay with tools/interop/judges.py.
+Nothing here judges: the verdicts stay with tools/interop/judges.py. Frames and PDO fields are
+parsed by tools/interop/observation.py, the same code the judges read them with.
 """
 import gzip
 import json
@@ -13,10 +14,14 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "od"))
+sys.path.insert(0, str(ROOT / "tools" / "interop"))
 
+import observation  # noqa: E402
 import wire  # noqa: E402
 
 RECORDED = ROOT / "tools" / "interop" / "recorded"
+# Our master against CANopenNode (E3c Task 8, rows n1-n7) is recorded in a directory of its own.
+RECORDED_MASTER = RECORDED / "master"
 MEDIA = ROOT / "docs" / "media"
 EDS_PATH = ROOT / "config" / "od" / "vdrive_arm.eds"
 NODE = 3  # The node the matrix and the fault rows drive.
@@ -24,6 +29,8 @@ NODE = 3  # The node the matrix and the fault rows drive.
 # The pytest test that writes each recording, by row.
 _M = "tools/interop/test_matrix.py::"
 _F = "tools/interop/test_proxy_faults.py::"
+_X = "tools/interop/test_master_faults.py::"
+_N = "tools/interop/test_master_matrix.py::"
 RECORDING_TESTS = {
     "m1": _M + "test_nmt_states_and_service_gating",
     "m2": _M + "test_first_heartbeat_missing_vs_running_timeout",
@@ -39,7 +46,26 @@ RECORDING_TESTS = {
     "f6": _F + "test_d2h_drop_hides_feedback_not_drive_state",
     "f7": _F + "test_late_rpdo2_is_dropped_not_valid",
     "r1": _F + "test_restart_rejects_captured_old_tag_frames",
+    "x1": _X + "test_short_feedback_outage_latches_inhibit",
+    "x2": _X + "test_dropped_tpdos_make_feedback_stale",
+    "x3": _X + "test_one_node_command_loss_stops_the_group",
+    "x4": _X + "test_heartbeat_loss_raises_fault_without_reset",
+    "x5": _X + "test_sdo_timeout_during_arm_fails_arming",
+    "x6": _X + "test_all_commands_delayed_stop_the_group",
+    "x7": _X + "test_minority_delayed_commands_never_actuate_late",
+    "n1": _N + "test_master_nmt_states_and_service_gating",
+    "n2": _N + "test_master_first_heartbeat_missing_vs_running_timeout",
+    "n3": _N + "test_master_sdo_expedited_and_aborts",
+    "n4": _N + "test_master_pdo_bytes_and_lengths",
+    "n5": _N + "test_master_sync_application_and_sampling_order",
+    "n6": _N + "test_master_emcy_reception",
+    "n7": _N + "test_master_refuses_activation_on_canopennode",
 }
+
+
+def recorded_dir(row):
+    """Where the committed recording of `row` lives."""
+    return RECORDED_MASTER if row.startswith("n") else RECORDED
 PYTEST = "python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q"
 # The vcan tests need the workspace built (run_checks.sh does it) and the links up.
 VCAN_PREFIX = ("docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && "
@@ -48,7 +74,8 @@ VCAN_PREFIX = ("docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && 
 
 def recording_command(row):
     """The command that records `row` again (a new run: new times and values)."""
-    return (f"{VCAN_PREFIX}INTEROP_RECORD_DIR=tools/interop/recorded {PYTEST} "
+    directory = recorded_dir(row).relative_to(ROOT)
+    return (f"{VCAN_PREFIX}INTEROP_RECORD_DIR={directory} {PYTEST} "
             f"{RECORDING_TESTS[row]}'")
 
 
@@ -96,23 +123,19 @@ def decode(label, data):
     pdo = layout(label)
     if len(data) != pdo["length"]:
         raise ValueError(f"{label} frame of {len(data)} bytes, mapping is {pdo['length']}")
-    values = {}
-    for f in pdo["fields"]:
-        raw = data[f["offset"]:f["offset"] + f["bits"] // 8]
-        values[f["name"]] = int.from_bytes(raw, "little", signed=f["signed"])
+    values = observation.pdo_fields(pdo, data)
     if bytes(wire.pdo_frame(pdo, NODE, values, "check")["data"]) != bytes(data):
         raise ValueError(f"{label} {data.hex()} does not re-encode")
     return values
 
 
 def frames(obs, side, cobs=None, t0=None, t1=None):
-    """[(t s, COB-ID, bytes)] on `side` ('host' or 'device')."""
-    return [(t, c, bytes.fromhex(h)) for t, c, h in obs[side]
-            if (cobs is None or c in cobs) and (t0 is None or t >= t0) and (t1 is None or t <= t1)]
+    """[(t s, COB-ID, bytes)] on `side` ('host' or 'device'), t0 <= t <= t1."""
+    return observation.frames(obs, side, cobs, t0, t1, inclusive=True)
 
 
 def drive_records(obs, node=NODE):
-    return [r for r in obs["bank"] if r.get("event") == "drive" and r.get("node") == node]
+    return observation.drive_records(obs, node)
 
 
 def stream_tag(obs):

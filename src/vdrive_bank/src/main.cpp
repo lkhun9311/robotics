@@ -236,25 +236,29 @@ int run(const Args& args) {
   writer.start();
   // From here on a failure ends the run through the normal shutdown below (rc 1): the trace
   // still gets the final snapshots and its `exit` record.
+  // A start that fails from here on is named in the trace (start_failed) before its exit record.
   int rc = 0;
+  std::string start_error;
   for (const std::uint8_t node : args.hb_muted) {
     const std::string command = "hb_mute " + std::to_string(node) + " 1";
     if (!loop.inject(command).ok) {
-      std::fprintf(stderr, "vdrive_bank: %s was refused\n", command.c_str());
-      rc = 1;
+      start_error = command + " was refused";
       break;
     }
   }
-  if (rc == 0) {
+  if (start_error.empty()) {
     loop.start(boot_ids);
     // Release k at t0 + k W: absolute, so the timer keeps the phase whatever the loop does.
     itimerspec spec{};
     spec.it_value = to_timespec(loop.next_release());
     spec.it_interval = to_timespec(MonoTime{vdrive_bank::kReleasePeriod.ns});
     if (::timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &spec, nullptr) < 0) {
-      std::fprintf(stderr, "vdrive_bank: timerfd_settime: %s\n", std::strerror(errno));
-      rc = 1;
+      start_error = std::string("timerfd_settime: ") + std::strerror(errno);
     }
+  }
+  if (!start_error.empty()) {
+    std::fprintf(stderr, "vdrive_bank: %s\n", start_error.c_str());
+    rc = 1;
   }
 
   int signo = 0;
@@ -292,6 +296,9 @@ int run(const Args& args) {
 
   writer.stop();
   const MonoTime end = mono_now();
+  if (!start_error.empty()) {
+    write_record(vdrive_bank::trace::start_failed(end, start_error));
+  }
   for (const vdrive_bank::TraceRecord& r : loop.snapshot(end)) {
     write_record(r);
   }

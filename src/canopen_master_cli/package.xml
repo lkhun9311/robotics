@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>canopen_master_cli</name>
+  <version>0.1.0</version>
+  <description>Process around our CANopen master for the interop harness: the canopen backend's I/O worker on SocketCAN, driven by scenarios or console lines, reporting JSON lines.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>canopen_codec</depend>
+  <depend>hal_contract</depend>
+  <depend>canopen_master</depend>
+  <depend>canopen_backend</depend>
+  <depend>socketcan_io</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

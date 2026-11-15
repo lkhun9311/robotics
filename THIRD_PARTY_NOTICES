@@ -8,6 +8,16 @@ MuJoCo Menagerie, universal_robots_ur5e
   checksum-verified, and installed into the image.
   Derived file (BSD-3-Clause): src/ur5e_description/mjcf/scene_baseline.xml, from scene.xml.
 
+CANopenNode (CANopenLinux canopend), the independent CANopen slave of the interop tests
+  License: Apache-2.0
+  Source: https://github.com/CANopenNode/CANopenLinux, commit 87cfbac52bc67809be20ca03ef3533293e7f7c3a (tag v4.0)
+    archive sha256 309935638147a097967c61f35583d65ffe3947e76006b02f9921b0dd82563426
+  Source: https://github.com/CANopenNode/CANopenNode, commit 76b43c88ef6d5490cb2f1518e10646e8dcb45c76 (the CANopenLinux submodule)
+    archive sha256 e124ae6402c259a796f4ae5fb539351f3c5d3904f8870eb9205773285dcc4358
+  License text: /opt/canopennode/LICENSE.CANopenLinux and LICENSE.CANopenNode in the dev image
+  Not stored in this repository: fetched by commit at image build, checksum-verified and built
+  into the dev image only (docker/canopennode_build.h is the one change to the shipped build).
+
 ROS packages used at run time and not redistributed
   mujoco_ros2_control   Apache-2.0
   MuJoCo (via mujoco_vendor)   Apache-2.0

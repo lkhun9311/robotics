@@ -70,6 +70,34 @@ RUN apt-get update \
       -r /tmp/mujoco-requirements.txt \
  && rm /tmp/mujoco-requirements.txt \
  && python3 -c 'import mujoco; v = mujoco.mj_versionString(); assert v == "3.12.0", v'
+# CANopenNode (CANopenLinux canopend), the independent slave of the E3c interop tests. Both
+# tarballs are GitHub archives of a commit (no git clone), pinned by SHA-256; the CANopenNode
+# tree goes where the CANopenLinux Makefile expects its submodule. The build differs from the
+# shipped one in docker/canopennode_build.h only (no self-start to Operational, log to stderr).
+ARG CANOPENLINUX_COMMIT=87cfbac52bc67809be20ca03ef3533293e7f7c3a
+ARG CANOPENLINUX_SHA256=309935638147a097967c61f35583d65ffe3947e76006b02f9921b0dd82563426
+ARG CANOPENNODE_COMMIT=76b43c88ef6d5490cb2f1518e10646e8dcb45c76
+ARG CANOPENNODE_SHA256=e124ae6402c259a796f4ae5fb539351f3c5d3904f8870eb9205773285dcc4358
+COPY docker/canopennode_build.h /opt/canopennode/canopennode_build.h
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir /tmp/co && cd /tmp/co \
+ && curl -fsSL -o cl.tgz "https://github.com/CANopenNode/CANopenLinux/archive/${CANOPENLINUX_COMMIT}.tar.gz" \
+ && curl -fsSL -o cn.tgz "https://github.com/CANopenNode/CANopenNode/archive/${CANOPENNODE_COMMIT}.tar.gz" \
+ && echo "${CANOPENLINUX_SHA256}  cl.tgz" | sha256sum -c - \
+ && echo "${CANOPENNODE_SHA256}  cn.tgz" | sha256sum -c - \
+ && mkdir -p linux/CANopenNode \
+ && tar xzf cl.tgz -C linux --strip-components=1 \
+ && tar xzf cn.tgz -C linux/CANopenNode --strip-components=1 \
+ && make -C linux canopend OPT="-g -DCO_SINGLE_THREAD -include /opt/canopennode/canopennode_build.h" \
+ && install -D linux/canopend /opt/canopennode/bin/canopend \
+ && install -D linux/LICENSE /opt/canopennode/LICENSE.CANopenLinux \
+ && install -D linux/CANopenNode/LICENSE /opt/canopennode/LICENSE.CANopenNode \
+ && install -D linux/CANopenNode/example/OD.c /opt/canopennode/OD.c \
+ && echo "${CANOPENLINUX_COMMIT} ${CANOPENNODE_COMMIT}" > /opt/canopennode/COMMITS \
+ && cd / && rm -rf /tmp/co
+ENV PATH=/opt/canopennode/bin:${PATH}
 ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /ws
 

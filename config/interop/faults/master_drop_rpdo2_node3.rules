@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master-side fault rows (E3c): see master_tpdo_outage_35ms.rules for the timing.
+# Every RPDO2 of node 3 lost on its way to the drive from 2300 ms on.
+h2d 0x303/0x7FF window 2300 5000 drop

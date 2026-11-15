@@ -9,7 +9,9 @@ import pytest
 import common
 import fault_timeline
 import frame_trace
+import backend_table
 import bandwidth_table
+import master_frame_trace
 import matrix_table
 import pick_place_replay
 import proxy_cost_histogram
@@ -29,6 +31,21 @@ def test_frame_trace_refuses_a_seq_without_one_actuation():
     obs["bank"] = [r for r in obs["bank"] if not (r.get("kind") == "actuated" and r["seq"] == 21)]
     with pytest.raises(SystemExit, match="0 actuation records"):
         frame_trace.build(obs, 21, "m5")
+
+
+def test_master_frame_trace_is_regenerated_from_the_x1_recording():
+    text = master_frame_trace.build(common.load_recording("x1"), 10, "x1")
+    assert text == (MEDIA / "e3c-master-frame-trace.txt").read_text(encoding="utf-8")
+
+
+def test_master_frame_trace_refuses_an_arm_hold_or_a_seq_not_actuated_on_six_nodes():
+    obs = common.load_recording("x1")
+    with pytest.raises(SystemExit, match="arm hold"):
+        master_frame_trace.build(obs, 1, "x1")
+    obs["bank"] = [r for r in obs["bank"]
+                   if not (r.get("kind") == "actuated" and r["seq"] == 10 and r["node"] == 4)]
+    with pytest.raises(SystemExit, match=r"actuation records of nodes \[1, 2, 3, 5, 6\]"):
+        master_frame_trace.build(obs, 10, "x1")
 
 
 def stream_t0(obs):
@@ -259,6 +276,26 @@ def test_matrix_table_never_reports_a_missing_or_failed_row_as_pass(tmp_path):
     assert rows["M2"] == "MISSING" and rows["R1"] == "MISSING"
 
 
+def test_matrix_table_e3c_lists_x1_to_x7_and_n1_to_n7_from_their_tests(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite name="pytest" tests="3">'
+        '<testcase classname="tools.interop.test_master_faults" '
+        'name="test_short_feedback_outage_latches_inhibit"/>'
+        '<testcase classname="tools.interop.test_master_matrix" '
+        'name="test_master_refuses_activation_on_canopennode"><failure message="N7"/></testcase>'
+        '<testcase classname="tools.interop.test_matrix" '
+        'name="test_nmt_states_and_service_gating"/></testsuite></testsuites>')
+    rows = {line.split("|")[1].strip(): line.split("|")[4].strip()
+            for line in matrix_table.table(junit, "e3c").splitlines()[2:]}
+    assert list(rows) == [f"X{i}" for i in range(1, 8)] + [f"N{i}" for i in range(1, 8)]
+    assert rows["X1"] == "PASS" and rows["N7"] == "FAIL"
+    assert all(v == "MISSING" for k, v in rows.items() if k not in ("X1", "N7"))
+    # Every E3c row names a test that records a row of the same name.
+    for row, _, module, test in matrix_table.E3C_ROWS:
+        assert common.RECORDING_TESTS[row.lower()] == f"tools/interop/{module}.py::{test}"
+
+
 def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys):
     """A CI directory holds only the rows that reached judge(); the others are named, not a
     traceback, and the reproduce line is the vcan stage's, not the re-recording command."""
@@ -269,3 +306,59 @@ def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys)
     assert "F2 PASS:" in out
     assert "M1 NOT RECORDED:" in out and "R1 NOT RECORDED:" in out
     assert "INTEROP_RECORD_DIR=tools/interop/recorded" not in out
+
+
+def test_rejudge_finds_the_master_rows_in_their_own_directory(capsys):
+    """n1..n7 (our master against CANopenNode) are committed under recorded/master; rejudge reads
+    them there, each passes, and the reproduce line records into that directory."""
+    rows = [f"n{i}" for i in range(1, 8)]
+    rc = rejudge.main(rows)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    for row in rows:
+        assert f"{row.upper()} PASS:" in out
+    assert "INTEROP_RECORD_DIR=tools/interop/recorded/master " in out
+    assert "tools/interop/recorded/master/n5.json.gz" in out
+
+
+
+def test_capture_parsing_is_shared_between_judges_and_evidence():
+    """The judges and the evidence scripts read frames and PDO fields through one module
+    (tools/interop/observation.py): neither keeps a parser of its own, and both see the same
+    frames and fields of a recording."""
+    import inspect
+
+    import judges
+    import observation
+
+    for module in (judges, common):
+        source = inspect.getsource(module)
+        assert "bytes.fromhex(h)" not in source, f"{module.__name__} parses captured frames itself"
+        assert 'int.from_bytes(raw, "little"' not in source, \
+            f"{module.__name__} decodes PDO fields itself"
+    obs = common.load_recording("m5")
+    rpdo1 = common.cob("RPDO1")
+    t0, t1 = obs["device"][10][0], obs["device"][-10][0]
+    assert common.frames(obs, "device", {rpdo1}, t0, t1) == \
+        observation.frames(obs, "device", rpdo1, t0, t1, inclusive=True)
+    assert judges.frames(obs, "device", rpdo1, t0, t1) == \
+        observation.frames(obs, "device", rpdo1, t0, t1)
+    data = next(d for _, _, d in judges.frames(obs, "device", rpdo1) if len(d) == 8)
+    assert common.decode("RPDO1", data) == judges.decode("RPDO1", data)
+    assert common.drive_records(obs) == judges.drive_records(obs)
+
+
+def test_readme_backend_table_is_what_the_contract_suite_records():
+    """The E3c backend table in README.md is what both backends' contract cases record now
+    (logic time: the same values on every run)."""
+    build = common.ROOT / "build" / "release"
+    text = backend_table.README.read_text(encoding="utf-8")
+    assert backend_table.readme_block(text) == backend_table.table(build), (
+        "README.md's backend table differs: python3 tools/evidence/backend_table.py --write-readme")
+
+
+def test_backend_table_never_reports_a_missing_or_failed_case_as_pass():
+    assert backend_table.cell(None) == "MISSING"
+    assert backend_table.cell(("FAIL", {"motion_end_ms": "200.000"})) == \
+        "FAIL: motion ended 200.000 ms after the reference"
+    assert backend_table.cell(("PASS", {})) == "PASS"

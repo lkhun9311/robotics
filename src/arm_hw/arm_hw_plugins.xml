@@ -1,0 +1,11 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<library path="arm_hw">
+  <class name="arm_hw/CanopenArmHw" type="arm_hw::CanopenArmHw"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>The six-joint arm over the CANopen backend, run on its socket I/O worker.</description>
+  </class>
+  <class name="arm_hw/DirectArmHw" type="arm_hw::DirectArmHw"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>The six-joint arm over the in-process DirectBackend, stepped from read().</description>
+  </class>
+</library>

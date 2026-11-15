@@ -10,18 +10,22 @@ A simulation-based robot system runtime, built in stages.
   generation guarantee).
 - **In progress (E3):** E3a, the CANopen wire contract and a ROS-free drive core, is done.
   E3b puts six of those drives on virtual CAN as a process, adds a bus fault proxy, and checks
-  them against an independent CANopen master (Lely) (see below).
-- **Planned (E3c onward):** a second independent stack (CANopenNode), a C++ hardware
-  abstraction layer on ros2_control and MuJoCo, and real-time loop measurement.
+  them against an independent CANopen master (Lely). E3c adds the host side: a hardware
+  abstraction layer (HAL) with two backends that pass one contract suite, our own CANopen
+  master, ros2_control plugins, master-side fault rows, and an interop matrix of our master
+  against an independent slave (CANopenNode) (see below).
+- **Planned (E3d onward):** the project's trajectory controller with permits and the manager
+  IPC (E3d), explicit recovery (policy reset, Fault Reset, E4), plant application reported by
+  the plant (E5), and real-time loop measurement.
 
 ## Status
 
 | Stage | State |
 |---|---|
-| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, the MuJoCo plugin and Menagerie model, and the Lely CANopen peer in the dev image done; the CANopenNode peer (E3c), supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
+| E0 environment, dev and runtime images, CI | partial: toolchain, CI, environment manifest, cyclictest baseline, the MuJoCo plugin and Menagerie model, and the Lely and CANopenNode CANopen peers in the dev image done; supervisor, DDS, Zephyr and PREEMPT_RT checks are open and run in the stage that needs them |
 | E1 command and permit contracts, independent judge | done |
 | E2 official plugin baseline | done: stock JTC baseline; no permit/generation guarantee |
-| E3 | in progress: E3a wire contract and drive core done; E3b bus processes, fault proxy and Lely interop done; E3c-E3d planned |
+| E3 | in progress: E3a wire contract and drive core done; E3b bus processes, fault proxy and Lely interop done; E3c host HAL, our CANopen master and CANopenNode interop done; E3d planned |
 
 ## E2 baseline
 
@@ -488,7 +492,8 @@ image's, the check asks for a regeneration instead of comparing bytes.
 
 1. Lely and our slave share no code, but both read our EDS: a misreading of the EDS that both
    share passes M4.
-2. One independent master stack so far (Lely); CANopenNode is E3c.
+2. One independent master stack (Lely); E3c adds an independent slave stack, CANopenNode,
+   against our own master (below).
 3. vcan has no arbitration, bit timing or bus load (spec §7.3); orderings and liveness hold on
    vcan, CAN timing is not shown.
 4. One bank process is one failure domain for six nodes (M2 phase C).
@@ -522,6 +527,237 @@ image's, the check asks for a regeneration instead of comparing bytes.
 14. `python3-matplotlib` (dev image only, for `tools/evidence`) comes from the Ubuntu archive,
     which is not pinned to a snapshot (see Limits).
 
+## E3c host HAL and master-side interop
+
+E3c builds the host side of the arm: a hardware abstraction layer (HAL) that owns the command
+guard and the arm identity, two backends behind it that pass one contract suite, our own CANopen
+master, and ros2_control plugins. Our master is then put through fault rows against our drives
+(X1-X7) and through an interop matrix against an independent CANopen slave, CANopenNode (N1-N7).
+`hal_contract`, `direct_backend`, `canopen_master` and `canopen_backend` include no ROS header;
+only `arm_hw` does.
+
+### Packages
+
+- `hal_contract` (`src/hal_contract`): the `Hal` (the write path: inhibit, identity, duplicate
+  and regression checks, then `HalGuard`; a command's `valid_until` is the earlier of the
+  permit's expiry and now + 48 ms, `Hal.ValidUntilIsMinOfPermitAndLease`), the `Backend`
+  interface, and the backend-neutral contract suite (`hal_contract/testing/contract_suite.hpp`).
+  Once active, the arm and write paths do not allocate (`Hal.ArmAndWritePathsDoNotAllocate`).
+- `direct_backend`: six `drive_core` joint models in process, in logic time, with the drive's
+  stop semantics (expiry, 30 ms command timeout, braking at a_stop).
+- `canopen_master`: the master core (NMT master, heartbeat consumer, expedited SDO client, SYNC
+  producer, EMCY consumer, PDO decoding by registered layouts) as pure logic in the shape of
+  `drive_core::Drive`, and `VdriveSession`, which brings six vdrives up, arms them, streams
+  commands and confirms stops.
+- `canopen_backend`: `CanopenBackend` (the session behind the `Backend` interface) and the I/O
+  worker: one thread that owns the CAN socket, the master and the session, and talks to the
+  control thread only through single-producer single-consumer boxes and queues.
+- `canopen_master_cli`: our master as a process, for the vcan tests (JSON lines out).
+- `arm_hw`: the ros2_control `SystemInterface` plugins `arm_hw/CanopenArmHw` and
+  `arm_hw/DirectArmHw`, thin shells over the `Hal`.
+- CANopenNode (CANopenLinux v4.0 `87cfbac`, CANopenNode `76b43c8`) is built into the dev image
+  from tarballs pinned by commit and SHA-256 (`docker/Dockerfile`; sources and licences in
+  `THIRD_PARTY_NOTICES`) and runs as
+  `canopend`, configured not to start itself (`test_canopennode_config.py` pins every fact the
+  matrix relies on, in `tools/interop/canopennode_facts.py`).
+
+### What our master implements, and what it does not
+
+| Implements | Shown by |
+|---|---|
+| NMT commands only when asked: a lost heartbeat or a boot timeout is an event, never a reset or a stop | N1, N2 (no NMT frame at all), X4 (no NMT frame after the arm) |
+| Heartbeat consumer: 250 ms consumer time, 1 s first-heartbeat window | N2, X4 |
+| Expedited SDO client, one request per node at a time, 200 ms timeout with abort 0x05040000 | N3, X5 |
+| SYNC every 10 ms on a fixed grid; it can be paused and stepped from the console | N5, the frame trace below |
+| EMCY consumer | N6 |
+| RPDO/TPDO by registered layouts; our vdrive's from the EDS, CANopenNode's from the map our master writes to it (CiA 301 dynamic mapping) | N4, the frame trace below |
+| Never writes our vdrive's PDO communication or mapping objects (they are `const`) | `Session.NeverWritesConstObjects` |
+| Capabilities probed, then confirmed by behaviour (next section) | `CanopenBackend.ProbeGivesVirtualProfile`, `Session.PeerWithoutAppliedTagFailsConfirmation`, N7 |
+
+It does not implement segmented or block SDO (a segmented answer is aborted with 0x05040001),
+LSS, node guarding, the TIME object, or more than one master. It does not recover a node: Fault
+Reset, policy reset and the sequencing of a recovery are E4. Its CiA 402 handling is the subset
+our drive implements; nothing outside this repository checks it (see Residual risks).
+
+### Capabilities: probed, then confirmed
+
+`configure` reads 0x1000, 0x1018:01-04, 0x2013 `boot_id`, 0x2014 = 30, 0x2016 and 0x6061 = 8
+(CSP) and uploads 0x2012 on every node. A node that passes all of them, with the identity of our
+EDS, is provisionally `virtual_canopen_profile()`; any other node is `generic_cia402_profile()`,
+and the backend's profile is the weakest over its nodes (`CanopenBackend.ProbeGivesVirtualProfile`,
+`NodeWithoutTagGivesGenericProfile`, `WrongModeGivesGenericProfile`,
+`IdentityMismatchGivesGeneric`, `ProfileParameterCannotRaiseProbe`). The first `arm` confirms the
+virtual profile only if every node reports the armed tag and stream sequence in TPDO3/TPDO2;
+otherwise the arm fails, motion is inhibited and the profile drops to generic
+(`Session.PeerWithoutAppliedTagFailsConfirmation`, `CanopenBackend.NoTpdoAckFailsConfirmation`).
+A Lely `BasicSlave` serving our EDS passes the probe and fails activation, never reaching
+Switched On, with no Enable Operation and no command PDO sent (`test_probe_slave_fails_activation`).
+
+The activation gate refuses a backend that lacks a required capability and names what is
+missing. Against six CANopenNode nodes (N7), with every capability required, `activate` ends
+with this line from `canopen_master_cli` (from `tools/interop/recorded/master/n7.json.gz`), and
+neither link shows an NMT Start or an RPDO afterwards:
+
+    {"event": "cmd_done", "n": 2, "ok": false, "error": "missing capabilities: DEVICE_SIDE_EXPIRY=UNSUPPORTED EXECUTION_GENERATION=UNSUPPORTED LOCAL_STOP=UNKNOWN APPLY_ACK=UNSUPPORTED SOURCE_TIMESTAMP=UNKNOWN", ...}
+
+### One contract suite, two backends
+
+The same 15 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
+`DirectBackend` (`direct_backend_tests`, `Direct/Contract/*`) and against `CanopenBackend` with
+its session and master over six in-memory `drive_core` drives (`canopen_backend_tests`,
+`Canopen/Contract/*`), both in logic time. A fixture declares only two latencies: arming from
+rest (declared: Direct 2 ms, CANopen 100 ms) and the acceptance bound of a command (Direct one W = 2 ms,
+CANopen 2 x T_bus = 20 ms); the suite refuses a fixture that declares more than the contract's
+bounds at compile time. The bounds every case checks are the same for both: the motion ends
+within 160 ms of the last approval and travels at most 0.100 rad after it, every axis gets its
+stop within 20 ms of a single-axis stop, and every stop is confirmed by 172 ms + T_bus after
+it. The values below
+are what each case recorded; "the reference" of a stop is the last approval the device got, or
+the injected single-axis stop in `InhibitStopsEveryAxisAndConfirms`. They are generated by `python3 tools/evidence/backend_table.py` from the
+release build (a test requires this table to be exactly what the script prints):
+
+<!-- backend table: python3 tools/evidence/backend_table.py --write-readme -->
+| Contract case | DirectBackend | CanopenBackend (in-memory drive bus) |
+|---|---|---|
+| `ArmHoldEndsAtHoldUntil` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ArmHoldsActualPositionWithoutPermit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ExpiredPermitStopsWithinBound` | PASS: arm 2.000 ms; motion ended 106.000 ms after the reference; travel 0.057 rad | PASS: arm 30.000 ms; motion ended 126.000 ms after the reference; travel 0.075 rad |
+| `InhibitStopsEveryAxisAndConfirms` | PASS: arm 2.000 ms; motion ended 48.000 ms after the reference; travel 0.012 rad; all axes stopped 2.000 ms after the injection | PASS: arm 30.000 ms; motion ended 100.000 ms after the reference; travel 0.051 rad; all axes stopped 2.000 ms after the injection |
+| `LostCommandsStopWithinBound` | PASS: arm 2.000 ms; motion ended 10.000 ms after the reference; travel 0.009 rad | PASS: arm 30.000 ms; motion ended 30.000 ms after the reference; travel 0.027 rad |
+| `LostFeedbackTurnsStale` | PASS: arm 2.000 ms; motion ended 100.000 ms after the reference; travel 0.051 rad | PASS: arm 30.000 ms; motion ended 100.000 ms after the reference; travel 0.051 rad |
+| `NoCommandBeforeActivation` | PASS | PASS |
+| `OldIdentityRefusedAfterReadoption` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ReArmDisablesBeforeCommit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `RepeatedSnapshotDoesNotExtendLife` | PASS: arm 2.000 ms; motion ended 10.000 ms after the reference; travel 0.009 rad | PASS: arm 30.000 ms; motion ended 30.000 ms after the reference; travel 0.027 rad |
+| `SourceTimeNotReceiveTime` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `StaleAtRestSampleConfirmsNothing` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `SteadyAcceptanceLatency` | PASS: arm 2.000 ms; acceptance at most 2.000 ms | PASS: arm 30.000 ms; acceptance at most 20.000 ms |
+| `SupersededCommandsAreCountedNotAcknowledged` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `TracksApprovedCommandsWithinVmax` | PASS: arm 2.000 ms; fastest 1.000 rad/s | PASS: arm 30.000 ms; fastest 1.000 rad/s |
+<!-- end of backend table -->
+
+Recovery differs on purpose until E4: a new `configure` of `DirectBackend` clears a latched
+policy stop (`DirectBackend.ConfigureClearsALatchedPolicyStop`), while a `drive_core` drive keeps
+its D11 policy latch until an explicit policy reset (`Latch.PolicyResetOverSdo`), so every
+contract case that stops the device starts from a fresh fixture.
+
+### The plugins under ros2_control
+
+`test_controller_manager_loads_canopen_arm_hw` (vcan) first moves the six joints of the bank to
+distinct positions with `canopen_master_cli`, then starts `ros2_control_node` with
+`arm_hw/CanopenArmHw` and `joint_state_broadcaster`: `/joint_states` reports each named joint
+within 1 mrad of the position the drive itself sends in TPDO1, and with no permit present no
+drive actuates. The plugin's `write()` does not block on a stalled worker
+(`CanopenArmHw.WriteDoesNotBlockOnStalledWorker`), `on_error` through the resource manager does
+not block (`CanopenArmHw.OnErrorThroughResourceManagerDoesNotBlock`), a guard refusal or a
+missing permit returns OK (`ArmSystem.GuardRefusalReturnsOk`,
+`ArmSystem.MissingPermitIsNoPermitVerdict`), and only the loss of the transport returns ERROR,
+once (`ArmSystem.TransportLossReturnsErrorOnce`).
+
+### Threads under ThreadSanitizer
+
+The thread sanitizer stage of `tools/ci/run_checks.sh` builds every package it needs with
+`-fsanitize=thread` (it checks the compile database of each one's `src/`) and runs the tests of
+`vdrive_bank` (control and writer threads) and of `hal_contract`, `direct_backend`,
+`canopen_backend` and `arm_hw` (the I/O worker and the control thread over the boxes, the op
+epochs, worker teardown in the plugin and its unload), with its own test floor for each group.
+A deliberate data race in a scratch test made the stage fail before the race was removed.
+
+### Master fault rows and the CANopenNode matrix
+
+CI run [43706394332](https://github.com/lkhun9311/robotics/actions/runs/43706394332)
+(dispatched on `feat/e3c-host-hal` at `97c81eb`, which differs from the commit that adds this
+paragraph only in this README) passed, 484 vcan tests with no failure. The table is generated
+from that run's `pytest-vcan.xml` artifact, not from a committed file:
+
+    gh run download 43706394332 -n checks-artifacts -D ci-43706394332
+    python3 tools/evidence/matrix_table.py ci-43706394332/artifacts/pytest-vcan.xml --stage e3c
+
+| Row | What | Test | Result |
+|---|---|---|---|
+| X1 | node 3 TPDOs lost 35 ms | `test_master_faults.py::test_short_feedback_outage_latches_inhibit` | PASS |
+| X2 | node 3 TPDOs lost 100 ms | `test_master_faults.py::test_dropped_tpdos_make_feedback_stale` | PASS |
+| X3 | node 3 RPDO2 dropped | `test_master_faults.py::test_one_node_command_loss_stops_the_group` | PASS |
+| X4 | node 4 heartbeats dropped | `test_master_faults.py::test_heartbeat_loss_raises_fault_without_reset` | PASS |
+| X5 | node 5 SDO answer dropped during arm | `test_master_faults.py::test_sdo_timeout_during_arm_fails_arming` | PASS |
+| X6 | all RPDO2 delayed 60 ms | `test_master_faults.py::test_all_commands_delayed_stop_the_group` | PASS |
+| X7 | some node 3 RPDO2 delayed 60 ms | `test_master_faults.py::test_minority_delayed_commands_never_actuate_late` | PASS |
+| N1 | NMT states and service gating | `test_master_matrix.py::test_master_nmt_states_and_service_gating` | PASS |
+| N2 | boot-up and heartbeat | `test_master_matrix.py::test_master_first_heartbeat_missing_vs_running_timeout` | PASS |
+| N3 | SDO expedited transfers and aborts | `test_master_matrix.py::test_master_sdo_expedited_and_aborts` | PASS |
+| N4 | PDO bytes and DLC | `test_master_matrix.py::test_master_pdo_bytes_and_lengths` | PASS |
+| N5 | SYNC application and sampling order | `test_master_matrix.py::test_master_sync_application_and_sampling_order` | PASS |
+| N6 | EMCY reception | `test_master_matrix.py::test_master_emcy_reception` | PASS |
+| N7 | activation refused on missing capabilities | `test_master_matrix.py::test_master_refuses_activation_on_canopennode` | PASS |
+
+X1-X7 run `canopen_master_cli` against `vdrive_bank` through `bus_fault_proxy`, whose rules
+(`config/interop/faults/master_*.rules`) inject the fault after the arm and a moving baseline.
+N1-N7 run it against `canopend` through the proxy with no rules. They are judged like the E3b
+rows (`tools/interop/judges_master.py` for X, `judges.py` `judge_n1`..`judge_n7` for N), with
+expectations from CiA 301 tables and from `canopennode_facts.py`, never from our master's code.
+The committed recordings (`tools/interop/recorded/x*.json.gz`,
+`tools/interop/recorded/master/n*.json.gz`) are judged again without vcan by
+`python3 tools/evidence/rejudge.py x1 ... n7`, together with broken copies that must FAIL or be
+INCONCLUSIVE (`test_master_fault_judges.py`, `test_master_judges.py`):
+
+| Row | Shows (from `rejudge.py`) | Does not show |
+|---|---|---|
+| X1 | Node 3's TPDOs lost for 35 ms (longer than the 30 ms feedback age, shorter than the lease): feedback stale 20 ms after the onset at age 30.1 ms, the inhibit latched by the feedback age alone 22 ms after it, all six confirmed stopped 80 ms after it; nothing dispatched after the latch, nothing actuated after a drive's stop | What clears the inhibit (only a new configure; recovery is E4) |
+| X2 | The same for 100 ms: the inhibit latches on the age within max_feedback_age + T_bus of the onset; the observation recovers 4 ms after the window, the inhibit stays latched to the end, nothing is dispatched or actuated again, node 3 stays in Quick Stop Active | A separate `FEEDBACK_STALE` from age: the inhibit latches at the same instant, so writes are `INHIBITED` from then on |
+| X3 | Every RPDO2 of node 3 lost: node 3 stops on its own (expiry, missing halves), the master inhibits at once and all six are confirmed stopped 52 ms after it | A loss of RPDO1 alone |
+| X4 | Every heartbeat of node 4 lost: `hb_lost` 250 ms after the last one that arrived, node-lost fault, inhibit, all six stopped 50 ms after `hb_lost`; no NMT frame from the master after the arm | A node that really died (its PDOs keep flowing here) |
+| X5 | Node 5's SDO answer lost during the arm: SDO timeout 202 ms into the arm, the arm fails (`kArmFailed`), no Enable Operation (0x0F) to any node, nothing dispatched or actuated | An SDO loss during configure or deactivate |
+| X6 | Every RPDO2 of all six held 60 ms: every drive stops on its own before the first late frame and before the master's inhibit (40 ms after the onset); each late frame is one other-tag drop, none not valid; all six confirmed stopped | Delays inside the lease |
+| X7 | Every fourth RPDO2 of node 3 held 60 ms: 18 reach the drive with its tag current and are 18 not-valid drops, none of those seqs actuated, no actuation past its deadline; approvals continue with no stop until the window ends | A delay shorter than the lease (a late fragment still valid on arrival) |
+| N1 | Start, Stop, Pre-operational, Reset Communication and Reset Node to node 2: canopend's heartbeat byte, its own log and our master's `state` event agree after each; boot-up after both resets (Reset Node ends the canopend process in this build; the harness restarts it, recorded separately); TPDO1 only in Operational; no SDO answer in Stopped | Other nodes; reset timing |
+| N2 | No slave: `boot_timeout` 1002 ms after our master's first SYNC, no NMT; canopend stopped by SIGSTOP: `hb_lost` 251 ms after its last heartbeat; SIGCONT: `hb_resumed`; no NMT frame at all | Consumer accuracy beyond the 250-400 ms window |
+| N3 | Uploads of 0x1000 and 0x1018:01 (both 0 in the example OD); a 0x1017 download changes canopend's heartbeat period; six aborts decoded with canopend's codes (0x06020000 twice, 0x06010002, 0x06090011, 0x06070013, 0x06070012) | Segmented or block transfers (our client has none) |
+| N4 | Our master maps TPDO1 (8 bytes) and RPDO1 (2 bytes) by CiA 301 dynamic mapping; 16 TPDO1 of DLC 8 whose bytes equal the values read by SDO and decoded by our master; our 2-byte RPDO1 applied; a DLC 1 RPDO1 gives canopend's EMCY 0x8210 and it stays Operational | Our vdrive's PDO layouts (CANopenNode never sees them) |
+| N5 | 24 synchronous (type 0) RPDO values, SYNC stepped one at a time: each invisible by SDO before the SYNC predicted to apply it and visible after it, by SDO and in the TPDO our master decoded; applied at the first SYNC after the RPDO 9 times and at the second 15 times, as the pinned parity defect predicts (below); the same sequence with type 255 must FAIL the same judge (`n5_type255`) | Ideal CiA 301 timing of a synchronous RPDO (the pinned build does not have it) |
+| N6 | canopend's EMCY 0x8210 and its error-reset EMCY 0x0000, each decoded by our master with the frame's code and register | Any other error code |
+| N7 | Six canopend nodes: 0x2012 aborts 0x06020000 on all six, configure succeeds with the generic profile, activation is refused naming five capabilities, no NMT Start and no RPDO for 390 ms after the refusal | Our vdrive extension against an independent peer (there is none) |
+
+### Our master's SYNC cycle on the wire
+
+[docs/media/e3c-master-frame-trace.txt](docs/media/e3c-master-frame-trace.txt) lists every
+frame of one cycle on `vcan_host` from the X1 recording, before its fault: our master's SYNC j,
+its dispatch record and the RPDO1/RPDO2 of seq 10 to all six nodes (each under the tag that node
+issued at arming), the TPDOs sampled at SYNC j with `applied_seq` 9, SYNC j+1 with the bank's
+actuation records, and the TPDOs whose `applied_seq` moves to 10. Regenerate it with
+`python3 tools/evidence/master_frame_trace.py`; a test requires the committed file to be what the
+script writes.
+
+### Residual risks and deviations
+
+1. The CiA 402 part still has no independent peer. CANopenNode exercises only CiA 301 services
+   (NMT, heartbeat, SDO, PDO, SYNC, EMCY); our master's CiA 402 handling and our drive's are
+   checked only against each other and against the project's table from the standard.
+2. Identity is the trust boundary of the virtual profile. Acknowledgement echoes cannot prove
+   that a device expires commands or stops locally, so a node that passes the probe with our
+   EDS identity and confirms the arm is trusted to do both; a device that claims our identity
+   and ignores expiry is out of the threat model, and `CanopenBackend.IdentityIsTheTrustBoundary`
+   documents that it is not detected. Our EDS identity (0x1018:01-04) is all zero, like the
+   CANopenNode example OD's, so what tells the two apart in N7 is the extension probe (0x2012
+   aborts), not the identity.
+3. A new master process (a fresh session) that meets drives a previous master left Operational
+   fails configure: their Quick Stop Active TPDOs under the old tag latch its inhibit
+   (`test_fresh_master_over_operational_drives_fails_configure`), and a drive that stopped on
+   expiry or timeout keeps its D11 policy latch until a policy reset. The arm_hw plugin makes every
+   configure a fresh session, so it starts only over drives a master deactivated. Recovery from
+   there is E4.
+4. The pinned CANopenNode `76b43c8` applies a synchronous RPDO on alternate SYNCs: `CO_PDO.c:811`
+   processes a received synchronous RPDO only when the SYNC toggle (`CO_SYNC.c:63`) has the
+   parity of its reception buffer, so an RPDO received after an odd SYNC count waits one more
+   SYNC. N5 predicts the applying SYNC (first or second after the RPDO) from the SYNCs canopend
+   has seen since boot-up, as pinned by `test_canopennode_config.py`, and fails on any other;
+   it judges this build, not ideal CiA 301 timing.
+5. Recovery differs between the backends until E4 (`DirectBackend.ConfigureClearsALatchedPolicyStop`
+   against the vdrive's D11 latch).
+6. The X rows run our master against our own drives: the master's side is checked against
+   observed drive behaviour, not against a third implementation.
+7. vcan has no arbitration or bit timing (as in E3b); the worker's timings are measured on shared
+   hosts, not bounded.
+
 ## Run everything
 
     docker compose build dev
@@ -536,9 +772,10 @@ image's, the check asks for a regeneration instead of comparing bytes.
 - `src/canopen_codec` PDO and SDO codec, checked against the golden vectors
 - `src/drive_core` ROS-free drive: CiA 402 state machine, SYNC timeline, guards, quick stop, SDO server
 - `src/socketcan_io` raw CAN socket with receive classification; `src/vdrive_bank` six drives as one process on vcan; `src/bus_fault_proxy` the forwarding and fault-rule proxy; `src/lely_peer` the Lely master test peer
+- `src/hal_contract` the HAL, the backend interface and the contract suite; `src/direct_backend` the in-process backend; `src/canopen_master` our CANopen master core and the vdrive session; `src/canopen_backend` the CANopen backend and its I/O worker; `src/canopen_master_cli` our master as a process; `src/arm_hw` the ros2_control plugins
 - `config/interop` Lely bus description and the fault rule files; `tools/bus` vcan links and the compose topology smoke
-- `tools/interop` vcan tests: processes, the Lely matrix, proxy faults, judges and recorded observations
-- `tools/evidence` scripts that make the E2, E3a and E3b images, the replay render, the frame trace and the tables; all from committed inputs except the interop matrix table, which is generated from a CI run's `pytest-vcan.xml` artifact
+- `tools/interop` vcan tests: processes, the Lely matrix, proxy faults, our master's fault rows and the CANopenNode matrix, judges, the shared capture parsing (`observation.py`) and recorded observations
+- `tools/evidence` scripts that make the E2, E3a, E3b and E3c images, the replay render, the frame traces and the tables; all from committed inputs except the interop matrix tables, generated from a CI run's `pytest-vcan.xml` artifact, and the backend table, generated from the release build's contract suite
 - `src/ur5e_description` UR5e model, scene and ros2_control description
 - `src/robot_bringup` launch file and controller and plugin configuration
 - `models/` checksums of the pinned Menagerie model; `tools/models` fetch and verify
@@ -551,4 +788,5 @@ image's, the check asks for a regeneration instead of comparing bytes.
 E1 runs in logic time only: no OS jitter, no real IPC, no CAN. E2 adds MuJoCo physics, but its
 timing is the simulator's, not a real-time measurement. E3b runs real processes on Linux virtual
 CAN, which has no arbitration or bit timing, on shared hosts; its costs are measurements, not
-real-time bounds. The numeric limits are project-declared, not industry values. Ubuntu archive packages in the image are not pinned to a snapshot.
+real-time bounds. E3c's master runs on the same virtual CAN, and its contract suite runs in logic
+time. The numeric limits are project-declared, not industry values. Ubuntu archive packages in the image are not pinned to a snapshot.

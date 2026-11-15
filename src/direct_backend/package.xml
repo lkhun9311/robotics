@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>direct_backend</name>
+  <version>0.1.0</version>
+  <description>ROS-free in-process HAL backend: six drive_core joint models stepped in logic time behind the hal_contract Backend interface.</description>
+  <maintainer email="lkhun9311@users.noreply.github.com">lkhun9311</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>runtime_core</depend>
+  <depend>hal_contract</depend>
+  <depend>drive_core</depend>
+  <test_depend>gtest</test_depend>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

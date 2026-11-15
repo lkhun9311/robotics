@@ -40,9 +40,6 @@ bool emcy_allowed(cc::NmtState state) {
   return state == cc::NmtState::kPreOperational || state == cc::NmtState::kOperational;
 }
 
-// 1001h as drive_core serves it by SDO: bit 0 (generic error) while a fault is being handled.
-std::uint8_t error_register(const Drive& d) { return d.cia402().fault_code() ? 0x01U : 0x00U; }
-
 BankRecord make_record(BankRecord::Kind kind, std::uint8_t node, MonoTime at) {
   BankRecord r{};
   r.kind = kind;
@@ -249,7 +246,7 @@ void Bank::send_emcy(Node& n, std::uint16_t code, MonoTime now, std::vector<cc::
   r.emcy_code = code;
   r.nmt_state = static_cast<std::uint8_t>(state);
   if (allowed) {
-    const cc::Frame f = cc::encode_emcy({n.drive->node(), code, error_register(*n.drive), {}});
+    const cc::Frame f = cc::encode_emcy({n.drive->node(), code, n.drive->error_register(), {}});
     r.cob_id = f.cob_id;
     out.push_back(f);
   }
