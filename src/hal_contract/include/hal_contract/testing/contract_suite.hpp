@@ -57,8 +57,13 @@ inline constexpr runtime_core::Duration kStopBound = runtime_core::milliseconds(
 inline constexpr double kMaxTravelAfterApproval = 0.100;  // rad
 // C18 host deadline for stop confirmation, from the inhibit.
 inline constexpr runtime_core::Duration kStopConfirmDeadline = runtime_core::milliseconds(172);
-// Every axis gets its stop within this of the inhibit (review focus 1).
+// Every axis gets its stop within 2 x T_bus of the injected single-axis stop (C17; plan Task 4
+// Session.OneNodeStopInhibitsGroup: "Quick Stop to the other five within 2 x T_bus"). Measured
+// from the injection, so it includes the backend's time to notice the stop and latch.
 inline constexpr runtime_core::Duration kGroupStopLatency = runtime_core::milliseconds(20);
+// C19's widest steady-state acceptance bound (CANopen: 2 x T_bus). A fixture may declare a
+// tighter one (Direct: 1 W), never a looser one.
+inline constexpr runtime_core::Duration kMaxAcceptanceLatency = runtime_core::milliseconds(20);
 // Distinct, non-zero joint positions: a backend that reports zeros or swaps joints is caught.
 inline constexpr Joints kStartPosition{0.1, -0.2, 0.3, -0.4, 0.5, -0.6};
 // Ramp step per controller period: 0.9 rad/s, under v_max with margin for rounding.
@@ -109,7 +114,7 @@ struct DeviceState {
 //                             a drive fault on that axis alone.
 //   device()                  the device's true state.
 //   drain_events()            the device events since the last drain, in time order.
-//   Traits::kArmLatency       arm op to armed, from rest (C19).
+//   Traits::kArmLatency       arm op to armed, from rest (C19); at most kArmTimeout.
 //   Traits::kAcceptanceLatency a retained command to group_applied_source_seq (C19: 2 x T_bus
 //                             on CANopen, 1 W on Direct).
 template <class F>
@@ -128,9 +133,10 @@ concept BackendFixture =
       { F::Traits::kAcceptanceLatency } -> std::convertible_to<runtime_core::Duration>;
     };
 
-// runtime_core defines MonoTime +/- Duration only; the suite adds durations here.
+// runtime_core defines MonoTime +/- Duration only; the suite adds durations through its public,
+// overflow-checked MonoTime operators.
 constexpr runtime_core::Duration plus(runtime_core::Duration a, runtime_core::Duration b) {
-  return runtime_core::Duration{runtime_core::detail::checked_add(a.ns, b.ns)};
+  return (runtime_core::MonoTime{} + a + b) - runtime_core::MonoTime{};
 }
 
 inline runtime_core::Requirements all_requirements() { return {true, true, true, true, true}; }
@@ -190,6 +196,12 @@ struct TraceSample {
 
 template <BackendFixture F>
 class Contract : public ::testing::Test {
+  // A fixture cannot loosen the contract's own latency bounds (C19, C10).
+  static_assert(runtime_core::Duration{F::Traits::kAcceptanceLatency} <= kMaxAcceptanceLatency,
+                "Traits::kAcceptanceLatency exceeds C19's 2 x T_bus");
+  static_assert(runtime_core::Duration{F::Traits::kArmLatency} <= kArmTimeout,
+                "Traits::kArmLatency exceeds the arm op deadline (C10)");
+
  protected:
   Contract()
       : hal_(fx_.make(), all_requirements(), runtime_core::GuardConfig{kPeriod, kMaxFeedbackAge},
@@ -736,12 +748,47 @@ TYPED_TEST_P(Contract, InhibitStopsEveryAxisAndConfirms) {
   this->expect_stopped_within_bound(injected);
 }
 
+// C18: a stop is confirmed only by 5 distinct fresh samples. With the axes already at rest and
+// feedback stalled, the last sample says "at rest" forever; counting it again must never
+// confirm anything.
+TYPED_TEST_P(Contract, StaleAtRestSampleConfirmsNothing) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const HalSetpoint sp = Ramp{this->kA, kStartPosition, 0}.at(1);
+  for (int i = 0; i < 5; ++i) this->cycle(nullptr, sp);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    ASSERT_LT(std::abs(this->fx_.device().velocity[i]), kRestVelocity)
+        << "INCONCLUSIVE: joint " << i << " not at rest before the stall";
+    ASSERT_LT(std::abs(this->feedback_.velocity[i]), kRestVelocity)
+        << "INCONCLUSIVE: the last sample of joint " << i << " is not at rest";
+  }
+  const runtime_core::MonoTime stalled = this->now();
+  this->fx_.stall_feedback(true);
+  this->fx_.inject_node_stop(0);
+  while (this->now() < stalled + kMaxFeedbackAge + kStopConfirmDeadline + kTBus) {
+    this->cycle(nullptr, sp);
+  }
+  for (const TraceSample& s : this->trace_) {
+    if (s.at < stalled) continue;
+    for (std::size_t i = 0; i < kJoints; ++i) {
+      EXPECT_NE(s.feedback.stop[i], StopStatus::kConfirmed)
+          << "node " << i << " confirmed from a stale sample at +" << (s.at - stalled).ns << " ns";
+    }
+  }
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kStopUnconfirmed));
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_EQ(this->feedback_.stop[i], StopStatus::kUnconfirmed) << "node " << i;
+  }
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
                             RepeatedSnapshotDoesNotExtendLife, OldIdentityRefusedAfterReadoption,
                             LostFeedbackTurnsStale, SteadyAcceptanceLatency,
                             SupersededCommandsAreCountedNotAcknowledged, SourceTimeNotReceiveTime,
-                            ReArmDisablesBeforeCommit, InhibitStopsEveryAxisAndConfirms);
+                            ReArmDisablesBeforeCommit, InhibitStopsEveryAxisAndConfirms,
+                            StaleAtRestSampleConfirmsNothing);
 
 }  // namespace hal_contract::testing

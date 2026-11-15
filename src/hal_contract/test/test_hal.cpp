@@ -47,6 +47,20 @@ void counted_free(void* p) noexcept {
 
 void* operator new(std::size_t n) { return counted_alloc(n); }
 void* operator new[](std::size_t n) { return counted_alloc(n); }
+// The nothrow forms too: gtest uses them, and every pointer that reaches the replaced delete
+// must come from malloc (a sanitizer's own new paired with free is an alloc-dealloc mismatch).
+void* operator new(std::size_t n, const std::nothrow_t& /*tag*/) noexcept {
+  try {
+    return counted_alloc(n);
+  } catch (const std::bad_alloc&) {
+    return nullptr;
+  }
+}
+void* operator new[](std::size_t n, const std::nothrow_t& tag) noexcept {
+  return operator new(n, tag);
+}
+void operator delete(void* p, const std::nothrow_t& /*tag*/) noexcept { counted_free(p); }
+void operator delete[](void* p, const std::nothrow_t& /*tag*/) noexcept { counted_free(p); }
 void operator delete(void* p) noexcept { counted_free(p); }
 void operator delete[](void* p) noexcept { counted_free(p); }
 void operator delete(void* p, std::size_t /*n*/) noexcept { counted_free(p); }
