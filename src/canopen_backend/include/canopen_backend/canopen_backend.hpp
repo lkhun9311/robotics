@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "canopen_backend/transport.hpp"
 #include "canopen_master/master.hpp"
@@ -25,17 +27,22 @@
 // CiA 402 profile. A configured profile limit (the backend_profile_limit parameter) can only
 // lower the probed profile, per capability.
 //
-// configure while armed and not inhibited is refused (the op fails at once, nothing is sent):
-// its Enter Pre-operational would stop enabled drives without the stop being tracked. Deactivate
-// first, or let an inhibit stop the group.
+// configure is refused (the op fails at once, nothing is sent) while an arm is running, the group
+// is armed or a deactivate is running, unless the inhibit is latched: any of those may have
+// drives Operation Enabled, and the configure's Enter Pre-operational would stop them without the
+// stop being tracked (a configure posted mid-arm would also supersede the arm). Deactivate first,
+// or let an inhibit stop the group.
+//
+// A configuration outside the C20 timing profile (or one the master or session refuses: duplicate
+// or unknown nodes, non-positive timeouts) does not throw: the backend is built without a session
+// and every lifecycle op fails at once with the reason, which for C20 lists the allowed values.
 //
 // Not thread-safe; one caller serializes every call. In logic time the caller is the test, which
 // calls step() every W; in E3c Task 6 it is the I/O worker.
 namespace canopen_backend {
 
 struct CanopenConfig {
-  // Node IDs and the C20 timing profile; outside C20 the constructor throws with the allowed
-  // values in the message.
+  // Node IDs and the C20 timing profile; outside C20 every op fails with the allowed values.
   canopen_master::SessionConfig session{};
   runtime_core::Duration heartbeat_timeout{canopen_master::kDefaultHeartbeatTimeout};
   runtime_core::Duration boot_timeout{canopen_master::kDefaultBootTimeout};
@@ -46,20 +53,24 @@ struct CanopenConfig {
 };
 
 // The weaker of two supports: kUnsupported < kUnknown < kNotApplicable < kProvidedByHost <
-// kSupported.
+// kSupported. kUnknown ranks below kNotApplicable: an unverified guarantee must not count for more
+// than a stated "meaningless here", so a limit or a node that is unknown always lowers the result.
 runtime_core::Support weaker(runtime_core::Support a, runtime_core::Support b);
 runtime_core::DeviceCapabilities weaker(const runtime_core::DeviceCapabilities& a,
                                         const runtime_core::DeviceCapabilities& b);
 
 class CanopenBackend final : public hal_contract::Backend {
  public:
-  // Throws std::invalid_argument for a null transport or a configuration the session refuses.
+  // Throws std::invalid_argument for a null transport only; a refused configuration is reported
+  // by configure() (see above).
   CanopenBackend(CanopenConfig config, std::unique_ptr<Transport> transport);
   CanopenBackend(const CanopenBackend&) = delete;
   CanopenBackend& operator=(const CanopenBackend&) = delete;
 
   // Time passes to `now`: every received frame to the session, then the session's tick, then
-  // what arrived in reply, until nothing more arrives (at most kMaxFramesPerStep frames).
+  // what arrived in reply (the TPDOs answering this tick's SYNC included), until nothing more
+  // arrives. kMaxFramesPerStep is a soft bound, checked between poll() batches: a step stops
+  // polling once that many frames were handled, but a batch already taken is handled whole.
   void step(runtime_core::MonoTime now);
 
   // ---- hal_contract::Backend ----
@@ -77,18 +88,25 @@ class CanopenBackend final : public hal_contract::Backend {
   // Logic time: returns at once (std::nullopt while the op is pending).
   std::optional<hal_contract::OpResult> wait(std::uint64_t op_id,
                                              runtime_core::Duration timeout) override;
-  bool inhibited() const override { return session_.inhibited(); }
+  // Without a session (a refused configuration) the backend reports itself inhibited.
+  bool inhibited() const override { return !session_ || session_->inhibited(); }
   bool can_apply(runtime_core::MonoTime valid_until, runtime_core::MonoTime now) const override {
-    return session_.can_apply(valid_until, now);
+    return session_ && session_->can_apply(valid_until, now);
   }
 
   // ---- observation (tests, traces) ----
-  const canopen_master::VdriveSession& session() const { return session_; }
-  const canopen_master::Master& master() const { return master_; }
+  // Throw std::logic_error for a backend built from a refused configuration.
+  const canopen_master::VdriveSession& session() const;
+  const canopen_master::Master& master() const;
+  // Why the configuration was refused; empty when it was accepted.
+  const std::string& config_error() const { return config_error_; }
   // The newest arm request posted, for observers that join device commits to an identity.
   std::optional<hal_contract::ArmRequest> last_arm() const { return last_arm_; }
 
   static constexpr std::size_t kMaxFramesPerStep = 4096;
+  // Refused ops are remembered in a ring this long. An id pushed out by later refusals reads as
+  // kUnknown ("unknown operation" from wait), not as its refusal; the Hal keeps fewer ops
+  // (Hal::kOpSlots = 8), so it never asks for one.
   static constexpr std::size_t kRefusalRing = 8;
 
  private:
@@ -99,11 +117,15 @@ class CanopenBackend final : public hal_contract::Backend {
 
   void send_all(const std::vector<canopen_codec::Frame>& frames);
   const Refusal* refusal(std::uint64_t op_id) const;
+  void refuse(const hal_contract::OpTicket& ticket, const char* error);
+  // A configure now could reach drives that are (or may become) Operation Enabled, untracked.
+  bool configure_unsafe() const;
 
   CanopenConfig config_;
   std::unique_ptr<Transport> transport_;
-  canopen_master::Master master_;
-  canopen_master::VdriveSession session_;
+  std::string config_error_;
+  std::optional<canopen_master::Master> master_;
+  std::optional<canopen_master::VdriveSession> session_;
   runtime_core::MonoTime now_{};
   std::optional<hal_contract::ArmRequest> last_arm_{};
   std::array<Refusal, kRefusalRing> refusals_{};

@@ -284,7 +284,9 @@ TEST(CanopenBackend, HeartbeatLossIsNodeLostFault) {
                     milliseconds(500));
   const hc::Feedback fb = b->poll(rig.now);
   ASSERT_TRUE(fb.faults.has(hc::Fault::kNodeLost));
-  // The consumer time is 250 ms after the last heartbeat (100 ms period).
+  // C7: lost 250 ms after the last heartbeat. With a 100 ms period the last one came at most
+  // 100 ms before the mute, so the loss is 150 ms after it at the earliest and 250 ms + 100 ms
+  // (a heartbeat due just after the mute is the first one missing) + 1 W of stepping at the latest.
   EXPECT_GE((rig.now - muted).ns, milliseconds(150).ns);
   EXPECT_LE((rig.now - muted).ns, milliseconds(352).ns);
   EXPECT_TRUE(fb.faults.has(hc::Fault::kInhibited));
@@ -321,9 +323,132 @@ TEST(CanopenBackend, RefusesConfigureWhileArmed) {
   for (std::size_t i = 0; i < kNodes; ++i) {
     EXPECT_EQ(rig.bus.drives[i]->cia402().state(), drive_core::Cia402State::kOperationEnabled) << i;
   }
-  // After a deactivate, configure goes ahead.
-  ASSERT_EQ(rig.deactivate(), OpState::kSucceeded);
+  // Nor while the deactivate runs: its stop may not be confirmed yet.
+  const hc::OpTicket d = rig.ticket(hc::kDeactivateTimeout);
+  b->deactivate(d, rig.now);
+  rig.advance(kW);
+  ASSERT_EQ(b->session().phase(), cm::SessionPhase::kDeactivating)
+      << "INCONCLUSIVE: the deactivate is not running";
+  const hc::OpTicket c2 = rig.ticket(hc::kConfigureTimeout);
+  b->configure(c2, rig.now);
+  EXPECT_EQ(b->op_state(c2.op_id), OpState::kFailed);
+  rig.advance_until([&] { return b->op_state(d.op_id) != OpState::kPending; },
+                    hc::kDeactivateTimeout);
+  ASSERT_EQ(b->op_state(d.op_id), OpState::kSucceeded) << "the configure superseded the deactivate";
+  // After the deactivate, configure goes ahead.
   EXPECT_EQ(rig.configure(), OpState::kSucceeded);
+}
+
+// A configure posted while an arm is running would supersede it and send Enter Pre-operational
+// to drives the arm may already have enabled, with no stop tracked: refused like one posted while
+// armed. Here it is posted after the enable (0x0F) went out, before the arm completed.
+TEST(CanopenBackend, RefusesConfigurePostedMidArm) {
+  Rig rig;
+  std::unique_ptr<CanopenBackend> b = start(rig);
+  ASSERT_EQ(rig.configure(), OpState::kSucceeded);
+  ASSERT_EQ(rig.activate(), OpState::kSucceeded);
+  const hc::OpTicket arm = rig.ticket(hc::kArmTimeout);
+  b->arm(arm, hc::ArmRequest{kA, rig.now + milliseconds(800), arm.op_id}, rig.now);
+  const auto enabled = [&] {
+    for (const WireFrame& w : rig.wire) {
+      if (!w.from_master) continue;
+      for (std::size_t i = 0; i < kNodes; ++i) {
+        const std::optional<cc::od::Rpdo3> r = cc::unpack_rpdo3(cmt::node_id(i), w.frame);
+        if (r && r->controlword == cm::controlword::kEnableOperation) return true;
+      }
+    }
+    return false;
+  };
+  ASSERT_TRUE(rig.advance_until(enabled, milliseconds(500))) << "INCONCLUSIVE: no 0x0F was sent";
+  ASSERT_EQ(b->op_state(arm.op_id), OpState::kPending) << "INCONCLUSIVE: the arm already ended";
+  ASSERT_EQ(b->session().phase(), cm::SessionPhase::kArming);
+  const std::size_t mark = rig.wire.size();
+  const hc::OpTicket c = rig.ticket(hc::kConfigureTimeout);
+  b->configure(c, rig.now);
+  EXPECT_EQ(b->op_state(c.op_id), OpState::kFailed);
+  rig.advance_until([&] { return b->op_state(arm.op_id) != OpState::kPending; }, hc::kArmTimeout);
+  EXPECT_EQ(b->op_state(arm.op_id), OpState::kSucceeded) << "the configure superseded the arm";
+  rig.advance(milliseconds(50));
+  for (std::size_t k = mark; k < rig.wire.size(); ++k) {
+    EXPECT_FALSE(is_nmt(rig.wire[k], cc::NmtCommand::kEnterPreOperational))
+        << "Enter Pre-operational to enabled drives";
+  }
+  EXPECT_FALSE(b->inhibited());
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    EXPECT_EQ(rig.bus.drives[i]->cia402().state(), drive_core::Cia402State::kOperationEnabled) << i;
+  }
+}
+
+// C20: a timing value outside the E3a drive profile fails the configure op with the allowed
+// values in its message (on_configure FAILURE), instead of throwing at construction.
+TEST(CanopenBackend, OutOfProfileTimingFailsConfigure) {
+  const auto refused = [](CanopenConfig c, const char* what) {
+    Rig rig;
+    std::unique_ptr<CanopenBackend> b = start(rig, c);
+    EXPECT_FALSE(b->config_error().empty()) << what;
+    const hc::OpTicket t = rig.ticket(hc::kConfigureTimeout);
+    b->configure(t, rig.now);
+    EXPECT_EQ(b->op_state(t.op_id), OpState::kFailed) << what;
+    const std::optional<hc::OpResult> r = b->wait(t.op_id, {});
+    ASSERT_TRUE(r.has_value()) << what;
+    EXPECT_FALSE(r->ok) << what;
+    // The allowed values: bus period 10 ms, lease (0, 48] ms, max feedback age [20, 30] ms.
+    for (const char* allowed : {"10", "48", "20", "30"}) {
+      EXPECT_NE(r->error.find(allowed), std::string::npos) << what << ": " << r->error;
+    }
+    const hc::OpTicket a = rig.ticket(hc::kActivateTimeout);
+    b->activate(a, rig.now);
+    EXPECT_EQ(b->op_state(a.op_id), OpState::kFailed) << what;
+    EXPECT_TRUE(b->inhibited()) << what;
+    rig.advance(milliseconds(100));
+    for (const WireFrame& w : rig.wire) {
+      EXPECT_FALSE(w.from_master) << what << ": a refused backend sent a frame";
+    }
+  };
+  CanopenConfig c = Rig::default_config();
+  c.session.bus_period = milliseconds(20);
+  refused(c, "bus period 20 ms");
+  c = Rig::default_config();
+  c.session.lease = milliseconds(49);
+  refused(c, "lease 49 ms");
+  c = Rig::default_config();
+  c.session.max_feedback_age = milliseconds(31);
+  refused(c, "max feedback age 31 ms");
+  c = Rig::default_config();
+  c.session.max_feedback_age = milliseconds(19);
+  refused(c, "max feedback age 19 ms");
+  // The boundary values are accepted.
+  c = Rig::default_config();
+  c.session.lease = milliseconds(48);
+  c.session.max_feedback_age = milliseconds(30);
+  Rig rig;
+  std::unique_ptr<CanopenBackend> b = start(rig, c);
+  EXPECT_TRUE(b->config_error().empty()) << b->config_error();
+  EXPECT_EQ(rig.configure(), OpState::kSucceeded);
+}
+
+// The TPDOs answering the SYNC a step sends are handled in that same step: poll() after the step
+// already carries that SYNC's sample. The 2 x T_bus acceptance bound (C19) counts on it.
+TEST(CanopenBackend, SyncAnswerSeenInTheSameStep) {
+  Rig rig;
+  std::unique_ptr<CanopenBackend> b = start(rig);
+  ASSERT_EQ(rig.configure(), OpState::kSucceeded);
+  ASSERT_EQ(rig.activate(), OpState::kSucceeded);
+  int judged = 0;
+  for (int k = 0; k < 50; ++k) {
+    const std::size_t mark = rig.wire.size();
+    rig.advance(kW);
+    bool sync = false;
+    for (std::size_t j = mark; j < rig.wire.size(); ++j) {
+      if (rig.wire[j].from_master && cc::is_sync(rig.wire[j].frame)) sync = true;
+    }
+    if (!sync) continue;
+    ++judged;
+    const hc::Feedback fb = b->poll(rig.now);
+    EXPECT_EQ(fb.sampled_at, rig.now) << "the SYNC's own sample was not handled in its step";
+    for (std::size_t i = 0; i < kNodes; ++i) EXPECT_EQ(fb.node_sampled_at[i], rig.now) << i;
+  }
+  ASSERT_GE(judged, 9) << "INCONCLUSIVE: too few SYNCs";
 }
 
 }  // namespace

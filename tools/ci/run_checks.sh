@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=432
+GTEST_FLOOR=435
 PYTEST_FLOOR=245
 INTEGRATION_FLOOR=11
 SIM_FLOOR=32
@@ -155,35 +155,39 @@ colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 echo "== exported targets (an outside consumer at the compiler's default C++ standard) =="
 # The consumer sets no standard of its own: whatever its headers need must come from the
-# imported targets (INTERFACE_COMPILE_FEATURES). It includes every installed public header.
+# imported targets (INTERFACE_COMPILE_FEATURES). One executable per package includes every
+# installed public header of that package and links only that package's target, so a header that
+# needs a package its Config does not find_dependency fails here instead of passing because the
+# consumer happened to link it too.
+# Test utilities are not library headers and are not included: hal_contract/testing/ (the gtest
+# contract suite) and canopen_master/testing/ (the in-memory drive bus, which needs drive_core,
+# a test dependency of canopen_master only).
 consumer=build/release/export_consumer
 rm -rf "$consumer"
 mkdir -p "$consumer"
-cat > "$consumer/CMakeLists.txt" <<'EOF'
-cmake_minimum_required(VERSION 3.22)
-project(export_consumer LANGUAGES CXX)
-find_package(drive_core REQUIRED)
-find_package(socketcan_io REQUIRED)
-find_package(vdrive_bank REQUIRED)
-find_package(bus_fault_proxy REQUIRED)
-find_package(hal_contract REQUIRED)
-find_package(direct_backend REQUIRED)
-find_package(canopen_master REQUIRED)
-find_package(canopen_backend REQUIRED)
-add_executable(consumer main.cpp)
-target_link_libraries(consumer PRIVATE drive_core::drive_core socketcan_io::socketcan_io
-  vdrive_bank::vdrive_bank bus_fault_proxy::bus_fault_proxy hal_contract::hal_contract
-  direct_backend::direct_backend canopen_master::canopen_master canopen_backend::canopen_backend)
-EOF
+CONSUMED=(runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy hal_contract
+  direct_backend canopen_master canopen_backend)
 {
-  # hal_contract/testing/ holds the gtest contract suite, which every backend's test binary
-  # compiles and links against gtest; it is not a library header.
-  for pkg in runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy hal_contract direct_backend canopen_master canopen_backend; do
-    (cd "install/release/$pkg/include" && find . -name '*.hpp' -not -path './hal_contract/testing/*' | sort |
-      sed 's|^\./\(.*\)|#include "\1"|')
+  echo 'cmake_minimum_required(VERSION 3.22)'
+  echo 'project(export_consumer LANGUAGES CXX)'
+  for pkg in "${CONSUMED[@]}"; do
+    echo "find_package($pkg REQUIRED)"
+    echo "add_executable(consumer_$pkg main_$pkg.cpp)"
+    echo "target_link_libraries(consumer_$pkg PRIVATE $pkg::$pkg)"
   done
-  echo 'int main() { return 0; }'
-} > "$consumer/main.cpp"
+} > "$consumer/CMakeLists.txt"
+for pkg in "${CONSUMED[@]}"; do
+  {
+    (cd "install/release/$pkg/include" &&
+      find . -name '*.hpp' -not -path './hal_contract/testing/*' -not -path './canopen_master/testing/*' |
+      sort | sed 's|^\./\(.*\)|#include "\1"|')
+    echo 'int main() { return 0; }'
+  } > "$consumer/main_$pkg.cpp"
+  if ! grep -q '^#include' "$consumer/main_$pkg.cpp"; then
+    echo "FAIL: exported targets: no installed header of $pkg" >&2
+    exit 1
+  fi
+done
 (
   set +u
   # shellcheck disable=SC1091
@@ -192,6 +196,7 @@ EOF
   cmake -S "$consumer" -B "$consumer/build" -DCMAKE_BUILD_TYPE=Release > "$consumer/configure.log"
   cmake --build "$consumer/build"
 )
+echo "exported targets: ${#CONSUMED[@]} packages, each linking only its own target"
 
 echo "== unit tests (release) =="
 run_tests build/release

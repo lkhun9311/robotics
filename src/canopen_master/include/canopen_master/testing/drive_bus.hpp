@@ -18,7 +18,8 @@
 // with what the vdrive_bank process adds around each drive — its heartbeat (100 ms, phase from
 // its latest boot-up) and its EMCY for an accepted fault. Shared by the vdrive session's bus loop
 // and the canopen backend's in-memory transport. Header-only test utility: a test that includes
-// it links drive_core itself. Not a library header.
+// it links drive_core itself. Not a library header: the exported-targets check of run_checks.sh
+// leaves canopen_master/testing/ out, since drive_core is only a test dependency of canopen_master.
 //
 // Also the scripted-peer helpers both test suites use: a node that answers one object
 // differently (an intercept) or sends one PDO field differently (a rewrite).
