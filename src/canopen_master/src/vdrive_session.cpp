@@ -789,6 +789,13 @@ void VdriveSession::arm_progress(MonoTime now) {
       return;
     }
   }
+  // The disable stops belong to the old arm: from here the nodes will be enabled again, and a
+  // later inhibit must stop and track every one of them afresh (C17, C18).
+  for (NodeState& n : nodes_) {
+    const std::uint64_t gen = n.stop.gen + 1;
+    n.stop = StopTrack{};
+    n.stop.gen = gen;
+  }
   // Phase 3: commit on all.
   stage_ = ArmStage::kCommit;
   for (std::size_t i = 0; i < kSessionNodes && op_is(OpKind::kArm); ++i) {

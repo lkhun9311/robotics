@@ -653,6 +653,55 @@ TEST(Session, NeverWritesConstObjects) {
 
 // ============================ inhibit and stops ============================
 
+TEST(Session, InhibitAfterRearmQuickStopsAll) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp ra = ramp_from_here(l, kA, 0.5);
+  stream(l, ra, milliseconds(100));
+  // The re-arm disables and confirms each stop before its commit (C9 phase 2).
+  ASSERT_EQ(l.arm(kB, milliseconds(800)), OpState::kSucceeded);
+  Ramp rb = ramp_from_here(l, kB, 1.0);
+  stream(l, rb, milliseconds(100));
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    ASSERT_EQ(l.drives[i]->cia402().state(), Cia402State::kOperationEnabled) << "INCONCLUSIVE";
+    ASSERT_EQ(std::abs(l.drives[i]->joint().velocity_nrad_s), drive_core::kVMaxNradS)
+        << "INCONCLUSIVE: not moving";
+    // A stop of the old arm is not a stop of this one.
+    EXPECT_EQ(l.session.feedback().stop[i], StopStatus::kNone) << i;
+  }
+  const MonoTime inhibit_at = l.now;
+  const std::uint64_t mark = l.wire.back().order;
+  l.session.inhibit(l.now);
+  l.step();
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    EXPECT_EQ(l.session.feedback().stop[i], StopStatus::kStopping) << i;
+  }
+  std::array<std::optional<MonoTime>, kNodes> confirmed_at{};
+  for (int k = 0; k < 150; ++k) {
+    l.step();
+    for (std::size_t i = 0; i < kNodes; ++i) {
+      if (!confirmed_at[i] && l.session.feedback().stop[i] == StopStatus::kConfirmed) {
+        confirmed_at[i] = l.now;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    std::optional<MonoTime> qs;
+    for (const WireFrame& w : l.wire) {
+      if (w.order > mark && is_controlword(w, 0x02, i)) {
+        qs = w.at;
+        break;
+      }
+    }
+    ASSERT_TRUE(qs) << "no Quick Stop to node " << i;
+    EXPECT_LE(*qs - inhibit_at, Duration{2 * kTBus.ns}) << i;
+    ASSERT_TRUE(confirmed_at[i]) << i;
+    // Fresh evidence only: braking from 1 rad/s takes 0.1 s before any sample is at rest.
+    EXPECT_GE(*confirmed_at[i] - inhibit_at, milliseconds(100)) << i;
+    EXPECT_EQ(l.drives[i]->cia402().state(), Cia402State::kQuickStopActive) << i;
+  }
+}
+
 TEST(Session, ForeignAppliedTagInhibits) {
   BusLoop l;
   bring_up_and_arm(l, kA);
