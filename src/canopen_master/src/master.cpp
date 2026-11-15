@@ -15,6 +15,16 @@ namespace {
 constexpr std::uint16_t kNmtCobId = 0x000;
 constexpr std::uint16_t kHeartbeatBase = 0x700;
 constexpr std::uint16_t kSdoResponseBase = 0x580;
+constexpr std::uint16_t kSdoRequestBase = 0x600;
+constexpr std::uint16_t kMaxCobId = 0x7FF;
+
+// A COB-ID that another service of the predefined connection set (or this master's SYNC and
+// EMCY handling) already consumes.
+bool reserved_cob(std::uint32_t cob) {
+  const auto in = [cob](std::uint32_t base) { return cob >= base && cob <= base + 0x7FU; };
+  return cob == kNmtCobId || in(cc::od::kSyncCobId) || in(cc::od::kEmcyCobIdBase) ||
+         in(kSdoResponseBase) || in(kSdoRequestBase) || in(kHeartbeatBase);
+}
 
 MasterEventKind sdo_kind(SdoStatus status) {
   switch (status) {
@@ -47,7 +57,7 @@ Master::Master(MasterConfig config) : config_(std::move(config)) {
     }
     slot_.at(id.value()) = static_cast<std::int16_t>(nodes_.size());
     nodes_.push_back(Node{id, HeartbeatConsumer{config_.heartbeat_timeout, config_.boot_timeout},
-                          SdoClient{id, config_.sdo_timeout}, std::nullopt});
+                          SdoClient{id, config_.sdo_timeout}, std::nullopt, std::nullopt});
   }
 }
 
@@ -71,7 +81,7 @@ Master::Node* Master::find(std::uint16_t cob, std::uint16_t base) {
 }
 
 void Master::emit(MasterEventKind kind, std::uint8_t node, EventDetail detail) {
-  events_.push_back(MasterEvent{kind, node, now_, detail});
+  events_.push_back(MasterEvent{kind, node, now_, std::move(detail)});
 }
 
 std::vector<MasterEvent> Master::drain_events() { return std::exchange(events_, {}); }
@@ -114,6 +124,63 @@ bool Master::set_heartbeat_consumer(cc::NodeId node, Duration consumer_time) {
 std::optional<cc::NmtState> Master::nmt_state(cc::NodeId node) const {
   const Node* n = find(node);
   return n == nullptr ? std::nullopt : n->state;
+}
+
+std::optional<EmcyDetail> Master::last_emcy(cc::NodeId node) const {
+  const Node* n = find(node);
+  return n == nullptr ? std::nullopt : n->last_emcy;
+}
+
+bool Master::register_rx_pdo(cc::NodeId node, std::uint32_t cob, PdoLayout layout) {
+  if (find(node) == nullptr || cob > kMaxCobId || reserved_cob(cob) || layout.fields.empty()) {
+    return false;
+  }
+  unsigned bits = 0;
+  for (const PdoField& f : layout.fields) {
+    if (f.bit_length == 0 || f.bit_length > 64) {
+      return false;
+    }
+    bits += f.bit_length;
+  }
+  if (bits > 64) {
+    return false;
+  }
+  RxPdo pdo{static_cast<std::uint16_t>(cob), node.value(),
+            static_cast<std::uint8_t>((bits + 7) / 8), std::move(layout)};
+  for (RxPdo& existing : rx_pdos_) {
+    if (existing.cob == pdo.cob) {
+      existing = std::move(pdo);
+      return true;
+    }
+  }
+  rx_pdos_.push_back(std::move(pdo));
+  return true;
+}
+
+bool Master::sync_control(SyncControl control) {
+  switch (control) {
+    case SyncControl::kPause:
+      sync_paused_ = true;
+      sync_step_ = false;
+      return true;
+    case SyncControl::kResume:
+      if (sync_paused_) {
+        sync_paused_ = false;
+        sync_step_ = false;
+        sync_reanchor_ = true;
+        if (last_sync_) {
+          sync_due_ = *last_sync_ + config_.sync_period;
+        }
+      }
+      return true;
+    case SyncControl::kStep:
+      if (!sync_paused_) {
+        return false;
+      }
+      sync_step_ = true;
+      return true;
+  }
+  return false;
 }
 
 std::optional<HeartbeatStatus> Master::heartbeat_status(cc::NodeId node) const {
@@ -197,10 +264,62 @@ void Master::handle_heartbeat(Node& node, const cc::Frame& frame) {
   }
 }
 
+void Master::handle_emcy(Node& node, const cc::Frame& frame) {
+  const auto emcy = cc::decode_emcy(frame);
+  if (!emcy) {
+    ++counts_.malformed;
+    return;
+  }
+  EmcyDetail detail{emcy->error_code, emcy->error_register, emcy->manufacturer};
+  node.last_emcy = detail;
+  emit(MasterEventKind::kEmcy, node.id.value(), detail);
+}
+
+void Master::handle_pdo(const RxPdo& pdo, const cc::Frame& frame) {
+  if (frame.dlc != pdo.bytes) {
+    ++counts_.pdo_length_errors;
+    emit(MasterEventKind::kPdoLengthError, pdo.node,
+         PdoLengthDetail{pdo.cob, frame.dlc, pdo.bytes});
+    return;
+  }
+  std::uint64_t bits = 0;
+  for (std::size_t i = 0; i < pdo.bytes; ++i) {
+    bits |= static_cast<std::uint64_t>(frame.data.at(i)) << (8U * i);
+  }
+  PdoDetail detail{pdo.cob, syncs_, {}};
+  detail.fields.reserve(pdo.layout.fields.size());
+  unsigned offset = 0;
+  for (const PdoField& f : pdo.layout.fields) {
+    if (offset >= 64) {
+      break;  // Unreachable: register_rx_pdo refuses layouts above 64 bits.
+    }
+    const std::uint64_t mask =
+        f.bit_length >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << f.bit_length) - 1U;
+    detail.fields.push_back(
+        PdoValue{f.index, f.sub, f.bit_length, f.is_signed, (bits >> offset) & mask});
+    offset += f.bit_length;
+  }
+  emit(MasterEventKind::kPdo, pdo.node, std::move(detail));
+}
+
 void Master::handle(const cc::Frame& frame, std::vector<cc::Frame>& out) {
   const std::uint16_t cob = frame.cob_id;
-  if (cob == kNmtCobId) {
-    ++counts_.foreign;
+  if (cob == kNmtCobId || cob == cc::od::kSyncCobId) {
+    ++counts_.foreign;  // Another master's NMT or SYNC.
+    return;
+  }
+  for (const RxPdo& pdo : rx_pdos_) {
+    if (pdo.cob == cob) {
+      handle_pdo(pdo, frame);
+      return;
+    }
+  }
+  if (cob > cc::od::kEmcyCobIdBase && cob <= cc::od::kEmcyCobIdBase + cc::NodeId::kMax) {
+    if (Node* n = find(cob, cc::od::kEmcyCobIdBase)) {
+      handle_emcy(*n, frame);
+    } else {
+      ++counts_.foreign;
+    }
     return;
   }
   if (cob > kHeartbeatBase && cob <= kHeartbeatBase + cc::NodeId::kMax) {
@@ -234,7 +353,42 @@ void Master::run_callbacks() {
   }
 }
 
-std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now) {
+void Master::produce_sync(MonoTime now, std::vector<cc::Frame>& out) {
+  const Duration period = config_.sync_period;
+  if (period.ns <= 0) {
+    return;
+  }
+  const Duration half{period.ns / 2};
+  bool due = false;
+  if (!sync_paused_) {
+    due = (sync_reanchor_ && !last_sync_) || now >= sync_due_;
+  } else if (sync_step_) {
+    due = !last_sync_ || now >= *last_sync_ + half;
+  }
+  if (!due) {
+    return;
+  }
+  out.push_back(cc::encode_sync());
+  ++syncs_;
+  last_sync_ = now;
+  emit(MasterEventKind::kSync, 0, SyncDetail{syncs_});
+  if (sync_paused_) {
+    sync_step_ = false;
+    return;
+  }
+  // The next slot of the grid that is at least half a period after this SYNC: a late tick never
+  // produces two SYNCs closer than that (drive_core drops such a SYNC as a duplicate, D7).
+  MonoTime next = (sync_reanchor_ ? now : sync_due_) + period;
+  sync_reanchor_ = false;
+  const MonoTime earliest = now + half;
+  if (next < earliest) {
+    const std::int64_t k = ((earliest - next).ns + period.ns - 1) / period.ns;
+    next = next + Duration{k * period.ns};
+  }
+  sync_due_ = next;
+}
+
+std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now, bool produce) {
   if (in_step_) {
     throw std::logic_error("canopen_master: on_frame or tick called from an SDO callback");
   }
@@ -259,14 +413,17 @@ std::vector<cc::Frame> Master::step(const cc::Frame* frame, MonoTime now) {
     throw;
   }
   apply_commands(now, out);
+  if (produce) {
+    produce_sync(now, out);
+  }
   in_step_ = false;
   return out;
 }
 
 std::vector<cc::Frame> Master::on_frame(const cc::Frame& frame, MonoTime now) {
-  return step(&frame, now);
+  return step(&frame, now, false);
 }
 
-std::vector<cc::Frame> Master::tick(MonoTime now) { return step(nullptr, now); }
+std::vector<cc::Frame> Master::tick(MonoTime now) { return step(nullptr, now, true); }
 
 }  // namespace canopen_master

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <variant>
+#include <vector>
 
 #include "canopen_codec/codec.hpp"
 #include "runtime_core/time.hpp"
@@ -52,7 +54,56 @@ struct StateDetail {
   canopen_codec::NmtState state{};
 };
 
-using EventDetail = std::variant<std::monostate, StateDetail, SdoResult>;
+struct EmcyDetail {
+  std::uint16_t error_code{};
+  std::uint8_t error_register{};
+  std::array<std::uint8_t, 5> manufacturer{};  // Bytes 3..7 as received.
+
+  friend bool operator==(const EmcyDetail&, const EmcyDetail&) = default;
+};
+
+struct SyncDetail {
+  std::uint64_t sync_index{};  // SYNCs produced so far, this one included (1 for the first).
+};
+
+// One decoded field of a received PDO.
+struct PdoValue {
+  std::uint16_t index{};
+  std::uint8_t sub{};
+  std::uint8_t bit_length{};
+  bool is_signed{};
+  std::uint64_t raw{};  // The field's bits as received, zero-extended.
+
+  // The field sign-extended from bit_length; meaningful when is_signed.
+  constexpr std::int64_t signed_value() const {
+    if (bit_length == 0 || bit_length >= 64) {
+      return static_cast<std::int64_t>(raw);
+    }
+    const std::uint64_t sign = std::uint64_t{1} << (bit_length - 1U);
+    return static_cast<std::int64_t>((raw ^ sign) - sign);
+  }
+
+  friend bool operator==(const PdoValue&, const PdoValue&) = default;
+};
+
+struct PdoDetail {
+  std::uint16_t cob{};
+  // SYNCs the master had produced when the PDO was received: a synchronous TPDO answering SYNC
+  // k carries sync_index k.
+  std::uint64_t sync_index{};
+  std::vector<PdoValue> fields;  // In mapping order.
+};
+
+struct PdoLengthDetail {
+  std::uint16_t cob{};
+  std::uint8_t dlc{};       // As received.
+  std::uint8_t expected{};  // The registered layout's byte length.
+
+  friend bool operator==(const PdoLengthDetail&, const PdoLengthDetail&) = default;
+};
+
+using EventDetail = std::variant<std::monostate, StateDetail, SdoResult, EmcyDetail, SyncDetail,
+                                 PdoDetail, PdoLengthDetail>;
 
 struct MasterEvent {
   MasterEventKind kind{};

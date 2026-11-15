@@ -47,11 +47,15 @@ cc::Frame frame(std::uint16_t cob, std::initializer_list<std::uint8_t> bytes) {
 
 MonoTime at(std::int64_t ms) { return kT0 + milliseconds(ms); }
 
-MasterConfig config(std::vector<cc::NodeId> nodes) {
+// SYNC production off unless a test asks for it, so the other services' frames stand alone.
+MasterConfig config(std::vector<cc::NodeId> nodes, Duration sync_period = Duration{}) {
   MasterConfig c;
   c.nodes = std::move(nodes);
+  c.sync_period = sync_period;
   return c;
 }
+
+constexpr Duration kSyncPeriod{10'000'000};
 
 std::vector<MasterEvent> of_kind(const std::vector<MasterEvent>& events, MasterEventKind kind) {
   std::vector<MasterEvent> out;
@@ -367,6 +371,219 @@ TEST(Master, SdoQueueOverflowRefused) {
   EXPECT_TRUE(m.sdo_upload(kNode2, 0x1000, 0x00, rec.done()));
   EXPECT_EQ(m.counts().sdo_refused, 5U);
   ASSERT_EQ(rec.results.size(), 1U);  // Refused requests are never called back.
+}
+
+// ---- SYNC producer ----
+
+const cc::Frame kSync = frame(0x080, {});  // CiA 301 SYNC without counter: COB-ID 0x080, DLC 0.
+
+// The millisecond offsets of the ticks that produced a SYNC.
+std::vector<std::int64_t> sync_ticks(Master& m, const std::vector<std::int64_t>& ticks) {
+  std::vector<std::int64_t> fired;
+  for (const std::int64_t ms : ticks) {
+    const auto out = m.tick(at(ms));
+    const auto n = std::count(out.begin(), out.end(), kSync);
+    EXPECT_LE(n, 1) << ms;
+    if (n == 1) {
+      fired.push_back(ms);
+    }
+  }
+  return fired;
+}
+
+std::vector<std::int64_t> range(std::int64_t from, std::int64_t to) {
+  std::vector<std::int64_t> v;
+  for (std::int64_t ms = from; ms <= to; ++ms) {
+    v.push_back(ms);
+  }
+  return v;
+}
+
+TEST(Master, SyncEveryPeriodAndNeverEarly) {
+  EXPECT_EQ(MasterConfig{}.sync_period, milliseconds(10));  // T_bus by default.
+  {
+    Master m(config({kNode2}, kSyncPeriod));
+    EXPECT_EQ(sync_ticks(m, range(0, 100)),
+              (std::vector<std::int64_t>{0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}));
+    const auto syncs = of_kind(m.drain_events(), MasterEventKind::kSync);
+    ASSERT_EQ(syncs.size(), 11U);
+    for (std::size_t i = 0; i < syncs.size(); ++i) {
+      EXPECT_EQ(std::get<canopen_master::SyncDetail>(syncs[i].detail).sync_index, i + 1);
+      EXPECT_EQ(syncs[i].node, 0);
+    }
+    EXPECT_EQ(m.syncs_produced(), 11U);
+    // One nanosecond before the next slot: nothing.
+    EXPECT_TRUE(m.tick(at(110) - Duration{1}).empty());
+    EXPECT_EQ(m.tick(at(110)), std::vector<cc::Frame>{kSync});
+  }
+  {
+    // Irregular ticks: a SYNC goes out at the first tick at or after its slot, never before; a
+    // slot less than half a period after the SYNC just sent is skipped (39 -> 40 skipped).
+    Master m(config({kNode2}, kSyncPeriod));
+    EXPECT_EQ(sync_ticks(m, {0, 9, 13, 17, 19, 20, 26, 39, 40, 45, 49, 50, 59, 60}),
+              (std::vector<std::int64_t>{0, 13, 20, 39, 50, 60}));
+  }
+  {
+    Master m(config({kNode2}, Duration{}));  // Zero: no SYNC production.
+    EXPECT_TRUE(sync_ticks(m, range(0, 50)).empty());
+  }
+}
+
+TEST(Master, SyncPauseStep) {
+  Master m(config({kNode2}, kSyncPeriod));
+  EXPECT_FALSE(m.sync_control(canopen_master::SyncControl::kStep));  // Only while paused.
+  EXPECT_EQ(sync_ticks(m, range(0, 24)), (std::vector<std::int64_t>{0, 10, 20}));
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kPause));
+  EXPECT_TRUE(sync_ticks(m, range(25, 59)).empty());
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));
+  EXPECT_EQ(sync_ticks(m, range(60, 61)), (std::vector<std::int64_t>{60}));  // Exactly one.
+  // A second step right after: not sooner than half a period after the previous SYNC.
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));
+  EXPECT_EQ(sync_ticks(m, range(62, 79)), (std::vector<std::int64_t>{65}));
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kResume));
+  EXPECT_EQ(sync_ticks(m, range(80, 100)), (std::vector<std::int64_t>{80, 90, 100}));
+  EXPECT_EQ(m.syncs_produced(), 8U);
+
+  // A step not yet produced is dropped by a pause.
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kPause));
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kStep));
+  ASSERT_TRUE(m.sync_control(canopen_master::SyncControl::kPause));
+  EXPECT_TRUE(sync_ticks(m, range(101, 130)).empty());
+}
+
+// ---- EMCY consumer ----
+
+TEST(Master, EmcyDecoded) {
+  Master m(config({kNode2}, kSyncPeriod));
+  m.tick(at(0));
+  m.drain_events();
+  // EMCY 0x082: error code 0x8210 (PDO not processed, length error), register 0x11, then the
+  // five manufacturer bytes.
+  EXPECT_TRUE(m.on_frame(frame(0x082, {0x10, 0x82, 0x11, 1, 2, 3, 4, 5}), at(1)).empty());
+  // Error reset: code 0x0000.
+  EXPECT_TRUE(m.on_frame(frame(0x082, {0x00, 0x00, 0x00, 0, 0, 0, 0, 0}), at(2)).empty());
+  // Wrong DLC and a node not in the config: not reported.
+  EXPECT_TRUE(m.on_frame(frame(0x082, {0x10, 0x82, 0x11, 1}), at(3)).empty());
+  EXPECT_TRUE(m.on_frame(frame(0x085, {0x10, 0x82, 0x11, 1, 2, 3, 4, 5}), at(4)).empty());
+
+  const auto emcy = of_kind(m.drain_events(), MasterEventKind::kEmcy);
+  ASSERT_EQ(emcy.size(), 2U);
+  EXPECT_EQ(emcy[0].node, 2);
+  EXPECT_EQ(emcy[0].at, at(1));
+  EXPECT_EQ(std::get<canopen_master::EmcyDetail>(emcy[0].detail),
+            (canopen_master::EmcyDetail{0x8210, 0x11, {1, 2, 3, 4, 5}}));
+  EXPECT_EQ(std::get<canopen_master::EmcyDetail>(emcy[1].detail),
+            (canopen_master::EmcyDetail{0x0000, 0x00, {0, 0, 0, 0, 0}}));
+  EXPECT_EQ(m.counts().malformed, 1U);
+  EXPECT_EQ(m.counts().foreign, 1U);
+}
+
+// ---- Received PDOs ----
+
+using canopen_master::PdoDetail;
+using canopen_master::PdoField;
+using canopen_master::PdoLayout;
+using canopen_master::PdoValue;
+
+// A CANopenNode-style 8-byte map (u32 + i16 + u16) and a 2-byte map (u8 + i8).
+const PdoLayout kMap8{
+    {{0x2110, 0x01, 32, false}, {0x2111, 0x01, 16, true}, {0x2112, 0x01, 16, false}}};
+const PdoLayout kMap2{{{0x2113, 0x01, 8, false}, {0x2114, 0x01, 8, true}}};
+
+TEST(Master, RegisteredLayoutDecodes) {
+  Master m(config({kNode2}, kSyncPeriod));
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x182, kMap8));
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x282, kMap2));
+  // Fields that are not whole bytes: 12 + 4 bits in 2 bytes.
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x382,
+                                PdoLayout{{{0x2115, 0x00, 12, false}, {0x2116, 0x00, 4, true}}}));
+  // Refused: more than 64 bits, empty, a zero-length field, a node not in the config, a COB-ID
+  // of another service or beyond 11 bits.
+  EXPECT_FALSE(m.register_rx_pdo(
+      kNode2, 0x482,
+      PdoLayout{{{0x2110, 1, 32, false}, {0x2111, 1, 32, false}, {0x2112, 1, 8, false}}}));
+  EXPECT_FALSE(m.register_rx_pdo(kNode2, 0x482, PdoLayout{}));
+  EXPECT_FALSE(m.register_rx_pdo(kNode2, 0x482, PdoLayout{{{0x2110, 1, 0, false}}}));
+  EXPECT_FALSE(m.register_rx_pdo(kNode5, 0x185, kMap2));
+  for (const std::uint32_t cob :
+       {0x000U, 0x080U, 0x082U, 0x582U, 0x602U, 0x702U, 0x800U, 0x8000'0182U}) {
+    EXPECT_FALSE(m.register_rx_pdo(kNode2, cob, kMap2)) << cob;
+  }
+
+  m.tick(at(0));  // SYNC 1
+  m.on_frame(frame(0x182, {0x78, 0x56, 0x34, 0x12, 0xFE, 0xFF, 0x34, 0x12}), at(1));
+  m.tick(at(10));  // SYNC 2
+  m.on_frame(frame(0x282, {0x05, 0x80}), at(11));
+  m.on_frame(frame(0x382, {0x3F, 0xA2}), at(12));
+
+  const auto pdos = of_kind(m.drain_events(), MasterEventKind::kPdo);
+  ASSERT_EQ(pdos.size(), 3U);
+  const auto& a = std::get<PdoDetail>(pdos[0].detail);
+  EXPECT_EQ(pdos[0].node, 2);
+  EXPECT_EQ(a.cob, 0x182);
+  EXPECT_EQ(a.sync_index, 1U);
+  EXPECT_EQ(a.fields, (std::vector<PdoValue>{{0x2110, 0x01, 32, false, 0x12345678},
+                                             {0x2111, 0x01, 16, true, 0xFFFE},
+                                             {0x2112, 0x01, 16, false, 0x1234}}));
+  EXPECT_EQ(a.fields[1].signed_value(), -2);
+  const auto& b = std::get<PdoDetail>(pdos[1].detail);
+  EXPECT_EQ(b.cob, 0x282);
+  EXPECT_EQ(b.sync_index, 2U);
+  EXPECT_EQ(b.fields,
+            (std::vector<PdoValue>{{0x2113, 0x01, 8, false, 0x05}, {0x2114, 0x01, 8, true, 0x80}}));
+  EXPECT_EQ(b.fields[1].signed_value(), -128);
+  const auto& c = std::get<PdoDetail>(pdos[2].detail);
+  EXPECT_EQ(c.fields, (std::vector<PdoValue>{{0x2115, 0x00, 12, false, 0x23F},
+                                             {0x2116, 0x00, 4, true, 0xA}}));
+  EXPECT_EQ(c.fields[1].signed_value(), -6);
+
+  // Registering the same COB-ID again replaces its layout (a remapped PDO).
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x282, PdoLayout{{{0x2117, 0x00, 16, false}}}));
+  m.on_frame(frame(0x282, {0x05, 0x80}), at(13));
+  const auto again = of_kind(m.drain_events(), MasterEventKind::kPdo);
+  ASSERT_EQ(again.size(), 1U);
+  EXPECT_EQ(std::get<PdoDetail>(again[0].detail).fields,
+            (std::vector<PdoValue>{{0x2117, 0x00, 16, false, 0x8005}}));
+}
+
+TEST(Master, WrongLengthNotDecoded) {
+  Master m(config({kNode2}, kSyncPeriod));
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x182, kMap8));
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x282, kMap2));
+  m.tick(at(0));
+  m.drain_events();
+  m.on_frame(frame(0x182, {1, 2, 3, 4, 5, 6, 7}), at(1));
+  m.on_frame(frame(0x282, {1}), at(2));
+  m.on_frame(frame(0x282, {1, 2, 3}), at(3));
+  const auto events = m.drain_events();
+  EXPECT_TRUE(of_kind(events, MasterEventKind::kPdo).empty());
+  const auto errors = of_kind(events, MasterEventKind::kPdoLengthError);
+  ASSERT_EQ(errors.size(), 3U);
+  EXPECT_EQ(std::get<canopen_master::PdoLengthDetail>(errors[0].detail),
+            (canopen_master::PdoLengthDetail{0x182, 7, 8}));
+  EXPECT_EQ(std::get<canopen_master::PdoLengthDetail>(errors[1].detail),
+            (canopen_master::PdoLengthDetail{0x282, 1, 2}));
+  EXPECT_EQ(std::get<canopen_master::PdoLengthDetail>(errors[2].detail),
+            (canopen_master::PdoLengthDetail{0x282, 3, 2}));
+  EXPECT_EQ(m.counts().pdo_length_errors, 3U);
+  m.on_frame(frame(0x182, {1, 2, 3, 4, 5, 6, 7, 8}), at(4));
+  EXPECT_EQ(of_kind(m.drain_events(), MasterEventKind::kPdo).size(), 1U);
+}
+
+TEST(Master, UnregisteredCobCounted) {
+  Master m(config({kNode2}, kSyncPeriod));
+  ASSERT_TRUE(m.register_rx_pdo(kNode2, 0x182, kMap8));
+  m.tick(at(0));
+  m.drain_events();
+  EXPECT_TRUE(m.on_frame(frame(0x183, {1, 2, 3, 4, 5, 6, 7, 8}), at(1)).empty());
+  EXPECT_TRUE(m.on_frame(frame(0x282, {1, 2}), at(2)).empty());
+  EXPECT_TRUE(m.on_frame(frame(0x481, {1, 2, 3, 4, 5, 6, 7, 8}), at(3)).empty());
+  EXPECT_TRUE(m.drain_events().empty());
+  EXPECT_EQ(m.counts().unregistered_cob, 3U);
+  // Another producer's SYNC is not ours: counted as foreign, the SYNC count is unchanged.
+  EXPECT_TRUE(m.on_frame(kSync, at(4)).empty());
+  EXPECT_EQ(m.counts().foreign, 1U);
+  EXPECT_EQ(m.syncs_produced(), 1U);
 }
 
 }  // namespace
