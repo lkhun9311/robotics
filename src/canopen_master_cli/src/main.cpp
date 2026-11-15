@@ -33,7 +33,7 @@
 //   scenario_done {scenario, ...} / scenario_failed {scenario, reason}   exit 0 / exit 1
 //   exit {wakes, ..., tx_eagain, tx_enobufs, ...}   last line: the worker's counters
 // canopen_master_cli --if IF --nodes LIST --scenario NAME [--required LIST] [--duration-ms MS]
-//                    [--arm-at-ns NS] [--trace PATH]
+//                    [--arm-at-ns NS] [--target LIST] [--trace PATH]
 // Scenarios:
 //   console       a bare master over the nodes; the commands of parse_console (args.hpp), one
 //                 per line; `quit` ends the run once every command before it is done (PR #25
@@ -45,7 +45,12 @@
 //   arm           activate_hal, then one arm request (hold 1 s); no permit, no command
 //   stream        arm, then every T_bus an approved command at the held position under a
 //                 synthetic permit (expires 100 ms after each write) for --duration-ms (default
-//                 2000), then nothing for 0.5 s while the drives' own stop is observed
+//                 2000), then nothing for 0.5 s while the drives' own stop is observed; with
+//                 --target (six rad, comma separated) the commands move from the held position to
+//                 the target on one trapezoid (0.5 rad/s, 2 rad/s^2 on the longest joint, the
+//                 others scaled) and then stay there; the stream then ends with a deactivate
+//                 step (the group stops under control and is left Switched On, no policy stop
+//                 latched) instead of the 0.5 s of observed expiry
 // --arm-at-ns (CLOCK_MONOTONIC ns) holds the arm step until that instant, so a harness whose
 // fault window is fixed to its proxy's start knows the fault comes after the arm.
 // --duration-ms is the deadline of activate_hal and arm (default 15000) and of console (default
@@ -53,9 +58,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -104,6 +111,26 @@ constexpr rc::Duration kShutdownTimeout{1'000'000'000};
 constexpr hc::AuthorityId kAuthority{rc::ManagerInstance{1}, rc::SessionId{1}, rc::Generation{1}};
 
 rc::MonoTime now() { return rc::SystemMonotonicClock{}.now(); }
+
+// The distance along a trapezoid of length `d` (rad) after `t` seconds: kRampSpeed, kRampAccel.
+constexpr double kRampSpeed = 0.5;  // rad/s, half of v_max
+constexpr double kRampAccel = 2.0;  // rad/s^2, a fifth of a_stop
+double ramp(double d, double t) {
+  double ta = kRampSpeed / kRampAccel;
+  double cruise = (d - kRampSpeed * ta) / kRampSpeed;
+  if (cruise < 0.0) {  // Too short to reach the speed: a triangle.
+    ta = std::sqrt(d / kRampAccel);
+    cruise = 0.0;
+  }
+  const double peak = kRampAccel * ta;
+  const double end = 2.0 * ta + cruise;
+  if (t <= 0.0) return 0.0;
+  if (t >= end) return d;
+  if (t < ta) return 0.5 * kRampAccel * t * t;
+  if (t < ta + cruise) return 0.5 * peak * ta + peak * (t - ta);
+  const double r = end - t;
+  return d - 0.5 * kRampAccel * r * r;
+}
 
 double seconds(rc::MonoTime t) { return static_cast<double>(t.ns) * 1e-9; }
 
@@ -361,13 +388,14 @@ int run_console(cb::Worker& worker, Run& run, Out& out, rc::Duration duration) {
 class HalRun {
  public:
   HalRun(hc::Hal& hal, cb::Worker& worker, Run& run, Out& out, rc::Duration stream_for,
-         std::optional<rc::MonoTime> arm_at)
+         std::optional<rc::MonoTime> arm_at, std::optional<hc::Joints> target)
       : hal_(hal),
         worker_(worker),
         run_(run),
         out_(out),
         stream_for_(stream_for),
-        arm_at_(arm_at) {}
+        arm_at_(arm_at),
+        target_(target) {}
 
   void loop(std::optional<rc::MonoTime> deadline) {
     rc::MonoTime next = now();
@@ -401,7 +429,7 @@ class HalRun {
   }
 
  private:
-  enum class Stage : std::uint8_t { kConfigure, kActivate, kArm, kStream, kObserve };
+  enum class Stage : std::uint8_t { kConfigure, kActivate, kArm, kStream, kObserve, kDeactivate };
 
   void start_step(rc::MonoTime t) {
     const char* line = "configure";
@@ -416,6 +444,10 @@ class HalRun {
       case Stage::kArm:
         line = "arm";
         op_ = hal_.arm(hc::ArmRequest{kAuthority, t + kHold, 1}, t);
+        break;
+      case Stage::kDeactivate:
+        line = "deactivate";
+        op_ = hal_.deactivate(t);
         break;
       case Stage::kStream:
       case Stage::kObserve:
@@ -458,6 +490,10 @@ class HalRun {
       return;
     }
     const cli::Scenario s = run_.scenario;
+    if (stage_ == Stage::kDeactivate) {
+      finish_stream();
+      return;
+    }
     if (stage_ == Stage::kConfigure) {
       stage_ = Stage::kActivate;
     } else if (stage_ == Stage::kActivate) {
@@ -487,6 +523,13 @@ class HalRun {
                     num("superseded", fb.counters.superseded) + "," +
                     num("expired_before_dispatch", fb.counters.expired_before_dispatch) +
                     ",\"verdicts\":" + verdicts());
+      if (target_) {
+        // With --target the drives stop under control (C18) instead of by expiry, which would
+        // latch their policy stop (D11) and keep the next master from activating them.
+        stage_ = Stage::kDeactivate;
+        start_step(t);
+        return;
+      }
       stage_ = Stage::kObserve;
       observe_until_ = t + kObserveAfter;
       return;
@@ -500,6 +543,21 @@ class HalRun {
     sp.snapshot.generation = kAuthority.generation;
     sp.snapshot.source_seq = ++writes_;
     sp.snapshot.position = held_;
+    if (target_) {
+      double longest = 0.0;
+      for (std::size_t i = 0; i < hc::kJoints; ++i) {
+        longest = std::max(longest, std::fabs(target_->at(i) - held_.at(i)));
+      }
+      // Time along the ramp counts writes, not the clock: the guard measures velocity and
+      // acceleration per T_bus, so a write late by a loop period must not bunch the profile.
+      const double elapsed =
+          static_cast<double>(writes_ - 1) * 1e-9 * static_cast<double>(kBusPeriod.ns);
+      const double s = longest > 0.0 ? ramp(longest, elapsed) / longest : 1.0;
+      for (std::size_t i = 0; i < hc::kJoints; ++i) {
+        sp.snapshot.position.at(i) =
+            s >= 1.0 ? target_->at(i) : held_.at(i) + (target_->at(i) - held_.at(i)) * s;
+      }
+    }
     const hc::HalVerdict v = hal_.write(&permit, sp, t);
     ++verdict_counts_.at(static_cast<std::size_t>(v));
     if (!last_verdict_ || *last_verdict_ != v) {
@@ -579,6 +637,7 @@ class HalRun {
   Out& out_;
   rc::Duration stream_for_;
   std::optional<rc::MonoTime> arm_at_;
+  std::optional<hc::Joints> target_;
   bool waiting_arm_{false};
   std::optional<hc::HalVerdict> last_verdict_;
   std::optional<int> last_fresh_;
@@ -631,6 +690,16 @@ int run(const cli::Options& opts) {
   }
   std::uint64_t duration_ms = 0;
   std::uint64_t arm_at_ns = 0;
+  std::optional<hc::Joints> target;
+  if (const auto it = opts.values.find("target"); it != opts.values.end()) {
+    const cli::TargetOption parsed = cli::parse_target(it->second);
+    if (!parsed.ok || scenario.scenario != cli::Scenario::kStream) {
+      std::fprintf(stderr, "canopen_master_cli: %s\n",
+                   parsed.ok ? "--target needs --scenario stream" : parsed.error.c_str());
+      return 2;
+    }
+    target = parsed.position;
+  }
   if (!scenario.ok || !nodes.ok || !required.ok ||
       !number_option(opts, "duration-ms", 1, 3'600'000, duration_ms) ||
       !number_option(opts, "arm-at-ns", 1, 0x7FFFFFFFFFFFFFFFULL, arm_at_ns)) {
@@ -717,7 +786,8 @@ int run(const cli::Options& opts) {
     HalRun hr(*hal, worker, r, out, rc::milliseconds(static_cast<std::int64_t>(ms)),
               arm_at_ns > 0
                   ? std::optional<rc::MonoTime>(rc::MonoTime{static_cast<std::int64_t>(arm_at_ns)})
-                  : std::nullopt);
+                  : std::nullopt,
+              target);
     // stream: the duration is the stream's length; the bring-up has its own 15 s deadline.
     const rc::Duration bring_up =
         stream ? rc::milliseconds(15000) : rc::milliseconds(static_cast<std::int64_t>(ms));
@@ -741,13 +811,13 @@ int run(const cli::Options& opts) {
 int main(int argc, char** argv) {
   const std::vector<std::string_view> args(argv + 1, argv + argc);
   const cli::Options opts = cli::parse_options(
-      args, {"if", "nodes", "scenario", "required", "duration-ms", "arm-at-ns", "trace"},
+      args, {"if", "nodes", "scenario", "required", "duration-ms", "arm-at-ns", "target", "trace"},
       {"if", "nodes", "scenario"});
   if (!opts.ok) {
     std::fprintf(stderr,
                  "canopen_master_cli: %s\nusage: canopen_master_cli --if IF --nodes LIST "
                  "--scenario console|activate_hal|arm|stream [--required LIST] "
-                 "[--duration-ms MS] [--arm-at-ns NS] [--trace PATH]\n",
+                 "[--duration-ms MS] [--arm-at-ns NS] [--target LIST] [--trace PATH]\n",
                  opts.error.c_str());
     return 2;
   }

@@ -3,6 +3,7 @@
 // on their own.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -65,6 +66,15 @@ struct RequiredOption {
 // The capabilities the activation gate requires: "none", "all", or a comma list of
 // device_side_expiry, execution_generation, local_stop, apply_ack, source_timestamp.
 RequiredOption parse_required(std::string_view text);
+
+struct TargetOption {
+  bool ok = false;
+  std::string error;
+  std::array<double, 6> position{};
+};
+
+// stream --target: six joint positions (rad), comma separated, each finite and in [-6, 6].
+TargetOption parse_target(std::string_view text);
 
 // One console line (stdin), parsed in full before anything is done:
 //   nmt <node> <cs>                            NMT command cs (1, 2, 0x80, 0x81, 0x82) to node

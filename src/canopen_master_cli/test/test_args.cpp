@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <array>
 #include <string_view>
 #include <vector>
 
@@ -56,6 +57,18 @@ TEST(CliArgs, RequiredCapabilities) {
   EXPECT_FALSE(cli::parse_required("local_stop,local_stop").ok);
   EXPECT_FALSE(cli::parse_required("warp_drive").ok);
   EXPECT_FALSE(cli::parse_required("").ok);
+}
+
+TEST(CliArgs, TargetPositions) {
+  const cli::TargetOption t = cli::parse_target("0.1,-0.2,0.3,-0.4,0.5,-0.6");
+  ASSERT_TRUE(t.ok) << t.error;
+  EXPECT_EQ(t.position, (std::array<double, 6>{0.1, -0.2, 0.3, -0.4, 0.5, -0.6}));
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,0.3,0.4,0.5").ok) << "five positions";
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,0.3,0.4,0.5,0.6,0.7").ok) << "seven positions";
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,0.3,0.4,0.5,6.5").ok) << "outside [-6, 6]";
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,x,0.4,0.5,0.6").ok);
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,,0.4,0.5,0.6").ok);
+  EXPECT_FALSE(cli::parse_target("0.1,0.2,nan,0.4,0.5,0.6").ok);
 }
 
 TEST(CliArgs, ConsoleCommands) {

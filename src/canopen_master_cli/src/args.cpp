@@ -3,7 +3,9 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 namespace canopen_master_cli {
@@ -176,6 +178,33 @@ RequiredOption parse_required(std::string_view text) {
       break;
     }
     text = text.substr(comma + 1);
+  }
+  out.ok = true;
+  return out;
+}
+
+TargetOption parse_target(std::string_view text) {
+  TargetOption out;
+  std::size_t n = 0;
+  while (true) {
+    const std::size_t comma = text.find(',');
+    const std::string item(text.substr(0, comma));
+    char* end = nullptr;
+    const double v = item.empty() ? 0.0 : std::strtod(item.c_str(), &end);
+    if (item.empty() || end != item.c_str() + item.size() || !std::isfinite(v) || v < -6.0 ||
+        v > 6.0 || n >= out.position.size()) {
+      out.error = "--target: expected six positions in [-6, 6] rad, comma separated";
+      return out;
+    }
+    out.position.at(n++) = v;
+    if (comma == std::string_view::npos) {
+      break;
+    }
+    text = text.substr(comma + 1);
+  }
+  if (n != out.position.size()) {
+    out.error = "--target: expected six positions in [-6, 6] rad, comma separated";
+    return out;
   }
   out.ok = true;
   return out;
