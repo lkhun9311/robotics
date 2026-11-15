@@ -338,6 +338,9 @@ class PeerDriver : public canopen::FiberDriver {
       const double deadline = now_s() + (static_cast<double>(ms) / 1000.0);
       while (!run_.finished && now_s() < deadline) {
         const auto sw = SdoRead<std::uint16_t>(kStatusword, 0);
+        if (sw) {
+          statusword_ = *sw;  // What scenario_done reports: the drive's state, read by SDO.
+        }
         if (sw && (*sw & kStateMask) == state) {
           return true;
         }

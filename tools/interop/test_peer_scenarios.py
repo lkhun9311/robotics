@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from conftest import DEVICE_IF, LELY_PEER_BIN, NODES, inconclusive
+from conftest import DEVICE_IF, LELY_PEER_BIN, NODES, ROOT, inconclusive
 
 NODE = 3
 OPERATIONAL, STOPPED, PRE_OPERATIONAL = 5, 4, 127  # Lely NmtState values in `state` events.
@@ -177,3 +177,23 @@ def test_peer_rejects_a_validity_outside_the_lease(ms):
                        capture_output=True, text=True, timeout=10)
     assert p.returncode == 2 and f"--validity-ms: {ms} is outside [1, 48]" in p.stderr, \
         (p.returncode, p.stderr)
+
+
+def test_commit_and_enable_reports_the_statusword_read_by_sdo(start_bank, start_proxy,
+                                                              start_peer):
+    """--statusword sdo: with every TPDO1 of the node lost, the statusword in scenario_done is
+    the one the SDO upload of 0x6041 returned (Operation Enabled), not a stale cached value."""
+    rules = (ROOT / "config" / "interop" / "faults" / "drop_tpdo1.rules").read_text()
+    proxy = start_proxy(rules)
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    peer, done = run_scenario(start_peer, "commit_and_enable", node=NODE, statusword="sdo")
+    if peer.of("rpdo", node=NODE, index=0x6041, sub=0):
+        inconclusive("Lely decoded a TPDO1 of the node: the rule did not drop them all")
+    polled = [e["value"] for e in peer.of("sdo_ok", node=NODE, op="read", index=0x6041, sub=0)]
+    assert polled and polled[-1] & 0x6F == 0x27, polled  # The last upload: Operation Enabled.
+    assert done["statusword"] == polled[-1], (done, polled)
+    exit_record = proxy.stop()
+    if not exit_record["rules"] or exit_record["rules"][0]["dropped"] == 0:
+        inconclusive(f"the rule dropped no TPDO1: {exit_record['rules']}")
+
