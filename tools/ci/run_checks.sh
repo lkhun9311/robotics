@@ -42,7 +42,7 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
-GTEST_FLOOR=346
+GTEST_FLOOR=356
 PYTEST_FLOOR=245
 INTEGRATION_FLOOR=11
 SIM_FLOOR=32
@@ -168,15 +168,16 @@ find_package(vdrive_bank REQUIRED)
 find_package(bus_fault_proxy REQUIRED)
 find_package(hal_contract REQUIRED)
 find_package(direct_backend REQUIRED)
+find_package(canopen_master REQUIRED)
 add_executable(consumer main.cpp)
 target_link_libraries(consumer PRIVATE drive_core::drive_core socketcan_io::socketcan_io
   vdrive_bank::vdrive_bank bus_fault_proxy::bus_fault_proxy hal_contract::hal_contract
-  direct_backend::direct_backend)
+  direct_backend::direct_backend canopen_master::canopen_master)
 EOF
 {
   # hal_contract/testing/ holds the gtest contract suite, which every backend's test binary
   # compiles and links against gtest; it is not a library header.
-  for pkg in runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy hal_contract direct_backend; do
+  for pkg in runtime_core canopen_codec drive_core socketcan_io vdrive_bank bus_fault_proxy hal_contract direct_backend canopen_master; do
     (cd "install/release/$pkg/include" && find . -name '*.hpp' -not -path './hal_contract/testing/*' | sort |
       sed 's|^\./\(.*\)|#include "\1"|')
   done
