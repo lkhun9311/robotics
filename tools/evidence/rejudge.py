@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT / "tools" / "interop"))
 
 import judges  # noqa: E402
 
+# How a directory other than the committed recordings is written (CI: artifacts/interop).
+VCAN_STAGE_COMMAND = ("the vcan stage of tools/ci/run_checks.sh (INTEROP_RECORD_DIR="
+                      "artifacts/interop); from CI: gh run download <run id> -n checks-artifacts")
 ROWS = ["m1", "m2", "m3", "m4", "m5", "m6", "f1", "f7", "f2", "f3", "f4", "f5", "f6", "r1"]
 
 
@@ -28,12 +31,19 @@ def main(argv=None):
     parser.add_argument("--dir", default=str(RECORDED), help="directory of <row>.json.gz")
     parser.add_argument("rows", nargs="*", default=ROWS)
     args = parser.parse_args(argv)
+    directory = pathlib.Path(args.dir).resolve()
+    shown = directory.relative_to(ROOT) if directory.is_relative_to(ROOT) else directory
+    committed = directory == RECORDED.resolve()
     rc = 0
     for row in args.rows:
-        shown = pathlib.Path(args.dir).resolve()
-        shown = shown.relative_to(ROOT) if shown.is_relative_to(ROOT) else shown
-        print_input(f"{shown}/{row}.json.gz", recording_command(row))
-        status, text = judges.verdict(load_recording(row, args.dir))
+        command = recording_command(row) if committed else VCAN_STAGE_COMMAND
+        print_input(f"{shown}/{row}.json.gz", command)
+        if not (directory / f"{row}.json.gz").exists():
+            print(f"{row.upper()} NOT RECORDED: no observation in {shown} (its test failed before "
+                  f"judge(), or the row did not run)")
+            rc = 1
+            continue
+        status, text = judges.verdict(load_recording(row, directory))
         print(f"{row.upper()} {status}: {text}")
         rc |= status != "PASS"
     return rc

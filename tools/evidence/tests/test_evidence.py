@@ -13,6 +13,7 @@ import bandwidth_table
 import matrix_table
 import pick_place_replay
 import proxy_cost_histogram
+import rejudge
 import travel_phases
 
 MEDIA = common.MEDIA
@@ -256,3 +257,15 @@ def test_matrix_table_never_reports_a_missing_or_failed_row_as_pass(tmp_path):
     assert rows["M1"] == "PASS"
     assert rows["M3"] == "FAIL"
     assert rows["M2"] == "MISSING" and rows["R1"] == "MISSING"
+
+
+def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys):
+    """A CI directory holds only the rows that reached judge(); the others are named, not a
+    traceback, and the reproduce line is the vcan stage's, not the re-recording command."""
+    (tmp_path / "f2.json.gz").write_bytes((common.RECORDED / "f2.json.gz").read_bytes())
+    rc = rejudge.main(["--dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "F2 PASS:" in out
+    assert "M1 NOT RECORDED:" in out and "R1 NOT RECORDED:" in out
+    assert "INTEROP_RECORD_DIR=tools/interop/recorded" not in out
