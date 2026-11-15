@@ -45,7 +45,6 @@ ABORT_LENGTH_TOO_LOW = 0x06070013  # 1 byte into a 2-byte (0x1017) or 4-byte obj
 ABORT_LENGTH_TOO_HIGH = 0x06070012  # 4 bytes into the 2-byte 0x1017
 ABORT_INVALID_VALUE = 0x06090030  # a COB-ID value the SDO-client object (0x1280:1/2) refuses
 ABORT_NOT_MAPPABLE = 0x06040041  # a mapping entry for an object that is not mappable or does not fit
-ABORT_TIMEOUT_CLIENT = 0x05040000  # not sent by canopend; the client's own timeout code
 
 # --- PDO configuration (test_canopend_pdo_configuration_facts) ---------------------------------
 # Defaults after a (re)start: all four RPDOs and TPDOs disabled (bit 31), no mapping,
@@ -89,12 +88,10 @@ RESET_NODE_EXIT_CODE = 0
 
 # --- SYNC and RPDO (test_canopend_sync_rpdo_applied_at_sync) -----------------------------------
 # A type 0-240 RPDO is applied at a SYNC, not on reception; a type 255 RPDO on reception. A TPDO
-# of type 1 sent at that same SYNC already carries the applied value (RPDO is processed first).
+# of type 1 sent at that same SYNC already carries the applied value (RPDO is processed first);
+# pinned: the TPDO bytes after each SYNC equal the sequence below.
 # DEFECT of the pinned commit (CANopenNode 76b43c8, 301/CO_PDO.c line 811: CANrxData[0][bufNo]
 # where CANrxData[bufNo][0] is meant): the two RX buffers alternate with each SYNC, and on every
 # second SYNC the RPDO is read from buffer 0 shifted by one byte, so the value is not applied.
 # From a fresh start, RPDO value v then SYNC, repeated for v = 1..8, leaves 1, 1, 3, 3, 5, 5, 7, 7.
 SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC = (1, 1, 3, 3, 5, 5, 7, 7)
-
-# --- timing (test_canopend_*) -------------------------------------------------------------------
-HEARTBEAT_TOLERANCE_S = 0.03  # vcan periods seen: 100 ms +- a few ms

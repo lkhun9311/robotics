@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 
+import canopennode_facts as F
 import cia301
 
 BIN = pathlib.Path(os.environ.get("CANOPEND_BIN") or shutil.which("canopend") or "canopend")
@@ -192,7 +193,7 @@ class Canopend:
 
 def ready(daemon, timeout=3.0):
     """canopend logs 'communication reset' then 'running ...' once its CAN socket is up."""
-    return daemon.wait_log("running ...", timeout) is not None
+    return daemon.wait_log(F.LOG_RUNNING, timeout) is not None
 
 
 def seed_storage(directory, binary=None):

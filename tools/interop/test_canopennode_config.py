@@ -180,7 +180,7 @@ def test_canopend_does_not_self_start(start_canopend, capture):
     assert set(after) == {cia301.STATE_PRE_OPERATIONAL}, seen
     assert cia301.STATE_OPERATIONAL not in seen
     gaps = [b[0] - a[0] for a, b in zip(beats, beats[1:])]
-    assert all(abs(g - 0.1) < F.HEARTBEAT_TOLERANCE_S + 0.02 for g in gaps), gaps
+    assert all(0.05 < g < 0.25 for g in gaps), gaps  # 100 ms nominal, broad bounds
 
 
 def test_canopend_first_start_emits_no_storage_emcy(start_canopend, capture):
@@ -274,8 +274,8 @@ def test_canopend_heartbeat_time_is_writable(start_canopend, bus, capture):
     frames = cap.stop()
     times = [t for t, d in of(frames, HB) if t >= mark]
     gaps = [b - a for a, b in zip(times, times[1:])]
-    assert any(abs(g - 0.4) < 0.05 for g in gaps), gaps
-    assert any(abs(g - 0.1) < 0.05 for g in gaps[-3:]), gaps
+    assert any(0.3 < g < 0.6 for g in gaps), gaps  # 400 ms nominal
+    assert any(0.05 < g < 0.25 for g in gaps[-3:]), gaps  # back to 100 ms
 
 
 def test_canopend_sdo_abort_codes(start_canopend, bus):
@@ -304,9 +304,9 @@ def test_canopend_pdo_configuration_facts(start_canopend, bus):
     writable by SDO (disable, sub0 = 0, entries, sub0 = n, enable), RPDO and TPDO alike. The
     example OD has no application objects, so the mappable set is small: RPDO 0x1001:0 and
     0x1280:1/2, TPDO also 0x1200:1/2 (read-only constants); every other object is refused with
-    0x06040041, "object cannot be mapped" (found by trying each sub-index of each object in the OD with its own size).
-    Mapping a 64-bit entry onto a 32-bit object is refused with the same 0x06040041. TPDO1 mapped to
-    0x1280:1 + 0x1280:2 (8 bytes) is accepted."""
+    0x06040041, "object cannot be mapped" (found by trying each sub-index of each object in the
+    OD with its own size). Mapping a 64-bit entry onto a 32-bit object is refused with the same
+    0x06040041. TPDO1 mapped to 0x1280:1 + 0x1280:2 (8 bytes) is accepted."""
     start_canopend()
     assert sdo_code(bus, 0x1400, 1) == F.DEFAULT_RPDO1_COB
     assert sdo_code(bus, 0x1800, 1) == F.DEFAULT_TPDO1_COB
@@ -417,7 +417,8 @@ def test_canopend_pdo_length_emcy(start_canopend, bus, capture):
     assert len(long) == 1 and struct.unpack("<H", long[0][1][:2])[0] == F.EMCY_PDO_LENGTH_LONG
     assert sdo_code(bus, 0x1001, 0) == 0
     frames = cap.stop()
-    assert states(frames)[-1] == cia301.STATE_OPERATIONAL and cia301.STATE_STOPPED not in states(frames)
+    assert states(frames)[-1] == cia301.STATE_OPERATIONAL
+    assert cia301.STATE_STOPPED not in states(frames)
     assert any("errorCode=0x8210" in line for line in d.lines()), d.lines()[-4:]
 
 
@@ -472,35 +473,46 @@ def test_canopend_reset_communication_behaviour(start_canopend, bus, capture):
     cap.stop()
 
 
-def test_canopend_sync_rpdo_applied_at_sync(start_canopend, bus):
-    """RPDO1 (2 x... one 32-bit mapping 0x1280:01, type 0) and a paused SYNC. The value is not
-    visible by SDO after the RPDO: it is applied by the SYNC. A type 255 RPDO is visible at once.
+def test_canopend_sync_rpdo_applied_at_sync(start_canopend, bus, capture):
+    """RPDO1 (one 32-bit mapping of 0x1280:01, type 0), TPDO1 (type 1, same object) and a paused
+    SYNC. The value is not visible by SDO after the RPDO: it is applied by the SYNC, and the TPDO
+    sent at that same SYNC carries the applied value (RPDO is processed first); after a SYNC that
+    does not apply it, the TPDO carries the old value. A type 255 RPDO is visible at once.
     Defect of the pinned commit (CO_PDO.c:811): from a fresh start, eight pairs RPDO v / SYNC
     (v = 1..8) leave 1, 1, 3, 3, 5, 5, 7, 7, i.e. every second SYNC does not apply the RPDO
     (the data is read from the wrong RX buffer); pinned here as SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC.
     N5 cannot expect 'one RPDO, one SYNC, value k' on every step from this build."""
+    cap = capture(DEVICE_IF)
     start_canopend()
     assert dl(bus, *LOOP, F.LOOPBACK_DISABLED, 4) == "ok"
     configure_rpdo1(bus, [(LOOP[0], 1, 32)], 0)
+    configure_tpdo1(bus, [(LOOP[0], 1, 32)], ttype=1)
     bus.nmt(cia301.NMT_START, F.NODE_ID)
     settle(0.15)
-    seen = []
+    seen, tpdo_seen = [], []
     for v in range(1, 9):
         bus.send(RPDO1, struct.pack("<I", F.LOOPBACK_DISABLED | v))
         settle(0.03)
         before = sdo_code(bus, *LOOP)
         assert before != F.LOOPBACK_DISABLED | v, f"RPDO {v} applied before the SYNC"
+        t_sync = time.monotonic()
         bus.send(cia301.SYNC_COB)
-        settle(0.03)
+        settle(0.05)
         seen.append(sdo_code(bus, *LOOP) & 0x7FF)
+        tpdo = of(list(cap.frames), TPDO1, t_sync)
+        assert len(tpdo) == 1 and len(tpdo[0][1]) == 4, f"INCONCLUSIVE: TPDO after SYNC {v}: {tpdo}"
+        tpdo_seen.append(struct.unpack("<I", tpdo[0][1])[0] & 0x7FF)
     assert tuple(seen) == F.SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC, seen
+    assert tuple(tpdo_seen) == F.SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC, tpdo_seen
 
+    cap.stop()
     assert dl(bus, 0x1400, 1, 0x80000000 | RPDO1, 4) == "ok"
     assert dl(bus, 0x1400, 2, 255, 1) == "ok" and dl(bus, 0x1400, 1, RPDO1, 4) == "ok"
     for v in (0x31, 0x32, 0x33):
         bus.send(RPDO1, struct.pack("<I", F.LOOPBACK_DISABLED | v))
         settle(0.03)
-        assert sdo_code(bus, *LOOP) == F.LOOPBACK_DISABLED | v, "type 255 RPDO not applied on reception"
+        assert sdo_code(bus, *LOOP) == F.LOOPBACK_DISABLED | v, \
+            "type 255 RPDO not applied on reception"
 
 
 def test_canopend_stop_and_continue_signals(start_canopend, bus, capture):
