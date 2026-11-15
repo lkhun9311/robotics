@@ -269,3 +269,17 @@ def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys)
     assert "F2 PASS:" in out
     assert "M1 NOT RECORDED:" in out and "R1 NOT RECORDED:" in out
     assert "INTEROP_RECORD_DIR=tools/interop/recorded" not in out
+
+
+def test_rejudge_finds_the_master_rows_in_their_own_directory(capsys):
+    """n1..n7 (our master against CANopenNode) are committed under recorded/master; rejudge reads
+    them there, each passes, and the reproduce line records into that directory."""
+    rows = [f"n{i}" for i in range(1, 8)]
+    rc = rejudge.main(rows)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    for row in rows:
+        assert f"{row.upper()} PASS:" in out
+    assert "INTEROP_RECORD_DIR=tools/interop/recorded/master " in out
+    assert "tools/interop/recorded/master/n5.json.gz" in out
+

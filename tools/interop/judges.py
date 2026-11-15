@@ -1310,3 +1310,782 @@ def judge_f7(obs):
 
 
 JUDGES["F7"] = judge_f7
+
+
+# ---- Our master against CANopenNode: the interop matrix N1-N7 (E3c Task 8) ----
+#
+# canopen_master_cli on vcan_host, bus_fault_proxy with no rules, canopend (CANopenNode 76b43c8,
+# node 2; N7: nodes 1-6) on vcan_device. An observation (test_master_matrix.py) holds:
+#   host, device   frames on both links, as above
+#   cli            the JSON lines canopen_master_cli printed (console: its cmd/cmd_done lines carry
+#                  the console line and its number n; master events carry at_ns)
+#   canopend       one record per canopend process: node, started / exited (CLOCK_MONOTONIC s),
+#                  exit_code, log [[t, line]] (its stderr, the only report it has of its NMT state)
+#   proxy_exit     bus_fault_proxy's exit record (no rules)
+#   harness        what the test did: the console numbers n of its steps, signals and their times
+# Expectations come from cia301.py and canopennode_facts.py (the pinned build's observed
+# behaviour, calibrated by test_canopennode_config.py), never from the master's code.
+
+import canopennode_facts as cnf  # noqa: E402
+
+CN_NODE = cnf.NODE_ID
+CN_HB = cia301.HEARTBEAT_BASE + CN_NODE
+CN_SDO_TX = cia301.SDO_TX_BASE + CN_NODE
+CN_SDO_RX = cia301.SDO_RX_BASE + CN_NODE
+CN_TPDO1 = cia301.TPDO_BASE[1] + CN_NODE
+CN_RPDO1 = cia301.RPDO_BASE[1] + CN_NODE
+CN_EMCY = cnf.EMCY_COB_ID_1014
+CN_LOOP = cnf.LOOPBACK_OBJECT
+CN_SETTLE_S = 0.005  # A frame this soon after an NMT command may predate canopend's processing.
+CN_EVENT_S = 0.020  # A master event follows the frame it reports within this.
+# The canopend log line of each heartbeat state byte (canopennode_facts.LOG_NMT).
+CN_STATE_LOG = {cia301.STATE_OPERATIONAL: cnf.LOG_NMT["operational"],
+                cia301.STATE_STOPPED: cnf.LOG_NMT["stopped"],
+                cia301.STATE_PRE_OPERATIONAL: cnf.LOG_NMT["pre_operational"]}
+CN_BOOT_TIMEOUT_S = (0.9, 1.1)  # N2: C7's 1000 ms boot window, +- 100 ms.
+CN_HB_LOST_S = (0.250, 0.400)  # N2: C7's 250 ms consumer time, observed by 400 ms.
+CN_MIN_HEARTBEATS = 3
+CN_MIN_TPDOS = 5
+CN_N5_VALUES = 20
+CN_N5_EACH_PARITY = 5
+# N7: what generic_cia402_profile() lacks against --required all, as the activation gate names it
+# (runtime_core test_capability.cpp: three unsupported, two unknown).
+CN_GENERIC_MISSING = {"DEVICE_SIDE_EXPIRY": "UNSUPPORTED", "EXECUTION_GENERATION": "UNSUPPORTED",
+                      "APPLY_ACK": "UNSUPPORTED", "LOCAL_STOP": "UNKNOWN",
+                      "SOURCE_TIMESTAMP": "UNKNOWN"}
+CN_SESSION_NODES = (1, 2, 3, 4, 5, 6)
+
+
+def cn_events(obs, kind, t0=None, t1=None, **fields):
+    return [e for e in obs["cli"] if e.get("event") == kind and
+            all(e.get(k) == v for k, v in fields.items()) and
+            (t0 is None or e["t"] > t0) and (t1 is None or e["t"] < t1)]
+
+
+def cn_at(e):
+    """The worker's instant of a master event, seconds."""
+    return e["at_ns"] / 1e9
+
+
+def cn_step(obs, n):
+    """(index of the cmd line, cmd, cmd_done) of console line n; Inconclusive when it is missing
+    or was not carried out."""
+    cmds = [(i, e) for i, e in enumerate(obs["cli"]) if e.get("event") == "cmd" and e["n"] == n]
+    need(len(cmds) == 1, f"console line {n}: {len(cmds)} cmd lines")
+    done = cn_events(obs, "cmd_done", n=n)
+    need(len(done) == 1 and done[0]["ok"], f"console line {n} ({cmds[0][1]['line']!r}) was not "
+                                           f"carried out: {done}")
+    return cmds[0][0], cmds[0][1], done[0]
+
+
+def cn_sdo(obs, n):
+    """The one sdo_* result of console line n (it is printed between its cmd and cmd_done)."""
+    i, cmd, done = cn_step(obs, n)
+    found = []
+    for e in obs["cli"][i + 1:]:
+        if e.get("event") == "cmd_done" and e.get("n") == n:
+            break
+        if e.get("event", "").startswith("sdo_"):
+            found.append(e)
+    need(len(found) == 1, f"console line {n} ({cmd['line']!r}): {len(found)} SDO results")
+    return found[0]
+
+
+def cn_sdo_value(obs, n):
+    e = cn_sdo(obs, n)
+    need(e["event"] == "sdo_ok", f"console line {n}: {e}")
+    return e["value"]
+
+
+def cn_sdo_wire(obs, n, side="host"):
+    """(requests, responses, client aborts) of console line n's SDO exchange on one link: node
+    2's frames between its cmd and cmd_done lines. A client abort is what our master sends when
+    its request times out (CiA 301: abort transfer on the client-to-server identifier)."""
+    _, cmd, done = cn_step(obs, n)
+    sent = frames(obs, side, CN_SDO_RX, cmd["t"], done["t"])
+    reqs = [f for f in sent if f[2][:1] and f[2][0] >> 5 != cia301.CS_ABORT]
+    aborts = [f for f in sent if f[2][:1] and f[2][0] >> 5 == cia301.CS_ABORT]
+    resps = frames(obs, side, CN_SDO_TX, cmd["t"], done["t"])
+    return reqs, resps, aborts
+
+
+def cn_line(obs, n):
+    return cn_step(obs, n)[1]["line"]
+
+
+def cn_complete(obs, scenario="console", ending="scenario_done"):
+    """The CLI ran to its scenario's end, the proxy forwarded with no rules and complete counts,
+    both captures saw traffic, and every canopend reported running. Inconclusive otherwise."""
+    cli = obs.get("cli") or []
+    need(len(cn_events(obs, "start")) == 1, "canopen_master_cli printed no single start line")
+    need(cli and cli[-1].get("event") == "exit", f"the CLI's last line is not exit: {cli[-1:]}")
+    need(cli[-1].get("event_overflows") == 0, f"the CLI lost events: {cli[-1]}")
+    end = cn_events(obs, ending, scenario=scenario)
+    need(len(end) == 1, f"no single {ending} for {scenario}: "
+                        f"{cn_events(obs, 'scenario_failed') or cn_events(obs, 'scenario_done')}")
+    proxy = obs.get("proxy_exit") or {}
+    need(proxy.get("event") == "exit" and proxy.get("trace_overflow") == 0,
+         f"bus_fault_proxy trace incomplete: {proxy}")
+    need(proxy.get("rules") == [], f"bus_fault_proxy ran with rules: {proxy.get('rules')}")
+    need(proxy.get("send_failed") == {"h2d": 0, "d2h": 0} and proxy.get("dropped_at_exit") == 0,
+         f"bus_fault_proxy lost frames: {proxy}")
+    need(obs["host"] and obs["device"], "an empty capture")
+    daemons = obs.get("canopend") or []
+    need(daemons, "no canopend record")
+    for d in daemons:
+        need(any(line == cnf.log_running(d["node"]) for _, line in d["log"]),
+             f"canopend node {d['node']} never reported running: {d['log'][-3:]}")
+    return end[0]
+
+
+def cn_states(obs, side, node, t0=None, t1=None):
+    """[(t, state byte)] of the node's heartbeat/boot-up frames on one link."""
+    return [(t, d[0]) for t, _, d in frames(obs, side, cia301.HEARTBEAT_BASE + node, t0, t1)
+            if len(d) == 1]
+
+
+def cn_nmt_frames(obs, side):
+    return [(t, d) for t, _, d in frames(obs, side, cia301.NMT_COB)]
+
+
+def cn_log_states(daemon, t0=None, t1=None):
+    """canopend's NMT log lines (from canopennode_facts.LOG_NMT) after t0, before t1."""
+    known = set(cnf.LOG_NMT.values())
+    return [line for t, line in daemon["log"]
+            if line in known and (t0 is None or t > t0) and (t1 is None or t < t1)]
+
+
+def cn_after(obs, kind, index, end=None, **fields):
+    """The master events of `kind` printed after the cli line at `index` (and before the one at
+    `end`)."""
+    return [e for e in obs["cli"][index + 1:end] if e.get("event") == kind and
+            all(e.get(k) == v for k, v in fields.items())]
+
+
+def cn_u32(data):
+    return int.from_bytes(data[:4], "little")
+
+
+def cn_pdo_pairs(obs, tpdo, t0, t1):
+    """Pairs each TPDO1 frame on vcan_host in (t0, t1) with our master's pdo events of the same
+    SYNC (sync_index = SYNCs on vcan_host before the frame): [(frame, [events])], and the events
+    our master decoded for a SYNC strictly inside the window that drew no TPDO1 frame (the SYNCs
+    at the window's edges may have their TPDO1 just outside it)."""
+    by_index = {}
+    for e in cn_events(obs, "pdo", node=CN_NODE, cob=CN_TPDO1):
+        by_index.setdefault(e["sync_index"], []).append(e)
+    pairs = [((t, c, d), by_index.get(cn_host_sync_index(obs, t), [])) for t, c, d in tpdo]
+    framed = {cn_host_sync_index(obs, t) for t, _, _ in tpdo}
+    k0, k1 = cn_host_sync_index(obs, t0), cn_host_sync_index(obs, t1)
+    extra = [e for k, events in by_index.items() if k0 < k < k1 and k not in framed
+             for e in events]
+    return pairs, extra
+
+
+def cn_host_sync_index(obs, t):
+    """SYNCs on vcan_host before t: the master's sync_index of a frame received at t."""
+    return sum(1 for s, _, _ in frames(obs, "host", cia301.SYNC_COB) if s < t)
+
+
+def cn_sync_alignment(obs):
+    """Every SYNC on vcan_host is one `sync` event of the master, in order, within 5 ms."""
+    host = [t for t, _, _ in frames(obs, "host", cia301.SYNC_COB)]
+    syncs = cn_events(obs, "sync")
+    need([e["sync_index"] for e in syncs] == list(range(1, len(syncs) + 1)),
+         "the master's sync_index does not count 1, 2, ...")
+    need(len(host) == len(syncs), f"{len(host)} SYNCs on vcan_host, {len(syncs)} sync events")
+    off = [abs(cn_at(e) - t) for e, t in zip(syncs, host)]
+    need(not off or max(off) < 0.005, f"a sync event {max(off or [0]) * 1000:.1f} ms off its frame")
+    return host
+
+
+# ---- N1: NMT states and service gating ----
+
+def cn_nmt_commands(obs):
+    """[(cs, cmd index, cmd)] of the harness's NMT console lines, checked against the NMT
+    frames our master put on vcan_host and the proxy forwarded to vcan_device: exactly those,
+    in order, and no other. Returns [(cs, t on vcan_device, cmd index)]."""
+    out = []
+    for cs, n in obs["harness"]["nmt"]:
+        i, cmd, _ = cn_step(obs, n)
+        need(cmd["line"] == f"nmt {CN_NODE} {cs:#x}", f"line {n} is {cmd['line']!r}")
+        out.append((cs, i, cmd))
+    expected = [bytes([cs, CN_NODE]) for cs, _, _ in out]
+    host = cn_nmt_frames(obs, "host")
+    device = cn_nmt_frames(obs, "device")
+    check([d for _, d in host] == expected, f"NMT frames from our master {[d.hex() for _, d in host]}"
+                                             f", asked for {[d.hex() for d in expected]}")
+    check([d for _, d in device] == expected, f"NMT frames on vcan_device "
+                                               f"{[d.hex() for _, d in device]}")
+    return [(cs, t, i) for (cs, i, _), (t, _) in zip(out, device)]
+
+
+def cn_service_window(obs, t0, t1, state):
+    """Service gating in [t0, t1) on vcan_device for the CiA 301 state the node is in: SYNC
+    draws TPDO1 only in Operational. Returns the notes."""
+    syncs = [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB, t0, t1)]
+    need(len(syncs) >= 3, f"{len(syncs)} SYNCs in the {state:#04x} window: no gating observed")
+    tpdo = frames(obs, "device", CN_TPDO1, t0, t1)
+    host_tpdo = frames(obs, "host", CN_TPDO1, t0, t1)
+    if state in cia301.PDO_STATES:
+        answered = [s for s, nxt in zip(syncs, syncs[1:])
+                    if frames(obs, "device", CN_TPDO1, s, nxt)]
+        check(len(answered) == len(syncs) - 1 and len(answered) >= CN_MIN_TPDOS,
+              f"Operational: {len(answered)} of {len(syncs) - 1} SYNC periods drew TPDO1")
+        bad = [d.hex() for _, _, d in tpdo if len(d) != 8]
+        check(not bad, f"Operational TPDO1 with DLC other than 8: {bad[:3]}")
+        pairs, extra = cn_pdo_pairs(obs, host_tpdo, t0, t1)
+        missing = [hexes([f]) for f, events in pairs if len(events) != 1]
+        check(not missing, f"TPDO1 our master did not decode once: {missing[:3]}")
+        check(not extra, f"pdo events with no TPDO1 frame: {extra[:3]}")
+        return f"{len(tpdo)} TPDO1 for {len(syncs)} SYNCs"
+    check(not tpdo and not host_tpdo, f"TPDO1 in state {state:#04x}: {hexes(tpdo[:3])}")
+    _, extra = cn_pdo_pairs(obs, [], t0, t1)
+    check(not extra, f"pdo events with no TPDO1 frame in state {state:#04x}: {extra[:3]}")
+    return f"no TPDO1 for {len(syncs)} SYNCs"
+
+
+def judge_n1(obs):
+    cn_complete(obs)
+    cn_sync_alignment(obs)
+    commands = cn_nmt_commands(obs)
+    need([cs for cs, _, _ in commands] == [cia301.NMT_START, cia301.NMT_STOP,
+                                           cia301.NMT_ENTER_PRE_OPERATIONAL,
+                                           cia301.NMT_RESET_COMMUNICATION, cia301.NMT_RESET_NODE],
+         f"the harness sent {[cs for cs, _, _ in commands]}")
+    daemons = obs["canopend"]
+    need(len(daemons) == 2, f"{len(daemons)} canopend processes (Reset Node needs a restart)")
+    first, second = daemons
+    reset_node = obs["harness"]["reset_node"]
+    need(second["started"] > first["exited"] if first["exited"] else False,
+         f"the restart did not follow the exit: {first['exited']} {second['started']}")
+    for n in obs["harness"]["config"]:
+        need(cn_sdo(obs, n)["event"] == "sdo_ok", f"TPDO1 configuration line {cn_line(obs, n)!r}")
+    end = obs["device"][-1][0]
+    bounds = [t for _, t, _ in commands] + [end]
+    notes = []
+
+    # Before Start: Pre-operational after boot-up, SDO served, no TPDO at SYNC.
+    t_boot = [t for t, s in cn_states(obs, "device", CN_NODE) if s == cia301.STATE_BOOT_UP]
+    need(t_boot and t_boot[0] < bounds[0], "no boot-up before the first NMT command")
+    pre = cn_states(obs, "device", CN_NODE, t_boot[0], bounds[0])
+    check(pre and {s for _, s in pre} == {cia301.STATE_PRE_OPERATIONAL},
+          f"heartbeat before Start {[hex(s) for _, s in pre]}")
+    windows = [(t_boot[0] + CN_SETTLE_S, bounds[0], cia301.STATE_PRE_OPERATIONAL)]
+
+    for k, (cs, t, i) in enumerate(commands):
+        t_next = bounds[k + 1]
+        if cs in cia301.RESETS:
+            continue
+        want = cia301.STATE_AFTER[cs]
+        beats = cn_states(obs, "device", CN_NODE, t + CN_SETTLE_S, t_next)
+        check(beats and {s for _, s in beats} == {want},
+              f"after NMT {cs:#04x} canopend's heartbeat is {[hex(s) for _, s in beats]}, "
+              f"CiA 301 says {want:#04x}")
+        states = cn_after(obs, "state", i, commands[k + 1][2], node=CN_NODE)
+        check(states and states[0]["state"] == want,
+              f"after NMT {cs:#04x} our master reports {states[:1]}, the wire {want:#04x}")
+        logged = cn_log_states(first, t, t_next)
+        check(logged[:1] == [CN_STATE_LOG[want]], f"after NMT {cs:#04x} canopend logged {logged}")
+        windows.append((t + CN_SETTLE_S, t_next, want))
+        notes.append(f"NMT {cs:#04x}: heartbeat {want:#04x} x{len(beats)}, master and log agree")
+
+    # Reset Communication: the process stays; boot-up, then Pre-operational again.
+    cs, t, i = commands[3]
+    i_next = commands[4][2]
+    seen = cn_states(obs, "device", CN_NODE, t, bounds[4])
+    check(seen and seen[0][1] == cia301.STATE_BOOT_UP and
+          {s for _, s in seen[1:]} == {cia301.STATE_PRE_OPERATIONAL},
+          f"after Reset Communication {[hex(s) for _, s in seen]}")
+    check(first["exited"] is None or first["exited"] > bounds[4],
+          "canopend ended at Reset Communication")
+    check(cn_after(obs, "boot", i, i_next, node=CN_NODE), "our master reported no boot-up after "
+                                                          "Reset Communication")
+    states = cn_after(obs, "state", i, i_next, node=CN_NODE)
+    check(states and states[0]["state"] == cia301.STATE_PRE_OPERATIONAL,
+          f"after Reset Communication our master reports {states[:1]}")
+    check(cn_log_states(first, t, bounds[4]) == [cnf.LOG_NMT["initializing"],
+                                                 cnf.LOG_NMT["pre_operational"]],
+          f"canopend logged {cn_log_states(first, t, bounds[4])} at Reset Communication")
+    windows.append((seen[0][0] + CN_SETTLE_S, bounds[4], cia301.STATE_PRE_OPERATIONAL))
+    notes.append("Reset Communication: boot-up then 0x7f, process kept")
+
+    # Reset Node: canopend exits by itself (pinned code), the harness restarts it, boot-up.
+    cs, t, i = commands[4]
+    check(first["exit_code"] == cnf.RESET_NODE_EXIT_CODE,
+          f"canopend exit {first['exit_code']} at Reset Node, pinned {cnf.RESET_NODE_EXIT_CODE}")
+    need(reset_node["exit_code"] == first["exit_code"] and first["exited"] > t,
+         f"the harness's exit record {reset_node} does not follow the NMT frame")
+    check(first["log"] and first["log"][-1][1] == cnf.LOG_FINISHED,
+          f"canopend's last log line {first['log'][-1:]}")
+    gap = frames(obs, "device", {CN_HB, CN_SDO_TX, CN_TPDO1, CN_EMCY}, t, second["started"])
+    check(not gap, f"node 2 frames between Reset Node and the restart: {hexes(gap[:3])}")
+    seen = cn_states(obs, "device", CN_NODE, second["started"])
+    check(seen and seen[0][1] == cia301.STATE_BOOT_UP and
+          {s for _, s in seen[1:]} == {cia301.STATE_PRE_OPERATIONAL} and len(seen) > 1,
+          f"after the restart {[hex(s) for _, s in seen]}")
+    check(cn_log_states(second)[:2] == [cnf.LOG_NMT["initializing"],
+                                        cnf.LOG_NMT["pre_operational"]],
+          f"the restarted canopend logged {cn_log_states(second)}")
+    boots = cn_after(obs, "boot", i, node=CN_NODE)
+    check(boots and cn_at(boots[0]) >= seen[0][0], "our master reported no boot-up after the "
+                                                    "restart")
+    states = cn_after(obs, "state", i, node=CN_NODE)
+    check(states and states[0]["state"] == cia301.STATE_PRE_OPERATIONAL,
+          f"after the restart our master reports {states[:1]}")
+    windows.append((seen[0][0] + CN_SETTLE_S, end, cia301.STATE_PRE_OPERATIONAL))
+    notes.append(f"Reset Node: exit {first['exit_code']} {(first['exited'] - t) * 1000:.0f} ms "
+                 f"after the frame, restart, boot-up "
+                 f"{(seen[0][0] - second['started']) * 1000:.0f} ms after it")
+
+    for t0, t1, state in windows:
+        notes.append(f"{state:#04x}: " + cn_service_window(obs, t0, t1, state))
+
+    # SDO: answered in Pre-operational and Operational, silent in Stopped.
+    for state, n in obs["harness"]["sdo"]:
+        _, cmd, _ = cn_step(obs, n)
+        win = [w for w in windows if w[0] < cmd["t"] < w[1]]
+        need(len(win) == 1 and win[0][2] == state, f"SDO line {n} is not in a {state:#04x} window")
+        reqs, resps, aborts = cn_sdo_wire(obs, n, "device")
+        need(len(reqs) == 1, f"SDO line {n}: {len(reqs)} requests on vcan_device")
+        result = cn_sdo(obs, n)
+        if state in cia301.SDO_STATES:
+            check(result["event"] == "sdo_ok" and len(resps) == 1,
+                  f"in {state:#04x} the SDO got {result['event']}, {len(resps)} responses")
+        else:
+            check(result["event"] == "sdo_timeout", f"in Stopped our master reports {result}")
+            silent = frames(obs, "device", CN_SDO_TX, reqs[0][0], win[0][1]) + \
+                frames(obs, "host", CN_SDO_TX, reqs[0][0], win[0][1])
+            check(not silent, f"an SDO answer in Stopped: {hexes(silent)}")
+            timeout = (CN_SDO_RX, cia301.sdo_abort(CN_NODE, 0x1000, 0, cia301.ABORT_TIMEOUT)[1])
+            check([(c, d) for _, c, d in aborts] == [timeout],
+                  f"our master's abort after the timeout {hexes(aborts)}")
+            notes.append(f"Stopped: SDO upload of 0x1000 ended sdo_timeout, no 0x{CN_SDO_TX:03X}")
+    return notes
+
+
+# ---- N2: boot-up and heartbeat ----
+
+def judge_n2(obs):
+    cn_complete(obs)
+    h = obs["harness"]
+    daemons = obs["canopend"]
+    need(len(daemons) == 1, f"{len(daemons)} canopend processes")
+    d = daemons[0]
+    host_syncs = cn_sync_alignment(obs)
+    need(host_syncs, "no SYNC from our master: its first step is not observable")
+    t0 = host_syncs[0]  # The master's first step: its consumer starts there (C7).
+    early = frames(obs, "host", {CN_HB, CN_SDO_TX, CN_EMCY}, None, d["started"])
+    need(not early, f"node 2 frames before canopend started: {hexes(early[:3])}")
+    nmt = cn_nmt_frames(obs, "host")
+    check(not nmt, f"our master sent NMT {[x.hex() for _, x in nmt]} (it never may, here)")
+
+    # Phase A: no slave at all -> boot_timeout at 1000 ms, before canopend starts.
+    timeouts = cn_events(obs, "boot_timeout", node=CN_NODE)
+    check(len(timeouts) == 1, f"{len(timeouts)} boot_timeout events for node 2")
+    late = cn_at(timeouts[0]) - t0
+    check(CN_BOOT_TIMEOUT_S[0] <= late <= CN_BOOT_TIMEOUT_S[1],
+          f"boot_timeout {late * 1000:.0f} ms after the master's first step")
+    need(cn_at(timeouts[0]) < d["started"], "canopend started before the boot timeout")
+
+    # Phase B: canopend with the seeded 0x1017, at least three heartbeats, then SIGSTOP.
+    check(cn_sdo_value(obs, h["read_1017"]) == cnf.SEEDED_HEARTBEAT_MS,
+          f"0x1017 reads {cn_sdo(obs, h['read_1017'])}")
+    t_stop, t_cont = h["sigstop"], h["sigcont"]
+    beats = cn_states(obs, "host", CN_NODE, d["started"], t_stop)
+    need(len(beats) >= CN_MIN_HEARTBEATS, f"{len(beats)} heartbeats before SIGSTOP")
+    silent = frames(obs, "device", {CN_HB, CN_SDO_TX, CN_EMCY}, t_stop + 0.120, t_cont)
+    need(not silent, f"canopend sent while stopped (SIGSTOP did not take): {hexes(silent[:3])}")
+    need(t_cont - t_stop > CN_HB_LOST_S[1] + 0.1, f"stopped only {t_cont - t_stop:.3f} s")
+    lost = cn_events(obs, "hb_lost", node=CN_NODE)
+    check(len(lost) == 1 and t_stop < cn_at(lost[0]) < t_cont,
+          f"hb_lost events {[cn_at(e) - t_stop for e in lost]} s after SIGSTOP")
+    last = [t for t, _ in cn_states(obs, "host", CN_NODE, None, cn_at(lost[0]))][-1]
+    delay = cn_at(lost[0]) - last
+    check(CN_HB_LOST_S[0] <= delay <= CN_HB_LOST_S[1],
+          f"hb_lost {delay * 1000:.0f} ms after the last heartbeat")
+    # SIGCONT: heartbeat resumes without boot-up, the master reports it, sends nothing.
+    resumed = cn_states(obs, "host", CN_NODE, t_cont)
+    need(resumed, "no heartbeat after SIGCONT")
+    check(resumed[0][1] == cia301.STATE_PRE_OPERATIONAL, f"after SIGCONT {resumed[0]}")
+    back = [e for e in cn_events(obs, "hb_resumed", node=CN_NODE) if cn_at(e) > t_cont]
+    check(len(back) == 1 and resumed[0][0] <= cn_at(back[0]) <= resumed[0][0] + CN_EVENT_S,
+          f"hb_resumed {[cn_at(e) - resumed[0][0] for e in back]} s after the first heartbeat")
+    return [f"boot_timeout {late * 1000:.0f} ms after the first SYNC, no NMT",
+            f"0x1017 = {cnf.SEEDED_HEARTBEAT_MS} ms, {len(beats)} heartbeats",
+            f"hb_lost {delay * 1000:.0f} ms after the last heartbeat "
+            f"({(cn_at(lost[0]) - t_stop) * 1000:.0f} ms after SIGSTOP)",
+            f"hb_resumed {(cn_at(back[0]) - resumed[0][0]) * 1000:.1f} ms after the first "
+            f"heartbeat after SIGCONT, no NMT sent at all"]
+
+
+# ---- N3: SDO ----
+
+# Abort cases: harness label -> (console verb, index, sub, the code canopend answers).
+CN_ABORTS = {
+    "unknown_object_upload": ("read", 0x2FFF, 0, cnf.ABORT_NO_OBJECT),
+    "unknown_object_download": ("write", 0x2FFF, 0, cnf.ABORT_NO_OBJECT),
+    "read_only_download": ("write", 0x1000, 0, cnf.ABORT_READ_ONLY),
+    "unknown_subindex": ("read", 0x1018, 5, cnf.ABORT_NO_SUBINDEX),
+    "too_short_download": ("write", 0x1017, 0, cnf.ABORT_LENGTH_TOO_LOW),
+    "too_long_download": ("write", 0x1017, 0, cnf.ABORT_LENGTH_TOO_HIGH),
+}
+
+
+def cn_line_target(obs, n):
+    parts = cn_line(obs, n).split()
+    need(len(parts) >= 5 and parts[1] == str(CN_NODE), f"line {n}: {parts}")
+    return parts[0], int(parts[2], 0), int(parts[3], 0)
+
+
+def cn_upload_matches(obs, n, index, sub, value):
+    """Line n uploaded (index, sub): our master's sdo_ok value and the response on vcan_host
+    (expedited, size indicated, 4 bytes) both equal `value`."""
+    check(cn_line_target(obs, n)[1:] == (index, sub), f"line {n} is {cn_line(obs, n)!r}")
+    got = cn_sdo_value(obs, n)
+    _, resps, _ = cn_sdo_wire(obs, n)
+    need(len(resps) == 1, f"line {n}: {len(resps)} responses on vcan_host")
+    size = 4 - ((resps[0][2][0] >> 2) & 3)
+    wire_value = int.from_bytes(resps[0][2][4:4 + size], "little")
+    check(resps[0][2] == cia301.sdo_upload_response(CN_NODE, index, sub, size, wire_value)[1],
+          f"line {n}: response {resps[0][2].hex()} is no expedited upload response")
+    check(got == wire_value == value, f"{index:#06x}:{sub} reads {got} (wire {wire_value}), "
+                                      f"expected {value}")
+
+
+def judge_n3(obs):
+    cn_complete(obs)
+    h = obs["harness"]
+    cn_upload_matches(obs, h["device_type"], 0x1000, 0, cnf.DEVICE_TYPE)
+    cn_upload_matches(obs, h["vendor"], 0x1018, 1, cnf.IDENTITY[1])
+    notes = [f"0x1000 = {cnf.DEVICE_TYPE:#x}, 0x1018:01 = {cnf.IDENTITY[1]:#x} "
+             f"(the example OD's values)"]
+
+    # 0x1017 rewritten with node 2's consumer disabled (C7).
+    for key in ("consumer_off", "consumer_on"):
+        cn_step(obs, h[key])
+    check(cn_line(obs, h["consumer_off"]) == f"hb {CN_NODE} 0", "the consumer was not disabled")
+    _, off, _ = cn_step(obs, h["consumer_off"])
+    _, on, _ = cn_step(obs, h["consumer_on"])
+    for key, value in (("write_400", 400), ("write_100", 100)):
+        _, cmd, _ = cn_step(obs, h[key])
+        check(off["t"] < cmd["t"] < on["t"], f"0x1017 written outside the disabled window")
+        check(cn_line_target(obs, h[key])[1:] == (0x1017, 0) and
+              int(cn_line(obs, h[key]).split()[-1], 0) == value, f"line {cn_line(obs, h[key])!r}")
+        check(cn_sdo(obs, h[key])["event"] == "sdo_ok", f"download 0x1017 = {value}: "
+                                                         f"{cn_sdo(obs, h[key])}")
+    cn_upload_matches(obs, h["read_400"], 0x1017, 0, 400)
+    cn_upload_matches(obs, h["read_100"], 0x1017, 0, 100)
+    _, w400, _ = cn_step(obs, h["write_400"])
+    _, w100, _ = cn_step(obs, h["write_100"])
+    beats = [t for t, _ in cn_states(obs, "device", CN_NODE, w400["t"], w100["t"])]
+    gaps = [b - a for a, b in zip(beats, beats[1:])]
+    need(gaps, "no heartbeat interval observed while 0x1017 was 400")
+    check(any(0.3 < g < 0.6 for g in gaps), f"canopend's heartbeat at 0x1017 = 400: {gaps}")
+    after = cn_states(obs, "host", CN_NODE, on["t"])
+    check(len(after) >= CN_MIN_HEARTBEATS, f"{len(after)} heartbeats after re-enabling")
+    lost = cn_events(obs, "hb_lost") + cn_events(obs, "boot_timeout")
+    check(not lost, f"heartbeat consumer events {lost}")
+    notes.append(f"consumer off, 0x1017 400 (heartbeat every {max(gaps) * 1000:.0f} ms) and back "
+                 f"to 100, {len(after)} heartbeats after re-enabling, no hb_lost")
+
+    # Aborts, decoded by our master, pinned to the codes canopend answers.
+    for label, (verb, index, sub, code) in CN_ABORTS.items():
+        n = h["aborts"][label]
+        check(cn_line_target(obs, n) == (verb, index, sub), f"{label}: line {cn_line(obs, n)!r}")
+        e = cn_sdo(obs, n)
+        check(e["event"] == "sdo_abort" and (e["index"], e["sub"], e["code"]) == (index, sub, code),
+              f"{label}: our master reports {e}, canopend's pinned code {code:#010x}")
+        _, resps, _ = cn_sdo_wire(obs, n)
+        check([d for _, _, d in resps] == [cia301.sdo_abort(CN_NODE, index, sub, code)[1]],
+              f"{label}: the wire answer {hexes(resps)}")
+        notes.append(f"{label} {index:#06x}:{sub} -> {code:#010x}")
+    cn_upload_matches(obs, h["read_after_aborts"], 0x1017, 0, 100)
+    return notes
+
+
+# ---- N4, N6: PDO bytes and lengths, EMCY ----
+
+def cn_pdo_setup(obs):
+    """The N4/N6 harness steps: configuration written (all sdo_ok), the loopback values read
+    back by SDO, the console line of NMT Start. Returns (v1, v2, t_start on vcan_device)."""
+    h = obs["harness"]
+    for n in h["config"]:
+        e = cn_sdo(obs, n)
+        need(e["event"] == "sdo_ok", f"configuration line {cn_line(obs, n)!r}: {e}")
+    commands = cn_nmt_commands(obs)
+    need([cs for cs, _, _ in commands] == [cia301.NMT_START], f"NMT commands {commands}")
+    return commands[0][1]
+
+
+def cn_tpdo_matches(obs, t0, t1, layout, values):
+    """TPDO1 frames on vcan_host in (t0, t1): DLC = the layout's bytes, the bytes the encoding of
+    `values` (little-endian, mapping order), and each one decoded by our master as a pdo event of
+    the same SYNC with the same fields. Returns the count."""
+    nbytes = sum(bits for _, _, bits in layout) // 8
+    want = b"".join(v.to_bytes(bits // 8, "little") for v, (_, _, bits) in zip(values, layout))
+    tpdo = frames(obs, "host", CN_TPDO1, t0, t1)
+    need(len(tpdo) >= CN_MIN_TPDOS, f"{len(tpdo)} TPDO1 frames to judge")
+    fields = [{"index": i, "sub": s, "raw": v} for (i, s, _), v in zip(layout, values)]
+    pairs, extra = cn_pdo_pairs(obs, tpdo, t0, t1)
+    for (t, _, d), same in pairs:
+        check(d == want, f"TPDO1 {d.hex()} (DLC {len(d)}), the SDO values encode as {want.hex()} "
+                         f"(DLC {nbytes})")
+        k = cn_host_sync_index(obs, t)
+        check(len(same) == 1, f"TPDO1 after SYNC {k}: our master decoded {len(same)} pdo events")
+        check(same[0]["fields"] == fields, f"TPDO1 after SYNC {k}: our master decoded "
+                                           f"{same[0]['fields']}, the bytes are {fields}")
+    check(not extra, f"pdo events with no TPDO1 frame: {extra[:3]}")
+    return len(tpdo)
+
+
+def cn_rpdos(obs, side="device"):
+    return frames(obs, side, CN_RPDO1)
+
+
+def judge_n4(obs):
+    cn_complete(obs)
+    cn_sync_alignment(obs)
+    h = obs["harness"]
+    t_start = cn_pdo_setup(obs)
+    layout = [tuple(f) for f in h["tpdo_map"]]
+    v1, v2 = cn_sdo_value(obs, h["read_1"]), cn_sdo_value(obs, h["read_2"])
+    rpdos = cn_rpdos(obs)
+    need(len(rpdos) == 3, f"RPDO1 frames {hexes(rpdos)}: the harness sends three")
+    check([len(d) for _, _, d in rpdos] == [2, 1, 2],
+          f"RPDO1 DLCs on vcan_device {[len(d) for _, _, d in rpdos]}, sent 2, 1, 2")
+    host_rpdos = cn_rpdos(obs, "host")
+    check([d for _, _, d in host_rpdos] == [d for _, _, d in rpdos],
+          f"RPDO1 from our master {hexes(host_rpdos)}, on vcan_device {hexes(rpdos)}")
+    t_rpdo = rpdos[0][0]
+    count = cn_tpdo_matches(obs, t_start, t_rpdo, layout, [v1, v2])  # Every TPDO1.
+    notes = [f"{count} TPDO1, DLC 8, bytes = {v1:#010x} {v2:#010x} as read by SDO, decoded by "
+             f"our master for the same SYNC"]
+
+    # RPDO1 of the 2-byte map (DLC 2), applied on reception (type 255), read back by SDO and seen
+    # in the TPDO after.
+    rmap = [tuple(f) for f in h["rpdo_map"]]
+    need(sum(bits for _, _, bits in rmap) == 16, f"RPDO1 map {rmap} is not 2 bytes")
+    applied = int.from_bytes(rpdos[0][2], "little")
+    got = cn_sdo_value(obs, h["read_rpdo"])
+    check(got == applied, f"RPDO1 {rpdos[0][2].hex()} -> 0x1280:01 reads {got:#x}")
+    _, read, _ = cn_step(obs, h["read_rpdo"])
+    count = cn_tpdo_matches(obs, read["t"], rpdos[1][0], layout, [applied, v2])
+    notes.append(f"RPDO1 DLC 2 on vcan_device applied ({applied:#x} by SDO), then {count} "
+                 f"TPDO1 carry it")
+
+    # RPDO1 of DLC 1: canopend's PDO-length EMCY (pinned code and frame).
+    emcy = frames(obs, "device", CN_EMCY, rpdos[1][0], rpdos[2][0])
+    want = cn_emcy_bytes(cnf.EMCY_PDO_LENGTH_SHORT, 2)
+    check([d for _, _, d in emcy] == [want], f"after the DLC 1 RPDO1 canopend sent "
+                                             f"{hexes(emcy)}, pinned {want.hex()}")
+    beats = cn_states(obs, "device", CN_NODE, rpdos[1][0])
+    check(beats and {s for _, s in beats} == {cia301.STATE_OPERATIONAL},
+          f"the NMT state changed after the length error: {[hex(s) for _, s in beats]}")
+    notes.append(f"RPDO1 DLC 1 -> EMCY {cnf.EMCY_PDO_LENGTH_SHORT:#06x} on 0x{CN_EMCY:03X} "
+                 f"{(emcy[0][0] - rpdos[1][0]) * 1000:.1f} ms later, still Operational")
+    return notes
+
+
+def cn_emcy_bytes(code, info):
+    """canopend's PDO-length EMCY (canopennode_facts): code, error register, error bit, info."""
+    return (code.to_bytes(2, "little") + bytes([cnf.EMCY_ERROR_REGISTER,
+                                                cnf.EMCY_ERROR_BIT_RPDO_LENGTH]) +
+            info.to_bytes(4, "little"))
+
+
+def judge_n6(obs):
+    cn_complete(obs)
+    cn_pdo_setup(obs)
+    rpdos = cn_rpdos(obs)
+    need([len(d) for _, _, d in rpdos] == [2, 1, 2], f"RPDO1 frames {hexes(rpdos)}")
+    wire = frames(obs, "host", CN_EMCY)
+    need(wire == [(t, c, d) for t, c, d in wire if t > rpdos[1][0]],
+         f"an EMCY before the DLC 1 RPDO1: {hexes(wire)}")
+    codes = [int.from_bytes(d[:2], "little") for _, _, d in wire]
+    need(codes == [cnf.EMCY_PDO_LENGTH_SHORT, cnf.EMCY_RESET_CODE],
+         f"EMCY codes on vcan_host {[hex(c) for c in codes]} (Task 0: short, then reset)")
+    need(rpdos[1][0] < wire[0][0] < rpdos[2][0] < wire[1][0], "EMCY out of step with the RPDOs")
+    decoded = cn_events(obs, "emcy", node=CN_NODE)
+    check(len(decoded) == len(wire), f"{len(wire)} EMCY on vcan_host, {len(decoded)} decoded")
+    for (t, _, d), e in zip(wire, decoded):
+        code, register = int.from_bytes(d[:2], "little"), d[2]
+        check((e["code"], e["register"]) == (code, register),
+              f"EMCY {d.hex()}: our master decoded code {e['code']:#06x} register "
+              f"{e['register']:#04x}")
+        check(t <= cn_at(e) <= t + CN_EVENT_S, f"EMCY decoded {(cn_at(e) - t) * 1000:.1f} ms "
+                                               f"after the frame")
+    return [f"EMCY {cnf.EMCY_PDO_LENGTH_SHORT:#06x} (register {wire[0][2][2]:#04x}) decoded "
+            f"{(cn_at(decoded[0]) - wire[0][0]) * 1000:.1f} ms after the frame",
+            f"error reset {cnf.EMCY_RESET_CODE:#06x} after the next RPDO1 of the right length "
+            f"decoded {(cn_at(decoded[1]) - wire[1][0]) * 1000:.1f} ms after the frame"]
+
+
+# ---- N5: SYNC application and sampling order ----
+
+def cn_applies_at_next_sync(syncs_before):
+    """Whether a type 0-240 RPDO written after `syncs_before` SYNCs (counted from canopend's
+    boot-up) is applied at the next SYNC, from canopennode_facts.SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC
+    (RPDO v then SYNC for v = 1..8 from a fresh start): entry i is v = i + 1 exactly when the RPDO
+    written after i SYNCs was applied. The pinned defect alternates the two RX buffers on each
+    SYNC, so the sequence repeats with its even length."""
+    seq = cnf.SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC
+    i = syncs_before % len(seq)
+    return seq[i] == i + 1
+
+
+def cn_sync_step(obs, n, host_syncs):
+    """The SYNC a `sync step` line produced: (sync_index, its time on vcan_host)."""
+    i, cmd, _ = cn_step(obs, n)
+    need(cmd["line"] == "sync step", f"line {n} is {cmd['line']!r}")
+    syncs = cn_after(obs, "sync", i)
+    need(syncs, f"no SYNC after the step of line {n}")
+    k = syncs[0]["sync_index"]
+    return k, host_syncs[k - 1]
+
+
+def cn_tpdo_after(obs, k, host_syncs):
+    """(TPDO1 value on vcan_host, our master's decoded value) for the SYNC of index k."""
+    t1 = host_syncs[k] if k < len(host_syncs) else None
+    tpdo = frames(obs, "host", CN_TPDO1, host_syncs[k - 1], t1)
+    need(len(tpdo) == 1 and len(tpdo[0][2]) == 4, f"TPDO1 after SYNC {k}: {hexes(tpdo)}")
+    pdo = [e for e in cn_events(obs, "pdo", node=CN_NODE, cob=CN_TPDO1) if e["sync_index"] == k]
+    need(len(pdo) == 1 and len(pdo[0]["fields"]) == 1 and
+         (pdo[0]["fields"][0]["index"], pdo[0]["fields"][0]["sub"]) == CN_LOOP,
+         f"pdo events of SYNC {k}: {pdo}")
+    return cn_u32(tpdo[0][2]), pdo[0]["fields"][0]["raw"]
+
+
+def judge_n5(obs):
+    cn_complete(obs)
+    h = obs["harness"]
+    host_syncs = cn_sync_alignment(obs)
+    daemons = obs["canopend"]
+    need(len(daemons) == 1, f"{len(daemons)} canopend processes")
+    boots = [t for t, s in cn_states(obs, "device", CN_NODE) if s == cia301.STATE_BOOT_UP]
+    need(len(boots) == 1, f"{len(boots)} boot-ups of node 2")
+    t_boot = boots[0]
+    stray = frames(obs, "device", cia301.SYNC_COB, daemons[0]["started"], t_boot)
+    need(not stray, f"a SYNC while canopend initialised: its SYNC parity is unknown {hexes(stray)}")
+    device_syncs = [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB, t_boot)]
+    for n in h["config"]:
+        need(cn_sdo(obs, n)["event"] == "sdo_ok", f"configuration line {cn_line(obs, n)!r}")
+    commands = cn_nmt_commands(obs)
+    need([cs for cs, _, _ in commands] == [cia301.NMT_START], f"NMT commands {commands}")
+    old = cn_sdo_value(obs, h["initial"])
+    rpdos = frames(obs, "device", CN_RPDO1)
+    values = h["values"]
+    ks = [v["k"] for v in values]
+    need(len(set(ks)) == len(ks) and all(0 < k <= 0x7FF for k in ks), f"values {ks}")
+    applied_at = []  # 1 or 2: the SYNC after the value's first RPDO that applied it.
+    checked_before = 0
+    for v in values:
+        k = v["k"]
+        value = cnf.LOOPBACK_DISABLED | k
+        need(v["attempts"], f"k = {k}: no RPDO sent")
+        for n in v["pads"]:
+            idx, _ = cn_sync_step(obs, n, host_syncs)
+            check(cn_tpdo_after(obs, idx, host_syncs) == (old, old),
+                  f"TPDO1 after a SYNC with no RPDO pending is not the old {old:#x}")
+        for j, a in enumerate(v["attempts"]):
+            _, cmd, _ = cn_step(obs, a["rpdo"])
+            reqs, _, _ = cn_sdo_wire(obs, a["before"], "device")
+            need(len(reqs) == 1, f"k = {k}: {len(reqs)} SDO requests of the read before the SYNC")
+            # The RPDO, then the read's request: the proxy forwards in order, so a read that
+            # follows the RPDO on vcan_device sees it if canopend applied it on reception.
+            mine = [r for r in rpdos if cmd["t"] < r[0] < reqs[0][0]]
+            need(len(mine) == 1 and mine[0][2] == value.to_bytes(4, "little"),
+                 f"k = {k}: RPDO1 before the read on vcan_device {hexes(mine)}")
+            t_r = mine[0][0]
+            idx, t_sync = cn_sync_step(obs, a["step"], host_syncs)
+            on_device = [t for t in device_syncs if t > t_r]
+            need(on_device and on_device[0] > reqs[0][0] and abs(on_device[0] - t_sync) < 0.005,
+                 f"k = {k}: the step's SYNC is not the first on vcan_device after the read")
+            syncs_before = sum(1 for t in device_syncs if t < t_r)
+            applies = cn_applies_at_next_sync(syncs_before)
+            before = cn_sdo_value(obs, a["before"])
+            check(before != value, f"k = {k} visible by SDO before the "
+                                   f"{'first' if j == 0 else 'second'} SYNC after its RPDO")
+            check(before == old, f"k = {k}: 0x1280:01 reads {before:#x} before the SYNC, "
+                                 f"the old value is {old:#x}")
+            if applies:
+                checked_before += 1
+            want = value if applies else old
+            after = cn_sdo_value(obs, a["after"])
+            tpdo, decoded = cn_tpdo_after(obs, idx, host_syncs)
+            which = "first" if j == 0 else "second"
+            check(after == want, f"k = {k}: after the {which} SYNC (the {syncs_before + 1}th "
+                                 f"since boot-up) 0x1280:01 reads {after:#x}; the pinned parity "
+                                 f"predicts {want:#x}")
+            check(tpdo == want, f"k = {k}: TPDO1 after SYNC {idx} carries {tpdo:#x}, predicted "
+                                f"{want:#x}")
+            check(decoded == want, f"k = {k}: our master decoded {decoded:#x} after SYNC {idx}, "
+                                   f"predicted {want:#x}")
+            if applies:
+                # The parity alternates, so this is the first or the second SYNC after the RPDO.
+                need(j == len(v["attempts"]) - 1, f"k = {k}: the harness stepped on after it "
+                                                  f"was applied")
+                applied_at.append(j + 1)
+                break
+            check(j + 1 < len(v["attempts"]), f"k = {k} was never applied")
+        old = value
+    check(len(values) >= CN_N5_VALUES and checked_before >= CN_N5_VALUES,
+          f"{len(values)} values, {checked_before} checked before the applying SYNC; at least "
+          f"{CN_N5_VALUES} needed")
+    first, second = applied_at.count(1), applied_at.count(2)
+    need(first >= CN_N5_EACH_PARITY and second >= CN_N5_EACH_PARITY,
+         f"applied at the first SYNC {first}, the second {second}: both parities need "
+         f"{CN_N5_EACH_PARITY}")
+    return [f"{len(values)} values (RPDO type {h['rpdo_type']}), each invisible by SDO before the "
+            f"SYNC predicted to apply it and visible by SDO and in the TPDO our master decoded "
+            f"after it",
+            f"applied at the first SYNC after the RPDO {first} times, at the second {second} "
+            f"times, as the pinned parity (CO_PDO.c:811) predicted each one"]
+
+
+# ---- N7: capability refusal ----
+
+def judge_n7(obs):
+    end = cn_complete(obs, "activate_hal", "scenario_failed")
+    daemons = obs["canopend"]
+    need(sorted(d["node"] for d in daemons) == list(CN_SESSION_NODES),
+         f"canopend nodes {[d['node'] for d in daemons]}")
+    for node in CN_SESSION_NODES:
+        need(cn_states(obs, "host", node), f"no heartbeat from node {node}")
+    need(obs["harness"]["cli_rc"] == 1, f"the CLI exited {obs['harness']['cli_rc']}")
+    steps = {e["line"]: e["n"] for e in cn_events(obs, "cmd")}
+    need(set(steps) == {"configure", "activate"}, f"scenario steps {steps}")
+    configure = cn_events(obs, "cmd_done", n=steps["configure"])
+    need(configure and configure[0]["ok"], f"configure failed: {configure}")
+    probes = cn_events(obs, "sdo_abort", index=0x2012)
+    check(sorted(e["node"] for e in probes) == list(CN_SESSION_NODES) and
+          {e["code"] for e in probes} == {cnf.ABORT_NO_OBJECT},
+          f"0x2012 probes {[(e['node'], hex(e['code'])) for e in probes]}")
+    for node in CN_SESSION_NODES:
+        answers = frames(obs, "host", cia301.SDO_TX_BASE + node)
+        check(cia301.sdo_abort(node, 0x2012, 0, cnf.ABORT_NO_OBJECT)[1] in
+              [d for _, _, d in answers], f"node {node}: no 0x2012 abort on the wire")
+    activate = cn_events(obs, "cmd_done", n=steps["activate"])
+    check(len(activate) == 1 and not activate[0]["ok"], f"activation was not refused: {activate}")
+    missing = {m["capability"]: m["support"] for m in activate[0].get("missing", [])}
+    check(missing == CN_GENERIC_MISSING and len(activate[0]["missing"]) == 5,
+          f"activation refused listing {missing}, generic_cia402_profile lacks "
+          f"{CN_GENERIC_MISSING}")
+    t_refused = activate[0]["t"]
+    for side in ("host", "device"):
+        starts = [d.hex() for _, d in cn_nmt_frames(obs, side) if d[:1] == bytes([cia301.NMT_START])]
+        check(not starts, f"NMT Start on vcan_{side}: {starts}")
+        rpdos = [f for f in frames(obs, side)
+                 if any(base < f[1] <= base + 0x7F for base in cia301.RPDO_BASE.values())]
+        check(not rpdos, f"RPDO on vcan_{side}: {hexes(rpdos[:3])}")
+    tail = obs["host"][-1][0] - t_refused
+    need(tail >= 0.2, f"only {tail * 1000:.0f} ms observed after the refusal")
+    return [f"0x2012 aborted {cnf.ABORT_NO_OBJECT:#010x} on all six nodes, configure ok",
+            "activation refused: " + ", ".join(f"{c.lower()} {s.lower()}"
+                                               for c, s in CN_GENERIC_MISSING.items()),
+            f"no NMT Start and no RPDO, {tail * 1000:.0f} ms observed after the refusal "
+            f"({end['reason'][:40]}...)"]
+
+
+JUDGES.update({"N1": judge_n1, "N2": judge_n2, "N3": judge_n3, "N4": judge_n4, "N5": judge_n5,
+               "N6": judge_n6, "N7": judge_n7})

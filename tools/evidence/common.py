@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT / "tools" / "od"))
 import wire  # noqa: E402
 
 RECORDED = ROOT / "tools" / "interop" / "recorded"
+# Our master against CANopenNode (E3c Task 8, rows n1-n7) is recorded in a directory of its own.
+RECORDED_MASTER = RECORDED / "master"
 MEDIA = ROOT / "docs" / "media"
 EDS_PATH = ROOT / "config" / "od" / "vdrive_arm.eds"
 NODE = 3  # The node the matrix and the fault rows drive.
@@ -25,6 +27,7 @@ NODE = 3  # The node the matrix and the fault rows drive.
 _M = "tools/interop/test_matrix.py::"
 _F = "tools/interop/test_proxy_faults.py::"
 _X = "tools/interop/test_master_faults.py::"
+_N = "tools/interop/test_master_matrix.py::"
 RECORDING_TESTS = {
     "m1": _M + "test_nmt_states_and_service_gating",
     "m2": _M + "test_first_heartbeat_missing_vs_running_timeout",
@@ -47,7 +50,19 @@ RECORDING_TESTS = {
     "x5": _X + "test_sdo_timeout_during_arm_fails_arming",
     "x6": _X + "test_all_commands_delayed_stop_the_group",
     "x7": _X + "test_minority_delayed_commands_never_actuate_late",
+    "n1": _N + "test_master_nmt_states_and_service_gating",
+    "n2": _N + "test_master_first_heartbeat_missing_vs_running_timeout",
+    "n3": _N + "test_master_sdo_expedited_and_aborts",
+    "n4": _N + "test_master_pdo_bytes_and_lengths",
+    "n5": _N + "test_master_sync_application_and_sampling_order",
+    "n6": _N + "test_master_emcy_reception",
+    "n7": _N + "test_master_refuses_activation_on_canopennode",
 }
+
+
+def recorded_dir(row):
+    """Where the committed recording of `row` lives."""
+    return RECORDED_MASTER if row.startswith("n") else RECORDED
 PYTEST = "python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q"
 # The vcan tests need the workspace built (run_checks.sh does it) and the links up.
 VCAN_PREFIX = ("docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && "
@@ -56,7 +71,8 @@ VCAN_PREFIX = ("docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && 
 
 def recording_command(row):
     """The command that records `row` again (a new run: new times and values)."""
-    return (f"{VCAN_PREFIX}INTEROP_RECORD_DIR=tools/interop/recorded {PYTEST} "
+    directory = recorded_dir(row).relative_to(ROOT)
+    return (f"{VCAN_PREFIX}INTEROP_RECORD_DIR={directory} {PYTEST} "
             f"{RECORDING_TESTS[row]}'")
 
 

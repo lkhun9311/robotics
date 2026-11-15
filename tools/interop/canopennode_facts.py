@@ -28,6 +28,11 @@ LOG_NMT = {
 LOG_RUNNING = "<6>CANopen device, Node ID = 0x02, running ..."
 LOG_FINISHED = "<6>CANopen device, Node ID = 0x02, finished"
 
+
+def log_running(node_id):
+    """LOG_RUNNING of a canopend started with `-i node_id` (N7 runs nodes 1-6)."""
+    return LOG_RUNNING.replace("0x02", f"0x{node_id:02X}")
+
 # --- object dictionary (test_canopend_example_od_facts) ----------------------------------------
 DEVICE_TYPE = 0x00000000  # 0x1000, the shipped example OD value
 IDENTITY = {1: 0, 2: 0, 3: 0, 4: 0}  # 0x1018:01..04 (vendor, product, revision, serial), all 0
