@@ -122,6 +122,20 @@ def test_capture_stamps_frames_with_the_kernel_receive_time(capture, peer):
     assert all(f[0] < t for f, t in zip(ours, nxt)), f"stamp after the next send: {lags}"
 
 
+@pytest.mark.parametrize("step_us, inconclusive_expected", [(150, True), (-150, True), (50, False)])
+def test_offset_drift_limit_100us(capture, step_us, inconclusive_expected):
+    """A capture maps kernel CLOCK_REALTIME stamps to CLOCK_MONOTONIC by one offset; a synthetic
+    step of that offset during the capture (applied to the capture's own sample) larger than
+    100 us makes the capture INCONCLUSIVE, a smaller one does not."""
+    cap = capture(DEVICE_IF)
+    cap._offset_ns -= step_us * 1000  # As if CLOCK_REALTIME stepped by step_us since the start.
+    if inconclusive_expected:
+        with pytest.raises(AssertionError, match="INCONCLUSIVE: capture on vcan_device.*moved"):
+            cap.stop()
+    else:
+        cap.stop()
+
+
 def test_proxy_rejects_bad_rules(vcan, tmp_path):
     rules = tmp_path / "bad.rules"
     rules.write_text("# drop SYNC\nh2d 0x080/0x7FF drop\nh2d 0x080/0x7FF explode\n")

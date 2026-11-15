@@ -103,7 +103,10 @@ def probe_eds(tmp_path_factory):
 _SO_TIMESTAMPNS = 35
 _TIMESPEC = struct.Struct("=qq")
 CLOCK_OFFSET_SAMPLES = 50
-CLOCK_DRIFT_LIMIT_NS = 1_000_000  # Realtime - monotonic may move this much during a capture.
+# Realtime - monotonic may move this much during a capture. An NTP slew changes the rate of both
+# clocks alike, so only a step of CLOCK_REALTIME moves the difference; what is left is the error
+# of the bracket reads (best of CLOCK_OFFSET_SAMPLES, microseconds), well inside 100 us.
+CLOCK_DRIFT_LIMIT_NS = 100_000
 
 
 def realtime_minus_monotonic_ns(samples=CLOCK_OFFSET_SAMPLES):
