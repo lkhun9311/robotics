@@ -348,6 +348,15 @@ def test_capture_parsing_is_shared_between_judges_and_evidence():
     assert common.drive_records(obs) == judges.drive_records(obs)
 
 
+def test_readme_backend_table_is_what_the_contract_suite_records():
+    """The E3c backend table in README.md is what both backends' contract cases record now
+    (logic time: the same values on every run)."""
+    build = common.ROOT / "build" / "release"
+    text = backend_table.README.read_text(encoding="utf-8")
+    assert backend_table.readme_block(text) == backend_table.table(build), (
+        "README.md's backend table differs: python3 tools/evidence/backend_table.py --write-readme")
+
+
 def test_backend_table_never_reports_a_missing_or_failed_case_as_pass():
     assert backend_table.cell(None) == "MISSING"
     assert backend_table.cell(("FAIL", {"motion_end_ms": "200.000"})) == \
