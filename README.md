@@ -345,12 +345,12 @@ purpose:
 
 ### Interop matrix and proxy fault rows
 
-CI run [43651578195](https://github.com/lkhun9311/robotics/actions/runs/43651578195)
-(workflow_dispatch on `feat/e3b-bus-processes` at `4ddaa5b`) passed, 119 vcan tests. The table
+CI run [43657566327](https://github.com/lkhun9311/robotics/actions/runs/43657566327)
+(pull request #23 on `feat/e3b-bus-processes` at `50367b0`) passed, 124 vcan tests. The table
 is generated from that run's `pytest-vcan.xml` artifact, not from a committed file:
 
-    gh run download 43651578195 -n checks-artifacts -D ci-43651578195
-    python3 tools/evidence/matrix_table.py ci-43651578195/artifacts/pytest-vcan.xml
+    gh run download 43657566327 -n checks-artifacts -D ci-43657566327
+    python3 tools/evidence/matrix_table.py ci-43657566327/artifacts/pytest-vcan.xml
 
 | Row | What | Test | Result |
 |---|---|---|---|
