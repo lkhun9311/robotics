@@ -8,10 +8,11 @@ scenarios run and do what they claim on the bank side; the CiA 301 verdicts on w
 answered belong to the interop matrix (Task 6).
 """
 import subprocess
+import time
 
 import pytest
 
-from conftest import DEVICE_IF, LELY_PEER_BIN, NODES, inconclusive
+from conftest import DEVICE_IF, LELY_PEER_BIN, NODES, ROOT, inconclusive
 
 NODE = 3
 OPERATIONAL, STOPPED, PRE_OPERATIONAL = 5, 4, 127  # Lely NmtState values in `state` events.
@@ -177,3 +178,71 @@ def test_peer_rejects_a_validity_outside_the_lease(ms):
                        capture_output=True, text=True, timeout=10)
     assert p.returncode == 2 and f"--validity-ms: {ms} is outside [1, 48]" in p.stderr, \
         (p.returncode, p.stderr)
+
+
+def test_commit_and_enable_reports_the_statusword_read_by_sdo(start_bank, start_proxy,
+                                                              start_peer):
+    """--statusword sdo: with every TPDO1 of the node lost, the statusword in scenario_done is
+    the one the SDO upload of 0x6041 returned (Operation Enabled), not a stale cached value."""
+    rules = (ROOT / "config" / "interop" / "faults" / "drop_tpdo1.rules").read_text()
+    proxy = start_proxy(rules)
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    peer, done = run_scenario(start_peer, "commit_and_enable", node=NODE, statusword="sdo")
+    if peer.of("rpdo", node=NODE, index=0x6041, sub=0):
+        inconclusive("Lely decoded a TPDO1 of the node: the rule did not drop them all")
+    polled = [e["value"] for e in peer.of("sdo_ok", node=NODE, op="read", index=0x6041, sub=0)]
+    assert polled and polled[-1] & 0x6F == 0x27, polled  # The last upload: Operation Enabled.
+    assert done["statusword"] == polled[-1], (done, polled)
+    exit_record = proxy.stop()
+    if not exit_record["rules"] or exit_record["rules"][0]["dropped"] == 0:
+        inconclusive(f"the rule dropped no TPDO1: {exit_record['rules']}")
+
+
+def wait_booted(peer):
+    peer.wait_for(lambda e: e.get("event") == "boot" and e.get("node") == NODE, 5,
+                  f"boot of node {NODE}")
+
+
+def test_console_quit_waits_for_the_commands_before_it(start_bank, proxy, start_peer):
+    """`quit` in the same stdin batch as an SDO read ends the run only after the read completed:
+    its sdo_ok and cmd_done come before scenario_done, and the run succeeds."""
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    peer = start_peer("console", node=NODE)
+    wait_booted(peer)
+    peer.send(f"read {NODE} 0x1000 0 u32\nquit")  # One write: both lines arrive together.
+    peer.wait_for(lambda e: e.get("event") in ("scenario_done", "scenario_failed"), 5,
+                  "the end of the console")
+    assert peer.wait_exit(timeout=5) == 0, (peer.stderr[-500:], peer.events[-10:])
+    order = [e["event"] for e in peer.events
+             if e.get("event") in ("sdo_ok", "cmd_done", "scenario_done", "scenario_failed")]
+    assert order == ["sdo_ok", "cmd_done", "scenario_done"], peer.events[-10:]
+    assert peer.of("cmd_done", n=1, ok=True), peer.of("cmd_done")
+    assert [e["value"] for e in peer.of("sdo_ok", node=NODE, index=0x1000)] == [0x00020192]
+
+
+def test_console_stopped_with_a_command_pending_is_not_a_success(start_bank, start_proxy,
+                                                                 start_peer):
+    """SIGTERM while a console command is still in progress (its SDO request is dropped, so
+    Lely's 1 s timeout has not passed) ends the run with scenario_failed, never scenario_done."""
+    # Occurrence 0 of 0x603 is Lely's boot upload of 0x1000; the console's request is 1.
+    proxy = start_proxy(rules=f"h2d 0x{0x600 + NODE:03X}/0x7FF every 1000 offset 1 drop\n")
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    peer = start_peer("console", node=NODE)
+    wait_booted(peer)
+    n = peer.send(f"read {NODE} 0x1000 0 u32")
+    cmd = peer.wait_for(lambda e: e.get("event") == "cmd" and e.get("n") == n, 2, "the cmd line")
+    time.sleep(0.2)  # Well inside Lely's 1 s SDO timeout.
+    if peer.of("cmd_done", n=n):
+        inconclusive(f"the read completed before the signal: {peer.events[-5:]}")
+    assert time.monotonic() - cmd["t_rx"] < 0.9, "the signal would come after Lely's SDO timeout"
+    rc = peer.terminate()
+    assert rc == 1, (rc, peer.stderr[-500:], peer.events[-10:])
+    assert not peer.of("scenario_done"), peer.of("scenario_done")
+    failed = peer.of("scenario_failed")
+    assert len(failed) == 1 and "pending" in failed[0]["reason"], failed
+    exit_record = proxy.stop()
+    if [r["dropped"] for r in exit_record["rules"]] != [1]:
+        inconclusive(f"the rule did not drop exactly one request: {exit_record['rules']}")

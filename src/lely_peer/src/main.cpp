@@ -44,8 +44,10 @@
 //   commit_and_enable  NMT Start; controlwords 0x06, 0x07 by RPDO3; the drive extension's commit
 //                      transaction through Lely's SDO client; controlword 0x0F
 //   console            the commands of lely_peer::parse_console, one per line on stdin, each
-//                      performed in order on the driver of its node; `quit`, SIGTERM/SIGINT or
-//                      the duration end it with scenario_done; a line that does not parse fails it
+//                      performed in order on the driver of its node; `quit` (once every command
+//                      before it is done), SIGTERM/SIGINT or the duration end it with
+//                      scenario_done; a line that does not parse fails it, and so does an end
+//                      while a command is pending or after one was not carried out
 //   pdo_stream         commit_and_enable with controlword 0x0F written right after the second
 //                      of K updates of RPDO1/RPDO2 (one per SYNC, seq + 1, valid_until = now +
 //                      --validity-ms) that Lely sends as synchronous PDOs; then stop
@@ -179,13 +181,16 @@ class PeerDriver : public canopen::FiberDriver {
   PeerDriver(ev::Executor exec, canopen::AsyncMaster& master, std::uint8_t id, Run& run)
       : FiberDriver(exec, master, id), run_(run) {}
 
-  // console: performs one parsed command in a fiber of this driver, then prints cmd_done.
-  void Perform(const lely_peer::ConsoleCommand& c, std::uint64_t n) {
+  // console: performs one parsed command in a fiber of this driver, prints cmd_done, then
+  // calls `done` with its ok.
+  void Perform(const lely_peer::ConsoleCommand& c, std::uint64_t n,
+               std::function<void(bool ok)> done) {
     ++run_.fibers;
-    GetExecutor().post([this, c, n]() {
+    GetExecutor().post([this, c, n, done = std::move(done)]() {
       const bool ok = Do(c);
       emit("cmd_done", "\"n\":" + std::to_string(n) + ",\"ok\":" + (ok ? "true" : "false"));
       --run_.fibers;
+      done(ok);
     });
   }
 
@@ -338,6 +343,9 @@ class PeerDriver : public canopen::FiberDriver {
       const double deadline = now_s() + (static_cast<double>(ms) / 1000.0);
       while (!run_.finished && now_s() < deadline) {
         const auto sw = SdoRead<std::uint16_t>(kStatusword, 0);
+        if (sw) {
+          statusword_ = *sw;  // What scenario_done reports: the drive's state, read by SDO.
+        }
         if (sw && (*sw & kStateMask) == state) {
           return true;
         }
@@ -965,12 +973,32 @@ int run(const lely_peer::Options& opts) {
     }
     return console ? num("emcy", static_cast<std::int64_t>(run.emcy)) : std::string();
   };
+  // console: commands handed to a driver whose cmd_done has not come yet, commands whose
+  // cmd_done said they were not carried out, and whether `quit` was read. `quit` ends the run
+  // only once every command before it is done; a run with a command pending or not carried out
+  // ends with scenario_failed, whatever ended it.
+  std::uint64_t console_pending = 0;
+  std::uint64_t console_not_done = 0;
+  bool console_quit = false;
+  const auto console_end = [&](const std::string& how) {
+    if (console_pending > 0) {
+      run.finish(false, how + " with " + std::to_string(console_pending) +
+                            " console command(s) still pending");
+    } else if (console_not_done > 0) {
+      run.finish(false,
+                 std::to_string(console_not_done) + " console command(s) were not carried out");
+    } else {
+      run.finish(true, counters());
+    }
+  };
 
   sigset.insert(SIGINT);
   sigset.insert(SIGTERM);
   sigset.submit_wait([&](int) {
     sigset.clear();
-    if (run.scenario == "emcy_watch" || console) {
+    if (console) {
+      console_end("stopped by a signal");
+    } else if (run.scenario == "emcy_watch") {
       run.finish(true, counters());
     } else if (node_scenario) {
       run.finish(false, "stopped by a signal before the scenario ended");
@@ -986,6 +1014,8 @@ int run(const lely_peer::Options& opts) {
       }
       if (node_scenario) {
         run.finish(false, "deadline of " + std::to_string(duration_ms) + " ms passed");
+      } else if (console) {
+        console_end("the duration ended");
       } else {
         run.finish(true, counters());
       }
@@ -1003,6 +1033,10 @@ int run(const lely_peer::Options& opts) {
     }
     std::array<char, 512> chunk{};
     bool eof = false;
+    // The read ends with EAGAIN; errno is put back, because Lely's ev::Loop::run reports the
+    // errno a task leaves behind as its own error when the loop stops ("run: Resource
+    // temporarily unavailable", exit 1 after a scenario_done).
+    const int saved_errno = errno;
     for (;;) {
       const ssize_t n = ::read(STDIN_FILENO, chunk.data(), chunk.size());
       if (n > 0) {
@@ -1012,6 +1046,7 @@ int run(const lely_peer::Options& opts) {
       eof = n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
       break;
     }
+    errno = saved_errno;
     for (std::size_t nl = console_buf.find('\n'); nl != std::string::npos && !run.finished;
          nl = console_buf.find('\n')) {
       const std::string line = console_buf.substr(0, nl);
@@ -1025,7 +1060,12 @@ int run(const lely_peer::Options& opts) {
         return;
       }
       if (c.verb == lely_peer::ConsoleCommand::Verb::kQuit) {
-        run.finish(true, counters());
+        // Lines after `quit` are not read. With commands still pending, the last cmd_done ends
+        // the run.
+        console_quit = true;
+        if (console_pending == 0) {
+          console_end("quit");
+        }
         return;
       }
       const auto it = by_id.find(c.node);
@@ -1034,7 +1074,16 @@ int run(const lely_peer::Options& opts) {
                               " is not a slave in the DCF");
         return;
       }
-      it->second->Perform(c, n);
+      ++console_pending;
+      it->second->Perform(c, n, [&](bool ok) {
+        --console_pending;
+        if (!ok) {
+          ++console_not_done;
+        }
+        if (console_quit && console_pending == 0) {
+          console_end("quit");
+        }
+      });
     }
     if (eof) {
       return;  // stdin closed: no more commands; SIGTERM or the duration ends the run.

@@ -4,7 +4,9 @@
 // One control thread waits in ppoll on the release timerfd (absolute CLOCK_MONOTONIC, period W),
 // the CAN socket, the inject socket and a signalfd, and runs BankLoop::run_once on every wake
 // (B1). A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX
-// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". SIGTERM or
+// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". At most
+// kInjectBudget commands are served per wake, so a client that keeps the socket full cannot
+// hold off the releases, the CAN drain or a signal. SIGTERM or
 // SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
 // Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
 // is on stderr). Exit 1: a failure while running; once the trace is open it still ends with the
@@ -159,51 +161,6 @@ int bind_inject(const std::string& path, std::string* error) {
   return fd;
 }
 
-// Every datagram waiting on the inject socket: applied in order, each answered to its sender.
-// Failures of the socket itself are counted and traced (BankLoop::note_inject_io): a receive
-// error, a reply that cannot be sent, and a datagram longer than the buffer, which is rejected
-// rather than applied cut short.
-void serve_inject(int fd, vdrive_bank::BankLoop& loop) {
-  using Kind = vdrive_bank::trace::InjectIo::Kind;
-  for (;;) {
-    std::array<char, 128> buf{};
-    sockaddr_un peer{};
-    socklen_t peer_len = sizeof peer;
-    // MSG_TRUNC: the return value is the datagram's real length, even when it did not fit.
-    const ssize_t n = ::recvfrom(fd, buf.data(), buf.size(), MSG_TRUNC,
-                                 reinterpret_cast<sockaddr*>(&peer), &peer_len);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        loop.note_inject_io(Kind::kRecvError, errno);
-      }
-      return;
-    }
-    std::string reply;
-    if (static_cast<std::size_t>(n) > buf.size()) {
-      loop.note_inject_io(Kind::kTruncated, n);
-      reply = "err datagram truncated: " + std::to_string(n) + " bytes, at most " +
-              std::to_string(buf.size());
-    } else {
-      std::string_view command(buf.data(), static_cast<std::size_t>(n));
-      while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
-        command.remove_suffix(1);
-      }
-      const vdrive_bank::Bank::InjectResult res = loop.inject(command);
-      reply = res.ok ? std::string("ok") : "err " + res.error;
-    }
-    if (peer_len <= sizeof(sa_family_t)) {
-      continue;  // An unbound sender cannot be answered.
-    }
-    if (::sendto(fd, reply.data(), reply.size(), MSG_DONTWAIT,
-                 reinterpret_cast<const sockaddr*>(&peer), peer_len) < 0) {
-      loop.note_inject_io(Kind::kSendError, errno);
-    }
-  }
-}
-
 // The bound inject socket: closed and its file removed on every way out of run(), exceptions
 // included.
 struct InjectSocket {
@@ -327,10 +284,10 @@ int run(const Args& args) {
       // The count is not used: releases are counted from the clock (B1).
       [[maybe_unused]] const ssize_t n = ::read(timer_fd, &expirations, sizeof expirations);
     }
-    if (inject_fd >= 0 && (fds[3].revents & POLLIN) != 0) {
-      serve_inject(inject_fd, loop);
-    }
-    loop.run_once();
+    // A backlog left by the inject budget keeps the socket readable: the next ppoll returns at
+    // once and the next wake serves it.
+    const bool inject_ready = inject_fd >= 0 && (fds[3].revents & POLLIN) != 0;
+    loop.run_once(inject_ready ? inject_fd : -1);
   }
 
   writer.stop();

@@ -15,13 +15,16 @@
 
 // The control loop of the vdrive_bank process (B1). One thread; the caller waits (ppoll on the
 // release timerfd, the CAN socket and the inject socket) and calls run_once on every wake. Each
-// wake first runs a release that is due, then drains received frames until the next release is
-// due or kRxBudget frames were read. Time comes from `now` only (CLOCK_MONOTONIC in the
-// process); a received frame is dispatched with the instant read right after its recvmsg.
+// wake first runs a release that is due, then serves the inject socket (when given) until the
+// next release is due or kInjectBudget datagrams were read, then drains received frames until
+// the next release is due or kRxBudget frames were read. Time comes from `now` only
+// (CLOCK_MONOTONIC in the process); a received frame is dispatched with the instant read right
+// after its recvmsg.
 namespace vdrive_bank {
 
 inline constexpr runtime_core::Duration kReleasePeriod = drive_core::kTickPeriod;  // W
 inline constexpr int kRxBudget = 64;                // Frames read per wake at most.
+inline constexpr int kInjectBudget = 16;            // Inject datagrams read per wake at most.
 inline constexpr std::uint64_t kOverloadSkips = 3;  // Consecutive skipped releases (spec §10.2).
 inline constexpr std::uint16_t kOverloadErrorCode = 0x6100;  // CiA 301 internal software error.
 inline constexpr runtime_core::Duration kSnapshotPeriod{1'000'000'000};
@@ -40,10 +43,18 @@ class BankLoop {
 
   // Traces `start` with the boot_ids, then powers on the six nodes and sends their boot-ups.
   void start(const std::array<std::uint32_t, kNodeCount>& boot_ids);
-  // One wake (B1): the due release, if any, then the bounded drain.
-  void run_once();
+  // One wake (B1): the due release, if any, then the bounded inject drain of `inject_fd` (none
+  // when negative), then the bounded CAN drain.
+  void run_once(int inject_fd = -1);
   // B6: applies one command at the current instant and sends the frames it produces.
   Bank::InjectResult inject(std::string_view command);
+  // The datagrams waiting on the non-blocking UNIX datagram socket `fd`, applied in order
+  // (inject) and each answered to its sender with "ok" or "err <reason>": at most kInjectBudget,
+  // and after the first none once the next release is due. The rest stay queued, in order, for
+  // a later call. Failures of the socket itself are counted and traced (note_inject_io): a
+  // receive error, a reply that cannot be sent, and a datagram longer than the buffer, which is
+  // rejected rather than applied cut short. Returns the number of datagrams read.
+  int serve_inject(int fd);
 
   runtime_core::MonoTime next_release() const;
   const LoopCounts& counts() const { return counts_; }
