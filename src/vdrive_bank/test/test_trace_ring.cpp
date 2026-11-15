@@ -126,6 +126,14 @@ TEST(TraceRecord, EveryKindSerializes) {
     expect_has(j, R"("rx_reject_budget_hits":0)");
     expect_has(j, R"("tx_enobufs":1)");
   }
+  expect_has(vdrive_bank::to_json(trace::start_failed(MonoTime{10}, "timerfd_settime: \"x\"")),
+             R"({"event":"start_failed","t_ns":10,"reason":"timerfd_settime: \"x\""})");
+  {
+    // A reason longer than the record keeps its first 63 bytes.
+    const std::string j =
+        vdrive_bank::to_json(trace::start_failed(MonoTime{10}, std::string(80, 'a')));
+    expect_has(j, R"("reason":")" + std::string(63, 'a') + R"("})");
+  }
   expect_has(vdrive_bank::to_json(trace::Exit{MonoTime{11}, 0, 15, {1, 2, 3}}),
              R"({"event":"exit","t_ns":11,"trace_overflow":0,"signal":15,)"
              R"("inject":{"recv_errors":1,"send_errors":2,"truncated":3}})");

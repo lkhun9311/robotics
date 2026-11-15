@@ -476,8 +476,11 @@ class TracedProc:
             self.proc.wait()
             inconclusive(f"{self.name} did not exit within {timeout} s of SIGTERM")
         self._err.join(timeout=2)
-        assert rc == 0, f"{self.name} exited {rc}; stderr: {self.stderr[-500:]!r}"
         records = self.trace.poll()
+        failed = [r for r in records if r.get("event") == "start_failed"]
+        if failed:
+            inconclusive(f"{self.name}: start failed ({failed[0].get('reason')}), exit {rc}")
+        assert rc == 0, f"{self.name} exited {rc}; stderr: {self.stderr[-500:]!r}"
         if not records or records[-1].get("event") != "exit":
             inconclusive(f"{self.name}: trace has no final exit record: {records[-3:]}")
         self.exit = records[-1]

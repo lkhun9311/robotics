@@ -20,7 +20,7 @@ the moving baseline (at least 50 dispatched commands actuated on all six), the f
 first frame the rule acted on, after the arm completed), and the stop observation.
 """
 import judges
-from judges import Failure, Inconclusive, check, need
+from judges import Failure, Inconclusive, bank_started, check, need
 
 NODES = judges.NODES
 cia301 = judges.cia301
@@ -152,6 +152,7 @@ def complete(obs, scenario):
     otherwise. A stream row's CLI exits 0 with scenario_done; the arming row's exits 1."""
     bank = obs.get("bank") or []
     need(bank, "no vdrive_bank trace records")
+    bank_started(bank)
     overflow = [r for r in bank if r.get("trace_overflow", 0) != 0]
     need(not overflow, f"vdrive_bank trace incomplete: trace_overflow = "
                        f"{overflow[0].get('trace_overflow') if overflow else 0}")

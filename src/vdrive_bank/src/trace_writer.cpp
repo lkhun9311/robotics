@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string_view>
@@ -242,6 +243,9 @@ struct ToJson {
         .raw("inject", inject_json(r.totals))
         .done();
   }
+  std::string operator()(const trace::StartFailed& f) const {
+    return Json("start_failed", f.at).str("reason", f.reason.data()).done();
+  }
   std::string operator()(const trace::Exit& e) const {
     return Json("exit", e.at)
         .num("trace_overflow", e.trace_overflow)
@@ -258,6 +262,13 @@ struct ToJson {
 }  // namespace
 
 std::string to_json(const TraceRecord& record) { return std::visit(ToJson{}, record); }
+
+trace::StartFailed trace::start_failed(runtime_core::MonoTime at, std::string_view reason) {
+  StartFailed f{at, {}};
+  const std::size_t n = std::min(reason.size(), f.reason.size() - 1);
+  std::memcpy(f.reason.data(), reason.data(), n);
+  return f;
+}
 
 TraceRing::TraceRing() : slots_(std::make_unique<TraceRecord[]>(kCapacity)) {}
 

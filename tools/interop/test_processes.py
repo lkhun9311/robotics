@@ -291,11 +291,8 @@ FAILING_CALLS = {
 }
 
 
-@pytest.mark.parametrize("call", sorted(FAILING_CALLS))
-def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path, call):
-    """A failing signalfd leaves no trace file and no inject socket; a failing timerfd_settime
-    (after both exist) ends with exit 1, the final snapshots, an `exit` record and the inject
-    socket file removed."""
+def run_bank_with_failing(call, tmp_path):
+    """vdrive_bank run to its end with `call` failing; (result, trace path, socket path)."""
     assert VDRIVE_BANK_BIN.exists(), f"NOT_RUN: {VDRIVE_BANK_BIN} not built"
     cc = shutil.which("cc")
     assert cc is not None, "NOT_RUN: no C compiler for the LD_PRELOAD shim"
@@ -310,6 +307,15 @@ def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path
     result = subprocess.run([str(VDRIVE_BANK_BIN), "--if", DEVICE_IF, "--trace", str(trace),
                              "--inject", str(sock)], env=env, capture_output=True, text=True,
                             timeout=5)
+    return result, trace, sock
+
+
+@pytest.mark.parametrize("call", sorted(FAILING_CALLS))
+def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path, call):
+    """A failing signalfd leaves no trace file and no inject socket; a failing timerfd_settime
+    (after both exist) ends with exit 1, the final snapshots, an `exit` record and the inject
+    socket file removed."""
+    result, trace, sock = run_bank_with_failing(call, tmp_path)
     assert result.returncode == 1, (result.returncode, result.stderr)
     assert call.split("_")[0] in result.stderr, result.stderr
     assert not sock.exists(), "the inject socket file outlived the process"
@@ -320,3 +326,26 @@ def test_bank_startup_failure_leaves_a_closed_trace_and_no_socket(vcan, tmp_path
     assert records and records[-1]["event"] == "exit", records[-3:]
     assert records[-1]["trace_overflow"] == 0, records[-1]
     assert any(r["event"] == "start" for r in records), "no start record"
+
+
+def test_failed_start_is_marked_in_trace(vcan, tmp_path):
+    """A start that fails after the trace is open (timerfd_settime refused, after the `start`
+    record) ends its trace with a `start_failed` record naming the failure, right before the
+    final snapshots and the `exit` record: such a trace never reads as a run that ended normally.
+    The harness and the judges refuse it as INCONCLUSIVE."""
+    result, trace, _ = run_bank_with_failing("timerfd_settime", tmp_path)
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    events = [r["event"] for r in records]
+    assert events.count("start") == 1, events
+    failed = [r for r in records if r["event"] == "start_failed"]
+    assert len(failed) == 1, events
+    assert failed[0]["reason"] == "timerfd_settime: Invalid argument", failed[0]
+    assert events.index("start") < events.index("start_failed"), events
+    assert events[-1] == "exit" and records[-1]["trace_overflow"] == 0, records[-1]
+    assert all(e in ("loop", "dispatch", "io", "exit")
+               for e in events[events.index("start_failed") + 1:]), events
+    # The judges' shared precondition refuses the trace.
+    import judges
+    with pytest.raises(judges.Inconclusive, match="start_failed"):
+        judges.bank_started(records)

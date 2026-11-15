@@ -114,10 +114,19 @@ def hexes(fs):
 
 # ---- preconditions shared by every row ----
 
+def bank_started(bank):
+    """A vdrive_bank trace whose start succeeded: a `start` record and no `start_failed` (the
+    bank writes one when it ends before its loop runs, e.g. timerfd_settime refused)."""
+    need(any(r.get("event") == "start" for r in bank), "vdrive_bank trace has no start record")
+    failed = [r for r in bank if r.get("event") == "start_failed"]
+    need(not failed, f"vdrive_bank start_failed: {failed[:1]}")
+
+
 def complete(obs, scenario):
     """Traces complete, processes ran, the scenario finished; Inconclusive otherwise."""
     bank = obs.get("bank") or []
     need(bank, "no vdrive_bank trace records")
+    bank_started(bank)
     overflow = [r for r in bank if r.get("trace_overflow", 0) != 0]
     need(not overflow, f"vdrive_bank trace incomplete: trace_overflow = "
                        f"{overflow[0].get('trace_overflow') if overflow else 0}")
