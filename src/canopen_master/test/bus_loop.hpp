@@ -103,7 +103,10 @@ class BusLoop {
       if (now >= next_heartbeat_[i] && powered_[i]) {
         const std::int64_t periods = (now - next_heartbeat_[i]).ns / kHeartbeat.ns + 1;
         next_heartbeat_[i] = next_heartbeat_[i] + runtime_core::Duration{periods * kHeartbeat.ns};
-        queue_.push_back({false, i, cc::encode_heartbeat({node_id(i), drives[i]->nmt().state()})});
+        if (!heartbeat_muted[i]) {
+          queue_.push_back(
+              {false, i, cc::encode_heartbeat({node_id(i), drives[i]->nmt().state()})});
+        }
       }
     }
     pump();
@@ -228,6 +231,10 @@ class BusLoop {
   // When set, every SDO answer arrives at the next step instead of at once: an SDO round trip
   // takes one W, so a chain of requests spans SYNCs as on a real bus.
   bool sdo_round_trip{false};
+  // Periodic heartbeats of a muted node are not sent (boot-ups still are).
+  std::array<bool, kSessionNodes> heartbeat_muted{};
+  // Replaces a frame before it is recorded and delivered; std::nullopt keeps it.
+  std::function<std::optional<cc::Frame>(bool from_master, const cc::Frame&)> rewrite;
 
  private:
   struct Pending {
@@ -275,7 +282,12 @@ class BusLoop {
       if (guard > 100000) {
         throw std::logic_error("bus loop: frames never settle");
       }
-      const Pending p = queue_.front();
+      Pending p = queue_.front();
+      if (rewrite) {
+        if (const std::optional<cc::Frame> changed = rewrite(p.from_master, p.frame)) {
+          p.frame = *changed;  // A scripted peer: the frame as that peer would send it.
+        }
+      }
       queue_.pop_front();
       const WireFrame w{++order_, now, p.from_master, p.frame};
       wire.push_back(w);

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <optional>
 #include <vector>
@@ -718,8 +719,22 @@ TEST(Session, ConfigureClearsInhibitAfterStop) {
   // From here the nodes are Operational, in Quick Stop Active, with the old applied_tag, and
   // SDO answers take a W, so TPDOs keep arriving while configure probes.
   l.sdo_round_trip = true;
+  // The TPDOs node 1 sent last (Quick Stop Active, old applied_tag), to replay as if they were
+  // still in flight when configure takes the node to Pre-operational.
+  std::vector<cc::Frame> in_flight;
+  for (const WireFrame& w : l.wire) {
+    if (!w.from_master &&
+        (w.frame.cob_id == 0x181 || w.frame.cob_id == 0x281 || w.frame.cob_id == 0x381)) {
+      in_flight.push_back(w.frame);
+    }
+  }
+  ASSERT_GE(in_flight.size(), 3U) << "INCONCLUSIVE";
+  in_flight.erase(in_flight.begin(), in_flight.end() - 3);
   const hal_contract::OpTicket t = l.ticket(hal_contract::kConfigureTimeout);
   l.session.configure(t);
+  l.step();
+  ASSERT_EQ(l.session.op_state(t.op_id), OpState::kPending) << "INCONCLUSIVE: configure ended";
+  for (const cc::Frame& f : in_flight) l.deliver_from_drive(f);
   ASSERT_EQ(l.wait(t.op_id, milliseconds(3100)), OpState::kSucceeded)
       << (l.session.op_error(t.op_id) != nullptr ? l.session.op_error(t.op_id) : "");
   EXPECT_FALSE(l.session.inhibited());
@@ -742,6 +757,107 @@ TEST(Session, ConfigureClearsInhibitAfterStop) {
       EXPECT_FALSE(is_command_pdo(w));
       EXPECT_FALSE(is_controlword(w, 0x0F));
     }
+  }
+}
+
+// The first Quick Stop to `node` after wire order `mark`.
+std::optional<MonoTime> quick_stop_after(const BusLoop& l, std::uint64_t mark, std::size_t node) {
+  for (const WireFrame& w : l.wire) {
+    if (w.order > mark && is_controlword(w, 0x02, node)) return w.at;
+  }
+  return std::nullopt;
+}
+
+TEST(Session, HeartbeatLossWhileArmedInhibits) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.5);
+  stream(l, r, milliseconds(50));
+  const std::uint64_t mark = l.wire.back().order;
+  l.heartbeat_muted[4] = true;  // Node 5's heartbeat stops; its TPDOs keep coming.
+  std::optional<MonoTime> latched;
+  const MonoTime end = l.now + milliseconds(500);
+  std::optional<MonoTime> last_sync;
+  while (l.now < end && !latched) {
+    l.step();
+    if (l.session.inhibited()) latched = l.now;
+    if (l.sync_this_step) last_sync = l.now;
+    if (last_sync && l.now == *last_sync + kTBus - kW) r.offer(l);
+  }
+  ASSERT_TRUE(latched) << "no inhibit on heartbeat loss";
+  EXPECT_TRUE(l.session.feedback().faults.has(Fault::kNodeLost));
+  EXPECT_FALSE(l.session.feedback().faults.has(Fault::kPolicyStop)) << "latched for another cause";
+  l.run(milliseconds(250));
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    const std::optional<MonoTime> qs = quick_stop_after(l, mark, i);
+    ASSERT_TRUE(qs) << "no Quick Stop to node " << i;
+    EXPECT_LE(*qs - *latched, Duration{2 * kTBus.ns}) << i;
+    EXPECT_EQ(l.session.feedback().stop[i], StopStatus::kConfirmed) << i;
+  }
+}
+
+TEST(Session, FeedbackAgeWhileArmedInhibits) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.5);
+  stream(l, r, milliseconds(50));
+  ASSERT_FALSE(l.session.inhibited()) << "INCONCLUSIVE";
+  // Node 2's TPDOs stop reaching the master; it keeps running and answering everything else.
+  const MonoTime cut = l.now;
+  const std::uint64_t mark = l.wire.back().order;
+  l.filter = [](const WireFrame& w) {
+    const bool tpdo =
+        !w.from_master && (node_of(w.frame, 0x180) == 1U || node_of(w.frame, 0x280) == 1U ||
+                           node_of(w.frame, 0x380) == 1U);
+    return tpdo ? Fate::kDrop : Fate::kDeliver;
+  };
+  std::optional<MonoTime> latched;
+  std::optional<MonoTime> last_sync;
+  while (l.now < cut + milliseconds(100) && !latched) {
+    l.step();
+    if (l.session.inhibited()) latched = l.now;
+    if (l.sync_this_step) last_sync = l.now;
+    if (last_sync && l.now == *last_sync + kTBus - kW) r.offer(l);
+  }
+  ASSERT_TRUE(latched) << "no inhibit on stale feedback";
+  // Older than max_feedback_age (20 ms) is detected at the first tick past it.
+  EXPECT_LE(*latched - cut, canopen_master::testing::plus(milliseconds(20), kTBus));
+  EXPECT_GT(*latched - cut, milliseconds(10));
+  const hal_contract::FaultSet f = l.session.feedback().faults;
+  EXPECT_TRUE(f.has(Fault::kInhibited));
+  EXPECT_FALSE(f.has(Fault::kPolicyStop) || f.has(Fault::kDriveFault) || f.has(Fault::kNodeLost))
+      << "latched for another cause";
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    EXPECT_TRUE(quick_stop_after(l, mark, i)) << "no Quick Stop to node " << i;
+  }
+}
+
+TEST(Session, PeerWithoutAppliedTagFailsConfirmation) {
+  BusLoop l;
+  // Node 4 as a scripted peer: commits like a vdrive but its TPDO3 never reports a tag.
+  l.rewrite = [](bool from_master, const cc::Frame& f) -> std::optional<cc::Frame> {
+    if (from_master || f.cob_id != 0x384) return std::nullopt;
+    auto t = cc::unpack_tpdo3(node_id(3), f);
+    if (!t) return std::nullopt;
+    t->applied_tag = 0;
+    return cc::pack_tpdo3(node_id(3), *t);
+  };
+  bring_up(l);
+  const MonoTime posted = l.now;
+  EXPECT_EQ(l.arm(kA, milliseconds(800)), OpState::kFailed);
+  ASSERT_NE(l.drives[3]->committed_attempt(), 0U) << "INCONCLUSIVE: node 4 never committed";
+  // Failed by the 4 x T_bus confirmation window after the enable, not by the 1 s op deadline.
+  EXPECT_LT(l.now - posted, milliseconds(200));
+  EXPECT_TRUE(l.session.inhibited());
+  EXPECT_TRUE(l.session.feedback().faults.has(Fault::kArmFailed));
+  EXPECT_FALSE(l.session.armed_id());
+  EXPECT_FALSE(l.session.profile_confirmed());
+  EXPECT_EQ(l.session.capabilities().device_side_expiry, runtime_core::Support::kUnsupported)
+      << "the profile drops to generic (C2)";
+  l.run(milliseconds(250));
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    EXPECT_TRUE(l.session.node(i).fenced) << i;
+    EXPECT_NE(l.drives[i]->cia402().state(), Cia402State::kOperationEnabled) << i;
   }
 }
 
