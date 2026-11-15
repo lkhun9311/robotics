@@ -975,18 +975,23 @@ def applied_matches(obs, act):
 # the entry must come after Lely sent the first update (the peer enables after the second), or a
 # lost first update puts the first actuation on the 30 ms command timeout.
 GAP_VALIDITY_MIN_US = 40_000 + 3 * 2_000
+# The drive's lease (drive_core kLeaseUs), plus 1 µs for the stream line's printed time.
+GAP_VALIDITY_MAX_US = 48_000 + 1
 
 
 def gap_margins(obs, tag):
     """Preconditions of a row whose stream has gaps (F2, F7)."""
-    short = [e["seq"] for e in events(obs, "stream", node=NODE)
-             if (e["valid_until"] - int(e["t"] * 1e6)) % 2**32 < GAP_VALIDITY_MIN_US]
-    need(not short, f"stream seqs {short[:3]}.. valid for less than "
-                    f"{GAP_VALIDITY_MIN_US // 1000} ms: a lost update lands on the expiry")
+    def ahead(e):  # valid_until - write time, signed in the 2^32 µs wire domain
+        return (e["valid_until"] - int(e["t"] * 1e6) + 2**31) % 2**32 - 2**31
+
+    out = [e["seq"] for e in events(obs, "stream", node=NODE)
+           if not GAP_VALIDITY_MIN_US <= ahead(e) <= GAP_VALIDITY_MAX_US]
+    need(not out, f"stream seqs {out[:3]}.. valid for outside [{GAP_VALIDITY_MIN_US // 1000}, "
+                  f"48] ms: a lost update lands on the expiry (or past the lease)")
     first = min(t for t, s, _ in rpdo_seqs(obs, "host", 1, tag) if s == 1)
     enable = [t for t, _, d in frames(obs, "host", cia301.RPDO_BASE[3] + NODE)
               if d[:2] == b"\x0f\x00"]
-    need(enable and enable[-1] > first, "Enable Operation was not sent after the first update: "
+    need(enable and enable[0] > first, "Enable Operation was not sent after the first update: "
                                         "a lost first update lands on the command timeout")
 
 

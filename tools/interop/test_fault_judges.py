@@ -153,6 +153,78 @@ def test_gap_row_enabled_before_the_first_update_is_inconclusive(row):
     assert status == "INCONCLUSIVE" and "after the first update" in text, f"{status}: {text}"
 
 
+@pytest.mark.parametrize("row", ("F2", "F7"))
+def test_gap_row_validity_just_under_the_bound_is_inconclusive(row):
+    obs = load(row)
+    for e in obs["peer"]:
+        if e.get("event") == "stream":
+            e["valid_until"] = (e["valid_until"] - 2500) % 2**32  # now + 45.5 ms
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "lands on the expiry" in text, f"{status}: {text}"
+
+
+@pytest.mark.parametrize("shift_us", (-50_000, 2_000))  # behind the write; past the 48 ms lease
+def test_gap_row_validity_outside_the_lease_is_inconclusive(shift_us):
+    obs = load("F2")
+    for e in obs["peer"]:
+        if e.get("event") == "stream":
+            e["valid_until"] = (e["valid_until"] + shift_us) % 2**32
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "lands on the expiry" in text, f"{status}: {text}"
+
+
+def test_gap_row_first_enable_before_the_first_update_is_inconclusive():
+    obs = load("F2")
+    tag = stream_tag(obs).to_bytes(2, "little")
+    first = next(f[0] for f in obs["host"] if f[1] == 0x203 and
+                 bytes.fromhex(f[2])[4:8] == (1).to_bytes(2, "little") + tag)
+    enable = next(f for f in obs["host"] if f[1] == 0x403 and f[2].startswith("0f00"))
+    obs["host"].append([first - 0.001, enable[1], enable[2]])  # an earlier 0x0F; a later one too
+    obs["host"].sort(key=lambda f: f[0])
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "after the first update" in text, f"{status}: {text}"
+
+
+def held_rpdo2(obs):
+    """[(t on vcan_host, data hex)] of the stream-tag RPDO2 frames the delay rule held."""
+    tag = stream_tag(obs)
+    matched = judges.expected_matches(obs, judges.parse_rules(obs["harness"]["rules"]))[0]
+    return [(t, d.hex()) for t, _, d in matched if d[6:8] == tag.to_bytes(2, "little")]
+
+
+def test_f7_held_frame_forwarded_at_once_is_inconclusive():
+    obs = load("F7")
+    t_held, h = held_rpdo2(obs)[5]
+    copy = next(f for f in obs["device"] if f[1] == 0x303 and f[2] == h and f[0] > t_held + 0.05)
+    copy[0] = t_held + 0.0003  # the proxy forwarded it instead of holding it
+    obs["device"].sort(key=lambda f: f[0])
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "one delay later" in text, f"{status}: {text}"
+
+
+def test_f7_held_repeat_of_the_last_seq_judges_by_its_late_copy():
+    """Lely repeats seq 60's RPDO2 at every SYNC after the stream; when the rule holds one of
+    those repeats, its bytes equal the repeats forwarded at once, one of which arrives within the
+    held copy's window. Only the one late copy is the held frame (the y6 run)."""
+    obs = load("F7")
+    last = [f for f in obs["host"] if f[1] == 0x303 and
+            bytes.fromhex(f[2])[4:6] == (60).to_bytes(2, "little") and
+            bytes.fromhex(f[2])[6:8] == stream_tag(obs).to_bytes(2, "little")]
+    h, t0 = last[0][2], last[0][0]
+    on_device = [f for f in obs["device"] if f[1] == 0x303 and f[2] == h]
+    lag = on_device[0][0] - t0
+    # Repeats 4..11 of seq 60, 10 ms apart, after the 3 recorded: the 4th and 8th are held.
+    for i in range(len(last) + 1, 12):
+        t = t0 + 0.010 * (i - 1)
+        obs["host"].append([t, 0x303, h])
+        obs["device"].append([t + (0.060 if i % 4 == 0 else 0) + lag, 0x303, h])
+    obs["host"].sort(key=lambda f: f[0])
+    obs["device"].sort(key=lambda f: f[0])
+    obs["proxy_exit"]["rules"][0]["matched"] += 2
+    status, text = verdict(obs)
+    assert status == "PASS", f"{status}: {text}"
+
+
 def test_f7_held_copy_missing_on_device_is_inconclusive():
     obs = load("F7")
     _, i = delayed_stream_rpdo2(obs)[len(delayed_stream_rpdo2(obs)) // 2]
