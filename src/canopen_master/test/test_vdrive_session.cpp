@@ -12,6 +12,7 @@
 
 #include "bus_loop.hpp"
 #include "canopen_codec/codec.hpp"
+#include "canopen_master/feedback_join.hpp"
 #include "canopen_master/vdrive_session.hpp"
 #include "drive_core/commit.hpp"
 #include "drive_core/drive.hpp"
@@ -26,7 +27,9 @@ namespace {
 
 namespace cc = canopen_codec;
 namespace od = canopen_codec::od;
+using canopen_master::FeedbackJoin;
 using canopen_master::NodeProfile;
+using canopen_master::NodeSample;
 using canopen_master::SessionPhase;
 using canopen_master::testing::BusLoop;
 using canopen_master::testing::DriveRecord;
@@ -85,6 +88,18 @@ std::optional<Rpdo1At> rpdo1(const WireFrame& w) {
   }
   return std::nullopt;
 }
+struct Rpdo2At {
+  std::size_t node;
+  od::Rpdo2 pdo;
+};
+std::optional<Rpdo2At> rpdo2(const WireFrame& w) {
+  if (!w.from_master) return std::nullopt;
+  if (const auto n = node_of(w.frame, 0x300)) {
+    if (const auto p = cc::unpack_rpdo2(node_id(*n), w.frame)) return Rpdo2At{*n, *p};
+  }
+  return std::nullopt;
+}
+
 struct SdoAt {
   std::size_t node;
   cc::Sdo sdo;
@@ -580,6 +595,28 @@ TEST(Session, PartialEnableStopsPerState) {
   }
 }
 
+TEST(Session, OldCommandQueuedBeforeRearmIsDiscarded) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.2);
+  stream(l, r, milliseconds(60));
+  // A command queued in the box, then a re-arm before the next slot.
+  Joints odd{};
+  odd.fill(0.123456);
+  const hal_contract::CommandCounters before = l.session.feedback().counters;
+  l.session.offer({kA, r.seq + 1, odd, l.now, l.now + milliseconds(48)});
+  ASSERT_EQ(l.arm(kB, milliseconds(800)), OpState::kSucceeded);
+  l.run(milliseconds(50));
+  // Discarded by the arm: neither dispatched, nor superseded, nor expired in the box later.
+  EXPECT_EQ(l.session.feedback().counters.expired_before_dispatch, before.expired_before_dispatch);
+  EXPECT_EQ(l.session.feedback().counters.superseded, before.superseded);
+  for (const WireFrame& w : l.wire) {
+    if (const auto p = rpdo1(w)) {
+      EXPECT_NE(p->pdo.target_position, 123456) << "old command sent";
+    }
+  }
+}
+
 TEST(Session, FullLifecycleRaisesNoInhibit) {
   BusLoop l;
   bring_up_and_arm(l, kA);
@@ -807,6 +844,273 @@ TEST(Session, DeactivateConfirmsStopBeforePreop) {
   }
   for (std::size_t i = 0; i < kNodes; ++i) EXPECT_GE(tpdos[i], 5 + 5) << i;
   EXPECT_FALSE(l.session.inhibited());
+}
+
+// ============================ command stream ============================
+
+TEST(Session, DispatchMarginBoundary) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  const Duration margin =
+      canopen_master::testing::plus(canopen_master::testing::plus(kTBus, kW), milliseconds(1));
+  std::uint64_t seq = 0;
+  // Offers right after a SYNC: dispatched at the next slot, whose next SYNC is two T_bus away.
+  const auto offer = [&](double target, MonoTime until) {
+    Joints p{};
+    p.fill(target);
+    l.session.offer({kA, ++seq, p, l.now, until});
+  };
+  const auto sent_at = [&](MonoTime slot, std::int32_t target) {
+    for (const WireFrame& w : l.wire) {
+      if (const auto r1 = rpdo1(w); r1 && w.at == slot && r1->pdo.target_position == target) {
+        return true;
+      }
+    }
+    return false;
+  };
+  // A sent case command closes soon after its actuation and the drive stops, so the cases that
+  // must not be sent come first, each followed by a long-lived command that keeps it running.
+  struct Case {
+    double target;
+    Duration beyond;  // Past next SYNC + W + 1 ms.
+    bool sent;
+  };
+  const std::array<Case, 4> cases{{{0.002, Duration{0}, false},
+                                   {0.003, microseconds(-1), false},
+                                   {0.004, Duration{999}, false},  // Floors to the margin.
+                                   {0.001, microseconds(1), true}}};
+  double keep = 0.0;
+  for (const Case& c : cases) {
+    l.to_next_sync();
+    const MonoTime slot = l.now + kTBus;
+    const MonoTime until = slot + margin + c.beyond;
+    EXPECT_EQ(l.session.can_apply(until, l.now), c.sent) << c.target;
+    offer(c.target, until);
+    l.to_next_sync();
+    ASSERT_EQ(l.now, slot);
+    EXPECT_EQ(sent_at(slot, static_cast<std::int32_t>(std::lround(c.target * 1e6))), c.sent)
+        << c.target;
+    if (!c.sent) {
+      keep += 1e-4;
+      offer(keep, l.now + milliseconds(48));
+    }
+  }
+  EXPECT_EQ(l.session.feedback().counters.expired_before_dispatch, 3U);
+  EXPECT_FALSE(l.session.inhibited()) << "INCONCLUSIVE: the keep-alive commands did not hold";
+}
+
+TEST(Session, CommandValidityNeverExceedsApproval) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.3);
+  std::map<std::int32_t, MonoTime> until_of_target;  // node 0 target -> approval valid_until
+  const MonoTime end = l.now + milliseconds(300);
+  int k = 0;
+  const std::uint64_t start_order = l.wire.back().order;
+  std::optional<MonoTime> last_sync;
+  while (l.now < end) {
+    l.step();
+    if (l.sync_this_step) last_sync = l.now;
+    if (!last_sync || l.now != *last_sync + kTBus - kW) continue;
+    // 24..48 ms: each still open when the next one is actuated, so the drives keep running.
+    r.life = milliseconds(24 + (k++ * 7) % 25);
+    r.offer(l);
+    until_of_target[static_cast<std::int32_t>(std::lround(r.position[0] * 1e6))] =
+        r.last->valid_until;
+  }
+  std::map<std::uint16_t, std::int32_t> target_of_seq;
+  std::size_t checked = 0;
+  for (const WireFrame& w : l.wire) {
+    if (w.order <= start_order) continue;
+    if (const auto a = rpdo1(w); a && a->node == 0)
+      target_of_seq[a->pdo.command_seq] = a->pdo.target_position;
+    if (const auto b = rpdo2(w); b && b->node == 0) {
+      const auto t = target_of_seq.find(b->pdo.command_seq);
+      ASSERT_NE(t, target_of_seq.end());
+      const auto u = until_of_target.find(t->second);
+      if (u == until_of_target.end()) continue;  // A hold command.
+      EXPECT_LE(b->pdo.valid_until_us, wire_us(u->second));
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 10U) << "INCONCLUSIVE: few approved commands dispatched";
+}
+
+TEST(Session, NoNewDeadlineWithoutNewApproval) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.3);
+  stream(l, r, milliseconds(100));
+  const ApprovedCommand last = *r.last;
+  const std::uint64_t stop_order = l.wire.back().order;
+  l.run(milliseconds(100));  // Approvals stop.
+  std::optional<od::Rpdo2> first;
+  std::optional<od::Rpdo1> first1;
+  std::size_t repeats = 0;
+  for (const WireFrame& w : l.wire) {
+    if (w.order <= stop_order) continue;
+    if (const auto a = rpdo1(w); a && a->node == 0) {
+      if (!first1) first1 = a->pdo;
+      EXPECT_EQ(a->pdo.command_seq, first1->command_seq);
+      EXPECT_EQ(a->pdo.target_position, first1->target_position);
+    }
+    if (const auto b = rpdo2(w); b && b->node == 0) {
+      if (!first) first = b->pdo;
+      EXPECT_EQ(b->pdo.command_seq, first->command_seq) << "a new seq without an approval";
+      EXPECT_EQ(b->pdo.valid_until_us, first->valid_until_us) << "a new deadline";
+      // None once less than T_bus remains.
+      EXPECT_GT(static_cast<std::int64_t>(b->pdo.valid_until_us) - wire_us(w.at), kTBus.ns / 1000);
+      ++repeats;
+    }
+  }
+  ASSERT_TRUE(first1) << "INCONCLUSIVE: nothing after the last approval";
+  EXPECT_EQ(first1->target_position,
+            static_cast<std::int32_t>(std::lround(last.position[0] * 1e6)));
+  EXPECT_EQ(first->valid_until_us, wire_us(last.valid_until));
+  EXPECT_GE(repeats, 2U) << "INCONCLUSIVE: no repeat";
+}
+
+TEST(Session, DriveStopsAfterApprovalsStop) {
+  BusLoop l;
+  bring_up_and_arm(l, kA);
+  Ramp r = ramp_from_here(l, kA, 0.3);
+  stream(l, r, milliseconds(100));
+  const MonoTime stopped = l.now;
+  l.run(milliseconds(200));
+  for (std::size_t i = 0; i < kNodes; ++i) {
+    std::optional<drive_core::DriveEvent> qs;
+    for (const DriveRecord& e : l.drive_events) {
+      if (e.node == i && e.event.kind == DriveEventKind::kQuickStop && e.event.at > stopped) {
+        qs = e.event;
+        break;
+      }
+    }
+    ASSERT_TRUE(qs) << "node " << i << " kept going";
+    EXPECT_TRUE(qs->reason == drive_core::QuickStopReason::kExpiry ||
+                qs->reason == drive_core::QuickStopReason::kTimeout)
+        << i;
+    EXPECT_EQ(l.drives[i]->cia402().state(), Cia402State::kQuickStopActive) << i;
+  }
+}
+
+// ============================ feedback join ============================
+
+constexpr Duration kSkew{12'000'000};  // T_bus + W
+
+void feed(FeedbackJoin& j, std::size_t node, std::uint16_t seq, MonoTime sampled, MonoTime rx,
+          std::int32_t position = 0) {
+  j.on_tpdo(node, od::Tpdo1{0x0237, position, seq}, rx);
+  j.on_tpdo(node, od::Tpdo2{0, seq, 0}, rx);
+  j.on_tpdo(node, od::Tpdo3{wire_us(sampled), seq, 0}, rx);
+}
+
+TEST(FeedbackJoin, IncompleteSampleIsNotPublished) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t = kT0;
+  for (std::size_t n = 1; n < kNodes; ++n) feed(j, n, 1, t, t);
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo1{0x0237, 5, 1}, t));
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo2{0, 1, 0}, t));
+  EXPECT_FALSE(j.node(0));
+  EXPECT_FALSE(j.latest()) << "a node with two of three TPDOs";
+  EXPECT_TRUE(j.on_tpdo(0, od::Tpdo3{wire_us(t), 1, 0}, t));
+  EXPECT_TRUE(j.latest());
+}
+
+TEST(FeedbackJoin, StaggeredStartsJoinPerNode) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t = kT0;
+  // Each node started on a different SYNC: its sample_seq differs from the others'.
+  for (std::size_t n = 0; n < kNodes; ++n) {
+    feed(j, n, static_cast<std::uint16_t>(100 + 37 * n), t, t, static_cast<std::int32_t>(n * 1000));
+  }
+  const auto f = j.latest();
+  ASSERT_TRUE(f);
+  for (std::size_t n = 0; n < kNodes; ++n) {
+    EXPECT_DOUBLE_EQ(f->position[n], static_cast<double>(n) * 1e-3);
+    EXPECT_EQ(j.node(n)->sample_seq, 100 + 37 * n);
+  }
+}
+
+TEST(FeedbackJoin, SkewedSnapshotIsStale) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t = kT0 + milliseconds(100);
+  for (std::size_t n = 0; n < kNodes; ++n) feed(j, n, 1, t, t);
+  ASSERT_FALSE(j.latest()->skewed);
+  feed(j, 4, 2, t - kSkew, t);  // Exactly T_bus + W apart: not skewed.
+  ASSERT_TRUE(j.latest());
+  EXPECT_FALSE(j.latest()->skewed);
+  feed(j, 4, 3, t - kSkew - microseconds(1), t);
+  ASSERT_TRUE(j.latest());
+  EXPECT_TRUE(j.latest()->skewed);
+}
+
+TEST(FeedbackJoin, BootUpResetsNodeJoin) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t = kT0;
+  for (std::size_t n = 0; n < kNodes; ++n) feed(j, n, 50, t, t);
+  j.on_tpdo(2, od::Tpdo1{0x0237, 1, 51}, t);  // A partial of the old boot.
+  ASSERT_TRUE(j.latest());
+  j.on_boot(2);
+  EXPECT_FALSE(j.node(2));
+  EXPECT_FALSE(j.latest());
+  // The partial does not complete with the new boot's TPDOs; seqs start over after the boot.
+  EXPECT_FALSE(j.on_tpdo(2, od::Tpdo2{0, 51, 0}, t));
+  EXPECT_FALSE(j.on_tpdo(2, od::Tpdo3{wire_us(t), 51, 0}, t)) << "joined across a boot-up";
+  feed(j, 2, 1, t, t);
+  ASSERT_TRUE(j.node(2));
+  EXPECT_EQ(j.node(2)->sample_seq, 1);
+  EXPECT_TRUE(j.latest());
+}
+
+TEST(FeedbackJoin, ReorderedTpdosJoin) {
+  FeedbackJoin j(kSkew);
+  const MonoTime t = kT0;
+  // Node 0: seq 8 and 9 interleaved and reversed.
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo3{wire_us(t + milliseconds(10)), 9, 4}, t));
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo2{-20, 8, 3}, t));
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo1{0x0237, 900, 9}, t));
+  EXPECT_FALSE(j.on_tpdo(0, od::Tpdo3{wire_us(t), 8, 4}, t));
+  const auto s8 = j.on_tpdo(0, od::Tpdo1{0x0237, 800, 8}, t);
+  ASSERT_TRUE(s8);
+  EXPECT_EQ(s8->position_urad, 800);
+  EXPECT_EQ(s8->velocity_urad_s, -20);
+  EXPECT_EQ(s8->applied_seq, 3);
+  const auto s9 = j.on_tpdo(0, od::Tpdo2{-10, 9, 5}, t + milliseconds(10));
+  ASSERT_TRUE(s9);
+  EXPECT_EQ(s9->position_urad, 900);
+  EXPECT_EQ(s9->velocity_urad_s, -10);
+  EXPECT_EQ(s9->applied_tag, 4);
+  EXPECT_EQ(s9->sampled_at, t + milliseconds(10));
+  EXPECT_EQ(j.node(0)->sample_seq, 9);
+}
+
+TEST(FeedbackJoin, SampleTimeUnwrapsAcrossWrap) {
+  // A host time just past a 2^32 us boundary; the sample was taken just before it.
+  const std::int64_t wrap_us = std::int64_t{1} << 33;  // 2 x 2^32 us
+  const MonoTime rx{(wrap_us + 300) * 1000};
+  const MonoTime sampled{(wrap_us - 700) * 1000};
+  EXPECT_EQ(canopen_master::unwrap_us(static_cast<std::uint32_t>(wrap_us - 700), rx), sampled);
+  EXPECT_GT(wire_us(sampled), wire_us(rx)) << "INCONCLUSIVE: the stamps did not wrap";
+  FeedbackJoin j(kSkew);
+  for (std::size_t n = 0; n < kNodes; ++n) feed(j, n, 1, sampled, rx);
+  ASSERT_TRUE(j.latest());
+  EXPECT_EQ(j.latest()->sampled_at, sampled);
+  // And a stamp slightly ahead of the reference is not taken as 71 minutes old.
+  EXPECT_EQ(canopen_master::unwrap_us(wire_us(rx + microseconds(5)), rx), rx + microseconds(5));
+}
+
+TEST(FeedbackJoin, OldestSourceTimeIsSnapshotTime) {
+  FeedbackJoin j(kSkew);
+  const MonoTime rx = kT0 + milliseconds(500);
+  for (std::size_t n = 0; n < kNodes; ++n) {
+    feed(j, n, 1, rx - milliseconds(static_cast<std::int64_t>(n == 3 ? 9 : 2)), rx);
+  }
+  const auto f = j.latest();
+  ASSERT_TRUE(f);
+  EXPECT_EQ(f->sampled_at, rx - milliseconds(9)) << "the oldest source time, never rx";
+  EXPECT_EQ(f->node_sampled_at[3], rx - milliseconds(9));
+  EXPECT_EQ(f->node_sampled_at[0], rx - milliseconds(2));
+  EXPECT_FALSE(f->skewed);
 }
 
 }  // namespace
