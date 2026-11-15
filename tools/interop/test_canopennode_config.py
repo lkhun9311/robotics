@@ -42,7 +42,7 @@ import pytest
 import canopend as co
 import canopennode_facts as F
 import cia301
-from conftest import DEVICE_IF, ROOT, inconclusive
+from conftest import DEVICE_IF, ROOT
 
 HB = cia301.HEARTBEAT_BASE + F.NODE_ID
 EMCY = F.EMCY_COB_ID_1014
@@ -50,39 +50,6 @@ SDO_TX = cia301.SDO_TX_BASE + F.NODE_ID
 TPDO1 = cia301.TPDO_BASE[1] + F.NODE_ID
 RPDO1 = cia301.RPDO_BASE[1] + F.NODE_ID
 LOOP = F.LOOPBACK_OBJECT
-
-
-@pytest.fixture(scope="session")
-def seed_dir(vcan, tmp_path_factory):
-    assert co.BIN.exists() or shutil.which(str(co.BIN)), \
-        f"NOT_RUN: canopend ({co.BIN}) not found; build the dev image"
-    try:
-        return co.seed_storage(tmp_path_factory.mktemp("canopend_seed"))
-    except (RuntimeError, OSError, co.SdoAbort, co.SdoTimeout) as e:
-        pytest.fail(f"NOT_RUN: cannot seed the canopend storage: {e}", pytrace=False)
-
-
-@pytest.fixture
-def start_canopend(vcan, seed_dir, tmp_path):
-    """start(seeded=True) -> Canopend, ready, with its own copy of the storage."""
-    started, counter = [], [0]
-
-    def start(seeded=True, storage_dir=None):
-        if storage_dir is None:
-            counter[0] += 1
-            storage_dir = tmp_path / f"store{counter[0]}"
-            if seeded:
-                shutil.copytree(seed_dir, storage_dir)
-            else:
-                storage_dir.mkdir()
-        d = co.Canopend(DEVICE_IF, storage_dir)
-        started.append(d)
-        if not co.ready(d):
-            inconclusive(f"canopend did not report running: {d.lines()[-5:]}; exit {d.proc.poll()}")
-        return d
-    yield start
-    for d in started:
-        d.stop()
 
 
 @pytest.fixture

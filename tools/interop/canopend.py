@@ -132,6 +132,8 @@ class Canopend:
         self.storage_dir = pathlib.Path(storage_dir)
         self.log = []  # (t, line)
         self._cond = threading.Condition()
+        self.started_at = time.monotonic()  # Before the process exists.
+        self.exited_at = None  # When wait_exit or stop saw the exit.
         self.proc = subprocess.Popen(
             [str(binary or BIN), ifname, "-i", str(node_id), "-s", f"{self.storage_dir}/"],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -175,6 +177,8 @@ class Canopend:
             rc = self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+        if self.exited_at is None:
+            self.exited_at = time.monotonic()
         self._reader.join(timeout=2)
         return rc
 
@@ -187,13 +191,22 @@ class Canopend:
         if rc is None:
             self.proc.kill()
             rc = self.proc.wait()
+            self.exited_at = time.monotonic()
         self._reader.join(timeout=2)
         return rc
+
+    def record(self):
+        """This process as plain JSON for an observation: node, start and exit instants
+        (CLOCK_MONOTONIC seconds), exit status (None while running) and the timed log."""
+        with self._cond:
+            log = [[t, line] for t, line in self.log]
+        return {"node": self.node_id, "started": self.started_at, "exited": self.exited_at,
+                "exit_code": self.proc.poll(), "log": log}
 
 
 def ready(daemon, timeout=3.0):
     """canopend logs 'communication reset' then 'running ...' once its CAN socket is up."""
-    return daemon.wait_log(F.LOG_RUNNING, timeout) is not None
+    return daemon.wait_log(F.log_running(daemon.node_id), timeout) is not None
 
 
 def seed_storage(directory, binary=None):
