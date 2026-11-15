@@ -24,6 +24,7 @@ NODE = 3  # The node the matrix and the fault rows drive.
 # The pytest test that writes each recording, by row.
 _M = "tools/interop/test_matrix.py::"
 _F = "tools/interop/test_proxy_faults.py::"
+_X = "tools/interop/test_master_faults.py::"
 RECORDING_TESTS = {
     "m1": _M + "test_nmt_states_and_service_gating",
     "m2": _M + "test_first_heartbeat_missing_vs_running_timeout",
@@ -39,6 +40,13 @@ RECORDING_TESTS = {
     "f6": _F + "test_d2h_drop_hides_feedback_not_drive_state",
     "f7": _F + "test_late_rpdo2_is_dropped_not_valid",
     "r1": _F + "test_restart_rejects_captured_old_tag_frames",
+    "x1": _X + "test_short_feedback_outage_latches_inhibit",
+    "x2": _X + "test_dropped_tpdos_make_feedback_stale",
+    "x3": _X + "test_one_node_command_loss_stops_the_group",
+    "x4": _X + "test_heartbeat_loss_raises_fault_without_reset",
+    "x5": _X + "test_sdo_timeout_during_arm_fails_arming",
+    "x6": _X + "test_all_commands_delayed_stop_the_group",
+    "x7": _X + "test_minority_delayed_commands_never_actuate_late",
 }
 PYTEST = "python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q"
 # The vcan tests need the workspace built (run_checks.sh does it) and the links up.

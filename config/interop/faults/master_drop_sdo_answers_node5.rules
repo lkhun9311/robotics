@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master-side fault rows (E3c): the harness holds the arm until 1500 ms; the window opens at 1200 ms,
+# after configure and activate (done within 150 ms) and before the arm's SDO commit.
+# Every SDO answer of node 5 lost on its way to the master.
+d2h 0x585/0x7FF window 1200 5000 drop

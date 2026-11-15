@@ -849,13 +849,13 @@ def device_syncs(obs):
     return [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB)]
 
 
-def drops_by_sync(obs, reason, syncs):
+def drops_by_sync(obs, reason, syncs, node=NODE):
     """{SYNC index: count} of the bank's drop records of `reason` for node 3. A drop record is
     written at the SYNC that ends its interval; it is matched to the nearest SYNC on vcan_device
     (the two clocks are one CLOCK_MONOTONIC; the capture stamps within a millisecond or two of the
     bank, a SYNC period is 10 ms)."""
     out = {}
-    for r in drive_records(obs, "dropped"):
+    for r in drive_records(obs, "dropped", node=node):
         if r["drop"] != reason:
             continue
         t = r["t_ns"] / 1e9

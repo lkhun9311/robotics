@@ -5,7 +5,7 @@
 The notes are where the per-row numbers in README.md come from. Exit 1 if a recording is not
 PASS.
 
-  python3 tools/evidence/rejudge.py [--dir DIR] [m1 ... m6 f1 ... f7 r1]
+  python3 tools/evidence/rejudge.py [--dir DIR] [m1 ... m6 f1 ... f7 r1 x1 ... x7]
 
 --dir judges the observations of another directory instead, e.g. artifacts/interop of a CI
 run's checks-artifacts (the vcan stage records every row it judges there).
@@ -19,11 +19,13 @@ from common import RECORDED, ROOT, load_recording, print_input, recording_comman
 sys.path.insert(0, str(ROOT / "tools" / "interop"))
 
 import judges  # noqa: E402
+import judges_master  # noqa: E402
 
 # How a directory other than the committed recordings is written (CI: artifacts/interop).
 VCAN_STAGE_COMMAND = ("the vcan stage of tools/ci/run_checks.sh (INTEROP_RECORD_DIR="
                       "artifacts/interop); from CI: gh run download <run id> -n checks-artifacts")
-ROWS = ["m1", "m2", "m3", "m4", "m5", "m6", "f1", "f7", "f2", "f3", "f4", "f5", "f6", "r1"]
+ROWS = ["m1", "m2", "m3", "m4", "m5", "m6", "f1", "f7", "f2", "f3", "f4", "f5", "f6", "r1",
+        "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
 
 
 def main(argv=None):
@@ -43,7 +45,8 @@ def main(argv=None):
                   f"judge(), or the row did not run)")
             rc = 1
             continue
-        status, text = judges.verdict(load_recording(row, directory))
+        module = judges_master if row.startswith("x") else judges
+        status, text = module.verdict(load_recording(row, directory))
         print(f"{row.upper()} {status}: {text}")
         rc |= status != "PASS"
     return rc
