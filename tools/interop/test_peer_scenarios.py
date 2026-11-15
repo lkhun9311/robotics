@@ -7,9 +7,11 @@ could not perform a step prints `scenario_failed` and exits 1. These tests check
 scenarios run and do what they claim on the bank side; the CiA 301 verdicts on what the drives
 answered belong to the interop matrix (Task 6).
 """
+import subprocess
+
 import pytest
 
-from conftest import DEVICE_IF, NODES, inconclusive
+from conftest import DEVICE_IF, LELY_PEER_BIN, NODES, inconclusive
 
 NODE = 3
 OPERATIONAL, STOPPED, PRE_OPERATIONAL = 5, 4, 127  # Lely NmtState values in `state` events.
@@ -163,3 +165,15 @@ def test_peer_scenario_cut_off_reports_no_late_result(start_bank, start_proxy, s
     exit_record = proxy.stop()
     if [r["dropped"] for r in exit_record["rules"]] != [1]:
         inconclusive(f"the rule did not drop exactly one request: {exit_record['rules']}")
+
+
+@pytest.mark.parametrize("ms", ("0", "49"))
+def test_peer_rejects_a_validity_outside_the_lease(ms):
+    """--validity-ms is 1 to 48, the drive's lease: a stream valid for longer would be dropped at
+    receipt (D5), one valid for 0 ms never actuates. The peer refuses both before it starts."""
+    assert LELY_PEER_BIN.exists(), f"NOT_RUN: {LELY_PEER_BIN} not built"
+    p = subprocess.run([LELY_PEER_BIN, "--if", "vcan_host", "--dcf", "unused.dcf", "--scenario",
+                        "pdo_stream", "--node", "3", "--count", "1", "--validity-ms", ms],
+                       capture_output=True, text=True, timeout=10)
+    assert p.returncode == 2 and f"--validity-ms: {ms} is outside [1, 48]" in p.stderr, \
+        (p.returncode, p.stderr)
