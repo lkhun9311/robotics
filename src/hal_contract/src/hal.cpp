@@ -188,18 +188,22 @@ Hal::Hal(std::unique_ptr<Backend> backend, rc::Requirements requirements,
 
 Hal::OpSlot& Hal::post(OpKind kind) {
   const std::uint64_t id = next_op_id_++;
-  const std::size_t index = static_cast<std::size_t>(id % kOpSlots);
-  ops_[index] = OpSlot{id, kind, false, false, OpState::kPending, ArmRequest{}};
-  local_results_[index].reset();
-  return ops_[index];
+  OpSlot& slot = ops_[static_cast<std::size_t>(id % kOpSlots)];
+  if (slot.op_id != 0 && !slot.settled) {
+    // Evicted while pending: nobody can observe it any more, so it counts as failed.
+    slot.state = OpState::kFailed;
+    settle(slot);
+  }
+  slot = OpSlot{id, kind, false, false, OpState::kPending, ArmRequest{}, nullptr};
+  return slot;
 }
 
-OpHandle Hal::refuse_locally(OpKind kind, OpResult result) {
+OpHandle Hal::refuse_locally(OpKind kind, const char* reason) {
   OpSlot& slot = post(kind);
   slot.local = true;
   slot.settled = true;
   slot.state = OpState::kFailed;
-  local_results_[static_cast<std::size_t>(slot.op_id % kOpSlots)] = std::move(result);
+  slot.reason = reason;
   return OpHandle{slot.op_id};
 }
 
@@ -211,6 +215,8 @@ Hal::OpSlot* Hal::find(std::uint64_t op_id) {
 
 void Hal::settle(OpSlot& slot) {
   slot.settled = true;
+  // Superseded by a later configure() or deactivate(): its outcome changes nothing here.
+  if (slot.op_id < lifecycle_floor_) return;
   const bool ok = slot.state == OpState::kSucceeded;
   switch (slot.kind) {
     case OpKind::kConfigure:
@@ -257,6 +263,7 @@ OpHandle Hal::configure(rc::MonoTime now) {
   const rc::MonoTime deadline = now + kConfigureTimeout;
   OpSlot& slot = post(OpKind::kConfigure);
   const std::uint64_t id = slot.op_id;
+  lifecycle_floor_ = id;
   backend_->configure(OpTicket{id, deadline}, now);
   refresh();
   return OpHandle{id};
@@ -264,12 +271,15 @@ OpHandle Hal::configure(rc::MonoTime now) {
 
 OpHandle Hal::activate(rc::MonoTime now) {
   refresh();
-  if (!configured_) return refuse_locally(OpKind::kActivate, OpResult{false, "not configured", {}});
+  if (!configured_) return refuse_locally(OpKind::kActivate, "not configured");
   std::vector<rc::Missing> missing =
       rc::missing_capabilities(requirements_, backend_->capabilities());
   if (!missing.empty()) {
+    const OpHandle h = refuse_locally(OpKind::kActivate, "missing capabilities");
     std::string error = describe_missing(missing);
-    return refuse_locally(OpKind::kActivate, OpResult{false, std::move(error), std::move(missing)});
+    gate_result_ = OpResult{false, std::move(error), std::move(missing)};
+    gate_op_id_ = h.op_id;
+    return h;
   }
   const rc::MonoTime deadline = now + kActivateTimeout;
   OpSlot& slot = post(OpKind::kActivate);
@@ -281,9 +291,9 @@ OpHandle Hal::activate(rc::MonoTime now) {
 
 OpHandle Hal::arm(const ArmRequest& request, rc::MonoTime now) {
   refresh();
-  if (!active_) return refuse_locally(OpKind::kArm, OpResult{false, "not active", {}});
+  if (!active_) return refuse_locally(OpKind::kArm, "not active");
   if (request.hold_until <= now || request.hold_until > now + kMaxHold) {
-    return refuse_locally(OpKind::kArm, OpResult{false, "hold_until not in (now, now + 1 s]", {}});
+    return refuse_locally(OpKind::kArm, "hold_until not in (now, now + 1 s]");
   }
   const rc::MonoTime deadline = now + kArmTimeout;
   OpSlot& slot = post(OpKind::kArm);
@@ -309,6 +319,7 @@ OpHandle Hal::deactivate(rc::MonoTime now) {
   const rc::MonoTime deadline = now + kDeactivateTimeout;
   OpSlot& slot = post(OpKind::kDeactivate);
   const std::uint64_t id = slot.op_id;
+  lifecycle_floor_ = id;
   backend_->deactivate(OpTicket{id, deadline}, now);
   refresh();
   return OpHandle{id};
@@ -326,7 +337,10 @@ std::optional<OpResult> Hal::wait(OpHandle handle, rc::Duration timeout) {
   refresh();
   OpSlot* slot = find(handle.op_id);
   if (slot == nullptr) return OpResult{false, "unknown operation", {}};
-  if (slot->local) return local_results_[static_cast<std::size_t>(slot->op_id % kOpSlots)];
+  if (slot->local) {
+    if (slot->op_id == gate_op_id_ && gate_result_.has_value()) return gate_result_;
+    return OpResult{false, slot->reason != nullptr ? slot->reason : "refused", {}};
+  }
   std::optional<OpResult> result = backend_->wait(handle.op_id, timeout);
   refresh();
   return result;

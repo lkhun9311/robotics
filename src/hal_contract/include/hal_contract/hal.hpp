@@ -33,6 +33,16 @@ const char* to_string(ArmState state);
 // Every refusal except kDuplicate resets the guard's reference, so the next send is measured
 // against feedback at rest; a duplicate leaves the device on the original command. A skewed
 // feedback snapshot is passed to the guard as stale (C4).
+//
+// Once active, write(), read(), op_state() and arm() (which Task 9 posts from write()) do not
+// allocate: refusals carry a static reason, and only wait() builds an OpResult. The activation
+// gate's missing list is built in activate(), a lifecycle call.
+//
+// Not thread-safe: the caller serializes every call (lifecycle and control path alike).
+//
+// Ops are kept in a ring of kOpSlots. A slot still pending when the ring reuses it is settled
+// as failed (an evicted arm leaves the Hal kFailed, never kArming). An op posted before the last
+// configure() or deactivate() changes no Hal state when it settles.
 class Hal {
  public:
   // Throws std::invalid_argument on a null backend or a lease outside (0, kMaxLease], and
@@ -77,6 +87,7 @@ class Hal {
     bool settled{false};  // its effect on Hal state has been applied
     OpState state{OpState::kUnknown};
     ArmRequest request{};
+    const char* reason{nullptr};  // a local refusal's reason (static storage)
   };
 
   struct LastSubmitted {
@@ -86,7 +97,7 @@ class Hal {
   };
 
   OpSlot& post(OpKind kind);
-  OpHandle refuse_locally(OpKind kind, OpResult result);
+  OpHandle refuse_locally(OpKind kind, const char* reason);
   OpSlot* find(std::uint64_t op_id);
   void refresh();
   void settle(OpSlot& slot);
@@ -99,8 +110,12 @@ class Hal {
   runtime_core::Duration lease_;
 
   std::array<OpSlot, kOpSlots> ops_{};
-  std::array<std::optional<OpResult>, kOpSlots> local_results_{};
   std::uint64_t next_op_id_{1};
+  // Ops with a smaller id were posted before the last configure() or deactivate().
+  std::uint64_t lifecycle_floor_{0};
+  // The last activation refused by the capability gate, with its missing list.
+  std::uint64_t gate_op_id_{0};
+  std::optional<OpResult> gate_result_{};
 
   bool configured_{false};
   bool active_{false};

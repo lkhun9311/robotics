@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <limits>
-#include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -24,7 +27,43 @@ using S = rc::Support;
 using V = hc::HalVerdict;
 using rc::milliseconds;
 
+// Counts heap allocations and frees while armed, so a test can prove a path allocation-free.
+// Replacing the global operators applies to the whole test binary; counting is off by default.
 namespace {
+std::atomic<bool> g_counting{false};
+std::atomic<int> g_allocations{0};
+std::atomic<int> g_frees{0};
+
+void* counted_alloc(std::size_t n) {
+  if (g_counting.load()) ++g_allocations;
+  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+  throw std::bad_alloc();
+}
+void counted_free(void* p) noexcept {
+  if (p != nullptr && g_counting.load()) ++g_frees;
+  std::free(p);
+}
+}  // namespace
+
+void* operator new(std::size_t n) { return counted_alloc(n); }
+void* operator new[](std::size_t n) { return counted_alloc(n); }
+void operator delete(void* p) noexcept { counted_free(p); }
+void operator delete[](void* p) noexcept { counted_free(p); }
+void operator delete(void* p, std::size_t /*n*/) noexcept { counted_free(p); }
+void operator delete[](void* p, std::size_t /*n*/) noexcept { counted_free(p); }
+
+namespace {
+
+// Runs `f` and returns how many allocations plus frees it made.
+template <class Fn>
+int heap_events(Fn&& f) {
+  g_allocations = 0;
+  g_frees = 0;
+  g_counting = true;
+  f();
+  g_counting = false;
+  return g_allocations.load() + g_frees.load();
+}
 
 // Everything the spy saw, kept outside the backend so the test can read it after the Hal took
 // ownership of the backend.
@@ -35,8 +74,17 @@ struct SpyLog {
   int activate_calls{0};
   int arm_calls{0};
   int on_error_calls{0};
-  std::vector<hc::ApprovedCommand> submits;
-  std::map<std::uint64_t, hc::OpState> ops;
+  // Fixed storage, so the spy itself never allocates inside a counted region.
+  std::vector<hc::ApprovedCommand> submits = [] {
+    std::vector<hc::ApprovedCommand> v;
+    v.reserve(256);
+    return v;
+  }();
+  std::array<hc::OpState, 256> ops = [] {
+    std::array<hc::OpState, 256> a{};
+    a.fill(hc::OpState::kUnknown);
+    return a;
+  }();
   hc::Feedback feedback{};
   bool inhibited{false};
   rc::Duration apply_margin{};  // can_apply: valid_until > now + apply_margin
@@ -69,8 +117,7 @@ class SpyBackend final : public hc::Backend {
     log_->inhibited = true;
   }
   hc::OpState op_state(std::uint64_t id) const override {
-    const auto it = log_->ops.find(id);
-    return it == log_->ops.end() ? hc::OpState::kUnknown : it->second;
+    return id < log_->ops.size() ? log_->ops[static_cast<std::size_t>(id)] : hc::OpState::kUnknown;
   }
   std::optional<hc::OpResult> wait(std::uint64_t id, rc::Duration /*timeout*/) override {
     const hc::OpState s = op_state(id);
@@ -84,7 +131,8 @@ class SpyBackend final : public hc::Backend {
 
  private:
   void post(const hc::OpTicket& t) {
-    log_->ops[t.op_id] = log_->complete_ops ? hc::OpState::kSucceeded : hc::OpState::kPending;
+    log_->ops.at(static_cast<std::size_t>(t.op_id)) =
+        log_->complete_ops ? hc::OpState::kSucceeded : hc::OpState::kPending;
   }
   SpyLog* log_;
 };
@@ -209,7 +257,7 @@ TEST(Hal, AdoptsIdentityOnlyWhenArmCompletes) {
   EXPECT_EQ(r.write(&p, setpoint(kId, 1)), V::kNotArmed);
   EXPECT_TRUE(r.log.submits.empty());
 
-  r.log.ops[h.op_id] = hc::OpState::kSucceeded;
+  r.log.ops.at(static_cast<std::size_t>(h.op_id)) = hc::OpState::kSucceeded;
   EXPECT_EQ(r.hal.op_state(h), hc::OpState::kSucceeded);
   EXPECT_EQ(r.hal.arm_state(), hc::ArmState::kArmed);
   ASSERT_TRUE(r.hal.adopted().has_value());
@@ -220,7 +268,7 @@ TEST(Hal, AdoptsIdentityOnlyWhenArmCompletes) {
   // A failed re-arm leaves nothing adopted.
   const hc::AuthorityId b{rc::ManagerInstance{1}, rc::SessionId{1}, rc::Generation{2}};
   const hc::OpHandle h2 = r.hal.arm(hc::ArmRequest{b, r.now + milliseconds(500), 10}, r.now);
-  r.log.ops[h2.op_id] = hc::OpState::kFailed;
+  r.log.ops.at(static_cast<std::size_t>(h2.op_id)) = hc::OpState::kFailed;
   EXPECT_EQ(r.hal.arm_state(), hc::ArmState::kFailed);
   EXPECT_FALSE(r.hal.adopted().has_value());
   EXPECT_EQ(r.write(&p, setpoint(kId, 2)), V::kNotArmed);
@@ -510,4 +558,83 @@ TEST(Hal, ArmRefusedOutsideHoldWindowOrWhenInactive) {
             hc::OpState::kSucceeded);
   EXPECT_EQ(r.log.arm_calls, 1);
   EXPECT_EQ(r.hal.op_state(hc::OpHandle{999}), hc::OpState::kUnknown);
+}
+
+TEST(Hal, ArmAndWritePathsDoNotAllocate) {
+  // Task 9 posts arm ops from write(): every arm outcome and every write must stay off the heap
+  // once active, including the ring of op slots wrapping over earlier refusals.
+  Rig r;
+  r.bring_up();
+  const rc::MotionPermit p = permit_for(kId, r.now + milliseconds(500));
+  int events = heap_events([&] { (void)r.write(&p, setpoint(kId, 1)); });
+  EXPECT_EQ(events, 0) << "write(kSend)";
+  events = heap_events([&] { (void)r.write(&p, setpoint(kId, 1)); });
+  EXPECT_EQ(events, 0) << "write(kDuplicate)";
+  events = heap_events([&] { (void)r.write(nullptr, setpoint(kId, 2)); });
+  EXPECT_EQ(events, 0) << "write(kNoPermit)";
+  events = heap_events([&] { (void)r.hal.read(r.now); });
+  EXPECT_EQ(events, 0) << "read";
+  for (int i = 0; i < 3 * static_cast<int>(hc::Hal::kOpSlots); ++i) {
+    events = heap_events([&] {
+      // Refused: hold_until outside (now, now + 1 s].
+      const hc::OpHandle bad = r.hal.arm(hc::ArmRequest{kId, r.now, 1}, r.now);
+      (void)r.hal.op_state(bad);
+      // Accepted: posted to the backend, then settled.
+      const hc::OpHandle good = r.hal.arm(hc::ArmRequest{kId, r.now + milliseconds(500), 2}, r.now);
+      (void)r.hal.op_state(good);
+    });
+    EXPECT_EQ(events, 0) << "arm round " << i;
+  }
+  EXPECT_EQ(r.hal.arm_state(), hc::ArmState::kArmed);
+  // The refusal still reads back with its reason on the lifecycle path.
+  const hc::OpHandle bad = r.hal.arm(hc::ArmRequest{kId, r.now, 1}, r.now);
+  const std::optional<hc::OpResult> res = r.hal.wait(bad, milliseconds(0));
+  ASSERT_TRUE(res.has_value());
+  EXPECT_FALSE(res->ok);
+  EXPECT_NE(res->error.find("hold_until"), std::string::npos) << res->error;
+}
+
+TEST(Hal, EvictedPendingArmSettlesAsFailed) {
+  Rig r;
+  ASSERT_EQ(r.hal.op_state(r.hal.configure(r.now)), hc::OpState::kSucceeded);
+  ASSERT_EQ(r.hal.op_state(r.hal.activate(r.now)), hc::OpState::kSucceeded);
+  r.log.complete_ops = false;
+  const hc::OpHandle h = r.hal.arm(hc::ArmRequest{kId, r.now + milliseconds(500), 3}, r.now);
+  ASSERT_EQ(r.hal.arm_state(), hc::ArmState::kArming);
+  // Enough local refusals to reuse every ring slot, the pending arm's included.
+  for (std::size_t i = 0; i < hc::Hal::kOpSlots; ++i) {
+    (void)r.hal.arm(hc::ArmRequest{kId, r.now, 1}, r.now);
+  }
+  EXPECT_EQ(r.hal.op_state(h), hc::OpState::kUnknown);
+  EXPECT_EQ(r.hal.arm_state(), hc::ArmState::kFailed) << "an evicted arm must not stay arming";
+  // The backend finishing it later adopts nothing.
+  r.log.ops.at(static_cast<std::size_t>(h.op_id)) = hc::OpState::kSucceeded;
+  EXPECT_FALSE(r.hal.adopted().has_value());
+  r.fresh_read();
+  const rc::MotionPermit p = permit_for(kId, r.now + milliseconds(200));
+  EXPECT_EQ(r.write(&p, setpoint(kId, 1)), V::kNotArmed);
+}
+
+TEST(Hal, OpsPostedBeforeDeactivateOrConfigureDoNotSettle) {
+  Rig r;
+  ASSERT_EQ(r.hal.op_state(r.hal.configure(r.now)), hc::OpState::kSucceeded);
+  r.log.complete_ops = false;
+  const hc::OpHandle act = r.hal.activate(r.now);
+  (void)r.hal.deactivate(r.now);
+  r.log.ops.at(static_cast<std::size_t>(act.op_id)) = hc::OpState::kSucceeded;  // late success
+  r.fresh_read();
+  const rc::MotionPermit p = permit_for(kId, r.now + milliseconds(200));
+  EXPECT_EQ(r.write(&p, setpoint(kId, 1)), V::kHardwareNotActive);
+  EXPECT_EQ(r.hal.op_state(r.hal.arm(hc::ArmRequest{kId, r.now + milliseconds(500), 4}, r.now)),
+            hc::OpState::kFailed);
+
+  // The same after a new configure: an activate posted before it settles nothing.
+  r.log.complete_ops = true;
+  ASSERT_EQ(r.hal.op_state(r.hal.configure(r.now)), hc::OpState::kSucceeded);
+  r.log.complete_ops = false;
+  const hc::OpHandle act2 = r.hal.activate(r.now);
+  const hc::OpHandle cfg = r.hal.configure(r.now);
+  r.log.ops.at(static_cast<std::size_t>(act2.op_id)) = hc::OpState::kSucceeded;
+  r.log.ops.at(static_cast<std::size_t>(cfg.op_id)) = hc::OpState::kSucceeded;
+  EXPECT_EQ(r.write(&p, setpoint(kId, 1)), V::kHardwareNotActive);
 }
