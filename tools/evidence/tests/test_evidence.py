@@ -10,6 +10,7 @@ import common
 import fault_timeline
 import frame_trace
 import bandwidth_table
+import master_frame_trace
 import matrix_table
 import pick_place_replay
 import proxy_cost_histogram
@@ -29,6 +30,21 @@ def test_frame_trace_refuses_a_seq_without_one_actuation():
     obs["bank"] = [r for r in obs["bank"] if not (r.get("kind") == "actuated" and r["seq"] == 21)]
     with pytest.raises(SystemExit, match="0 actuation records"):
         frame_trace.build(obs, 21, "m5")
+
+
+def test_master_frame_trace_is_regenerated_from_the_x1_recording():
+    text = master_frame_trace.build(common.load_recording("x1"), 10, "x1")
+    assert text == (MEDIA / "e3c-master-frame-trace.txt").read_text(encoding="utf-8")
+
+
+def test_master_frame_trace_refuses_an_arm_hold_or_a_seq_not_actuated_on_six_nodes():
+    obs = common.load_recording("x1")
+    with pytest.raises(SystemExit, match="arm hold"):
+        master_frame_trace.build(obs, 1, "x1")
+    obs["bank"] = [r for r in obs["bank"]
+                   if not (r.get("kind") == "actuated" and r["seq"] == 10 and r["node"] == 4)]
+    with pytest.raises(SystemExit, match=r"actuation records of nodes \[1, 2, 3, 5, 6\]"):
+        master_frame_trace.build(obs, 10, "x1")
 
 
 def stream_t0(obs):
@@ -257,6 +273,26 @@ def test_matrix_table_never_reports_a_missing_or_failed_row_as_pass(tmp_path):
     assert rows["M1"] == "PASS"
     assert rows["M3"] == "FAIL"
     assert rows["M2"] == "MISSING" and rows["R1"] == "MISSING"
+
+
+def test_matrix_table_e3c_lists_x1_to_x7_and_n1_to_n7_from_their_tests(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite name="pytest" tests="3">'
+        '<testcase classname="tools.interop.test_master_faults" '
+        'name="test_short_feedback_outage_latches_inhibit"/>'
+        '<testcase classname="tools.interop.test_master_matrix" '
+        'name="test_master_refuses_activation_on_canopennode"><failure message="N7"/></testcase>'
+        '<testcase classname="tools.interop.test_matrix" '
+        'name="test_nmt_states_and_service_gating"/></testsuite></testsuites>')
+    rows = {line.split("|")[1].strip(): line.split("|")[4].strip()
+            for line in matrix_table.table(junit, "e3c").splitlines()[2:]}
+    assert list(rows) == [f"X{i}" for i in range(1, 8)] + [f"N{i}" for i in range(1, 8)]
+    assert rows["X1"] == "PASS" and rows["N7"] == "FAIL"
+    assert all(v == "MISSING" for k, v in rows.items() if k not in ("X1", "N7"))
+    # Every E3c row names a test that records a row of the same name.
+    for row, _, module, test in matrix_table.E3C_ROWS:
+        assert common.RECORDING_TESTS[row.lower()] == f"tools/interop/{module}.py::{test}"
 
 
 def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys):
