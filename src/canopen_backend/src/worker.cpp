@@ -225,8 +225,12 @@ struct WorkerState {
 
   void publish_end(std::uint64_t id, std::uint64_t state, const char* error) {
     OpSlot& slot = table[id % kOpTable];
-    slot.error.store(error, std::memory_order_release);
     std::uint64_t expected = (id << 2U) | kStatePending;
+    // A slot already given to a newer op keeps that op's error.
+    // Only this thread ends ops, so a newer op posted after this check stores its own error
+    // again when it ends, before its word says so.
+    if (slot.word.load(std::memory_order_acquire) != expected) return;
+    slot.error.store(error, std::memory_order_release);
     slot.word.compare_exchange_strong(expected, (id << 2U) | state, std::memory_order_acq_rel);
   }
 
