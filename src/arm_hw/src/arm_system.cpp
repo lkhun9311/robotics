@@ -608,6 +608,10 @@ rc::MonoTime to_time(std::uint64_t ns) {
 hi::return_type ArmSystem::write(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
   if (!hal_ || !bound_) return hi::return_type::OK;
   const rc::MonoTime t = now();
+  // A logic-time backend catches up to t first.
+  // Otherwise a step dated before t, replayed by the next read(), would take this write's command
+  // before it was approved.
+  advance(t);
 
   // arm: a new non-zero request id posts one arm op, never waited for.
   std::array<std::uint64_t, kArmFields.size()> a{};

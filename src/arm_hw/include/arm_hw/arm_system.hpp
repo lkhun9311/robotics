@@ -115,7 +115,7 @@ class ArmSystem : public hardware_interface::SystemInterface {
   virtual bool stop_backend(runtime_core::Duration /*timeout*/) { return true; }
   // The Hal (and with it the backend) is about to be destroyed.
   virtual void forget_backend() {}
-  // Time passes to `now` before the Hal reads (DirectArmHw steps its backend).
+  // Time passes to `now` before the Hal reads or writes (DirectArmHw steps its backend).
   virtual void advance(runtime_core::MonoTime /*now*/) {}
   // Blocks up to `timeout` for a lifecycle op; std::nullopt while it is still pending.
   virtual std::optional<hal_contract::OpResult> await(hal_contract::OpHandle op,
