@@ -74,10 +74,12 @@ RUN apt-get update \
 # tarballs are GitHub archives of a commit (no git clone), pinned by SHA-256; the CANopenNode
 # tree goes where the CANopenLinux Makefile expects its submodule. The build differs from the
 # shipped one in docker/canopennode_build.h only (no self-start to Operational, log to stderr).
-ARG CANOPENLINUX_COMMIT=87cfbac52bc67809be20ca03ef3533293e7f7c3a
-ARG CANOPENLINUX_SHA256=309935638147a097967c61f35583d65ffe3947e76006b02f9921b0dd82563426
-ARG CANOPENNODE_COMMIT=76b43c88ef6d5490cb2f1518e10646e8dcb45c76
-ARG CANOPENNODE_SHA256=e124ae6402c259a796f4ae5fb539351f3c5d3904f8870eb9205773285dcc4358
+# CANopenLinux has no release after v4.0, whose submodule predates the sync RPDO fix (#320).
+# So CANopenNode is the tag v4.1, built by the CANopenLinux master head, not by its submodule.
+ARG CANOPENLINUX_COMMIT=f1348d4072cdabea4c3435a13c721ac29ab4cc91
+ARG CANOPENLINUX_SHA256=806b1b2e22561a537a1e40df16f1c0aae84d5e0c1128e93bfcde197774bcb640
+ARG CANOPENNODE_COMMIT=ac2140717c3c498d9b0351bce052bab630a74764
+ARG CANOPENNODE_SHA256=9bba0fe0c8def3d99aa5457e79a429b058e6495271043b5755cbefad4d44ccb7
 COPY docker/canopennode_build.h /opt/canopennode/canopennode_build.h
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \

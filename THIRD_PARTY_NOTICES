@@ -10,10 +10,10 @@ MuJoCo Menagerie, universal_robots_ur5e
 
 CANopenNode (CANopenLinux canopend), the independent CANopen slave of the interop tests
   License: Apache-2.0
-  Source: https://github.com/CANopenNode/CANopenLinux, commit 87cfbac52bc67809be20ca03ef3533293e7f7c3a (tag v4.0)
-    archive sha256 309935638147a097967c61f35583d65ffe3947e76006b02f9921b0dd82563426
-  Source: https://github.com/CANopenNode/CANopenNode, commit 76b43c88ef6d5490cb2f1518e10646e8dcb45c76 (the CANopenLinux submodule)
-    archive sha256 e124ae6402c259a796f4ae5fb539351f3c5d3904f8870eb9205773285dcc4358
+  Source: https://github.com/CANopenNode/CANopenLinux, commit f1348d4072cdabea4c3435a13c721ac29ab4cc91 (master, 2025-08-18; no release after v4.0)
+    archive sha256 806b1b2e22561a537a1e40df16f1c0aae84d5e0c1128e93bfcde197774bcb640
+  Source: https://github.com/CANopenNode/CANopenNode, commit ac2140717c3c498d9b0351bce052bab630a74764 (tag v4.1)
+    archive sha256 9bba0fe0c8def3d99aa5457e79a429b058e6495271043b5755cbefad4d44ccb7
   License text: /opt/canopennode/LICENSE.CANopenLinux and LICENSE.CANopenNode in the dev image
   Not stored in this repository: fetched by commit at image build, checksum-verified and built
   into the dev image only (docker/canopennode_build.h is the one change to the shipped build).

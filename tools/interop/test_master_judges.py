@@ -353,37 +353,34 @@ def test_n5_type_255_recording_fails():
     """The committed negative fixture: RPDO1 applied on reception."""
     obs = load("n5_type255")
     assert obs["harness"]["rpdo_type"] == 255
-    expect(obs, "FAIL", "visible by SDO before the first SYNC after its RPDO")
+    expect(obs, "FAIL", "visible by SDO before the SYNC after its RPDO")
 
 
-def test_n5_one_more_sync_before_the_rpdos_flips_the_prediction_fails():
-    """A SYNC canopend saw that the judge did not count would flip every prediction: the
-    applying SYNC is predicted from the pinned parity, not accepted wherever it falls."""
-    obs = load("N5")
-    boot = [t for t, c, d in obs["device"] if c == HB and d == "00"][0]
-    add_frame(obs, "device", boot + 0.0005, cia301.SYNC_COB, b"")
-    expect(obs, "FAIL", "the pinned parity predicts")
-
-
-def test_n5_value_visible_before_its_applying_sync_fails():
+def test_n5_value_visible_before_its_sync_fails():
     obs = load("N5")
     value = obs["harness"]["values"][2]
-    a = value["attempts"][-1]
-    sdo_event(obs, a["before"])["value"] = F.LOOPBACK_DISABLED | value["k"]
+    sdo_event(obs, value["before"])["value"] = F.LOOPBACK_DISABLED | value["k"]
     expect(obs, "FAIL", "visible by SDO before")
 
 
-def test_n5_applied_at_the_wrong_sync_fails():
+def test_n5_value_not_applied_at_the_sync_after_its_rpdo_fails():
+    """A value left for a later SYNC fails: every SYNC applies the RPDO received before it."""
     obs = load("N5")
-    value = next(v for v in obs["harness"]["values"] if len(v["attempts"]) == 2)
-    sdo_event(obs, value["attempts"][0]["after"])["value"] = F.LOOPBACK_DISABLED | value["k"]
-    expect(obs, "FAIL", "the pinned parity predicts")
+    value = obs["harness"]["values"][5]
+    sdo_event(obs, value["after"])["value"] = sdo_event(obs, value["before"])["value"]
+    expect(obs, "FAIL", "every SYNC applies the RPDO before it")
+
+
+def test_n5_pinned_build_without_every_sync_applying_is_inconclusive(monkeypatch):
+    """N5 expects every SYNC to apply the RPDO only while the pinned fact says so."""
+    monkeypatch.setattr(F, "SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC", (1, 1, 3, 3, 5, 5, 7, 7))
+    expect(load("N5"), "INCONCLUSIVE", "does not apply an RPDO at every SYNC")
 
 
 def test_n5_tpdo_without_the_applied_value_fails():
     obs = load("N5")
     value = obs["harness"]["values"][0]
-    step = value["attempts"][-1]["step"]
+    step = value["step"]
     t = cmd_t(obs, step)
     edit_frames(obs, "host", TPDO1, t, t + 0.05, F.LOOPBACK_DISABLED.to_bytes(4, "little").hex())
     expect(obs, "FAIL", "TPDO1 after SYNC")
@@ -392,7 +389,7 @@ def test_n5_tpdo_without_the_applied_value_fails():
 def test_n5_master_decoding_the_old_value_fails():
     obs = load("N5")
     value = obs["harness"]["values"][3]
-    t = cmd_t(obs, value["attempts"][-1]["step"])
+    t = cmd_t(obs, value["step"])
     pdo = [e for e in cli(obs, "pdo") if e["t"] > t][0]
     pdo["fields"][0]["raw"] = F.LOOPBACK_DISABLED
     expect(obs, "FAIL", "our master decoded")
@@ -402,13 +399,6 @@ def test_n5_fewer_than_twenty_values_fails():
     obs = load("N5")
     obs["harness"]["values"] = obs["harness"]["values"][:19]
     expect(obs, "FAIL", "at least 20 needed")
-
-
-def test_n5_sync_during_canopend_start_is_inconclusive():
-    obs = load("N5")
-    boot = [t for t, c, d in obs["device"] if c == HB and d == "00"][0]
-    add_frame(obs, "device", boot - 0.0001, cia301.SYNC_COB, b"")
-    expect(obs, "INCONCLUSIVE", "a SYNC while canopend initialised")
 
 
 # ---- N6 ----
@@ -785,15 +775,8 @@ def test_n5_tpdo_after_a_pad_sync_fails():
 def test_n5_value_changed_before_the_sync_fails():
     obs = load("N5")
     value = obs["harness"]["values"][4]
-    sdo_event(obs, value["attempts"][-1]["before"])["value"] = F.LOOPBACK_DISABLED | 0x7FF
+    sdo_event(obs, value["before"])["value"] = F.LOOPBACK_DISABLED | 0x7FF
     expect(obs, "FAIL", "before the SYNC, the old value")
-
-
-def test_n5_harness_giving_up_early_fails():
-    obs = load("N5")
-    value = next(v for v in obs["harness"]["values"] if len(v["attempts"]) == 2)
-    value["attempts"] = value["attempts"][:1]
-    expect(obs, "FAIL", "was never applied")
 
 
 def test_n7_probe_abort_missing_on_the_wire_fails():
@@ -817,8 +800,7 @@ def _drop_sync_event(o):
 
 
 def _n5_rpdo_after_the_read(o):
-    a = o["harness"]["values"][0]["attempts"][0]
-    t = cmd_t(o, a["step"]) - 0.0001
+    t = cmd_t(o, o["harness"]["values"][0]["step"]) - 0.0001
     rpdo = cia301.RPDO_BASE[1] + NODE
     first = [f for f in o["device"] if f[1] == rpdo][0]
     first[0] = t

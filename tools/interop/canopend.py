@@ -2,8 +2,8 @@
 """Start/stop helper for the pinned CANopenNode slave (`canopend`, node 2 by default), and the
 small raw-CAN client the calibration tests talk to it with.
 
-The binary is built into the dev image by docker/Dockerfile (CANopenLinux 87cfbac, CANopenNode
-76b43c8; docker/canopennode_build.h: no self-start to Operational, log to stderr). Nothing
+The binary is built into the dev image by docker/Dockerfile (CANopenLinux f1348d4, CANopenNode
+v4.1; docker/canopennode_build.h: no self-start to Operational, log to stderr). Nothing
 here imports our C++ master or tools/od: expectations come from cia301.py.
 
 Storage. canopend keeps its persistent object-dictionary values in `<prefix>od_comm.persist`

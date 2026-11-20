@@ -9,10 +9,10 @@ such: the matrix row that depends on it is redesigned around it, not weakened.
 """
 
 # docker/Dockerfile ARGs (test_canopend_build_matches_the_pinned_commits).
-CANOPENLINUX_COMMIT = "87cfbac52bc67809be20ca03ef3533293e7f7c3a"  # tag v4.0
-CANOPENNODE_COMMIT = "76b43c88ef6d5490cb2f1518e10646e8dcb45c76"  # CANopenLinux submodule
-CANOPENLINUX_SHA256 = "309935638147a097967c61f35583d65ffe3947e76006b02f9921b0dd82563426"
-CANOPENNODE_SHA256 = "e124ae6402c259a796f4ae5fb539351f3c5d3904f8870eb9205773285dcc4358"
+CANOPENLINUX_COMMIT = "f1348d4072cdabea4c3435a13c721ac29ab4cc91"  # master, no release after v4.0
+CANOPENNODE_COMMIT = "ac2140717c3c498d9b0351bce052bab630a74764"  # tag v4.1, has PR #320 (84487ef)
+CANOPENLINUX_SHA256 = "806b1b2e22561a537a1e40df16f1c0aae84d5e0c1128e93bfcde197774bcb640"
+CANOPENNODE_SHA256 = "9bba0fe0c8def3d99aa5457e79a429b058e6495271043b5755cbefad4d44ccb7"
 
 NODE_ID = 2
 
@@ -60,7 +60,8 @@ DEFAULT_PDO_TYPE = 0xFE
 # The communication (0x1400/0x1800) and mapping (0x1600/0x1A00) objects are writable by SDO
 # with the CiA 301 dynamic mapping sequence. Mappable objects (index, sub, size in bytes): the
 # example OD has no application objects; this is all there is.
-RPDO_MAPPABLE = ((0x1001, 0, 1), (0x1280, 1, 4), (0x1280, 2, 4))
+# The error register 0x1001 is TPDO-mappable only (example OD attribute ODA_TPDO since v4.1).
+RPDO_MAPPABLE = ((0x1280, 1, 4), (0x1280, 2, 4))
 TPDO_MAPPABLE = ((0x1001, 0, 1), (0x1200, 1, 4), (0x1200, 2, 4), (0x1280, 1, 4), (0x1280, 2, 4))
 # 0x1280:01 and :02 (SDO client COB-IDs, 32 bit, read/write) are the loopback pair: they accept
 # a value only with bits 11..29 zero (else SDO abort 0x06090030; an RPDO carrying such a value is
@@ -68,6 +69,11 @@ TPDO_MAPPABLE = ((0x1001, 0, 1), (0x1200, 1, 4), (0x1200, 2, 4), (0x1280, 1, 4),
 LOOPBACK_OBJECT = (0x1280, 1)
 LOOPBACK_SECOND = (0x1280, 2)
 LOOPBACK_INVALID_MASK = 0x3FFFF800
+# A valid COB-ID (bit 31 clear) is refused with 0x06090030 when its CAN-ID is restricted by CiA 301.
+# CANopenNode 76b43c8 accepted LOOPBACK_RESTRICTED_VALID; v4.1 refuses it (CO_IS_RESTRICTED_CAN_ID).
+# An RPDO mapping 16 bits of 0x1280:01 zero-fills bit 31, so it can only carry a free CAN-ID.
+LOOPBACK_RESTRICTED_VALID = 0x00000123
+LOOPBACK_FREE_VALID = 0x00000234
 LOOPBACK_DISABLED = 0x80000000
 
 # --- PDO-length EMCY (test_canopend_pdo_length_emcy) -------------------------------------------
@@ -95,8 +101,8 @@ RESET_NODE_EXIT_CODE = 0
 # A type 0-240 RPDO is applied at a SYNC, not on reception; a type 255 RPDO on reception. A TPDO
 # of type 1 sent at that same SYNC already carries the applied value (RPDO is processed first);
 # pinned: the TPDO bytes after each SYNC equal the sequence below.
-# DEFECT of the pinned commit (CANopenNode 76b43c8, 301/CO_PDO.c line 811: CANrxData[0][bufNo]
-# where CANrxData[bufNo][0] is meant): the two RX buffers alternate with each SYNC, and on every
-# second SYNC the RPDO is read from buffer 0 shifted by one byte, so the value is not applied.
-# From a fresh start, RPDO value v then SYNC, repeated for v = 1..8, leaves 1, 1, 3, 3, 5, 5, 7, 7.
-SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC = (1, 1, 3, 3, 5, 5, 7, 7)
+# From a fresh start, RPDO value v then SYNC, repeated for v = 1..8, leaves 1, 2, ..., 8.
+# Every SYNC applies the RPDO received before it.
+# CANopenNode 76b43c8 (CANopenLinux v4.0) read every second one from the wrong RX buffer and
+# left 1, 1, 3, 3, 5, 5, 7, 7 (301/CO_PDO.c:811, fixed by PR #320, 84487ef, in v4.1).
+SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC = (1, 2, 3, 4, 5, 6, 7, 8)

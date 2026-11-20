@@ -2,7 +2,7 @@
 """The E3 exit interop matrix, our master against an independent slave (E3c Task 8, rows N1-N7).
 
 canopen_master_cli on vcan_host <-> bus_fault_proxy (no rules) <-> vcan_device <-> canopend
-(CANopenNode 76b43c8, node 2; N7 runs six of them as nodes 1-6). The tests drive our master
+(CANopenNode v4.1, node 2; N7 runs six of them as nodes 1-6). The tests drive our master
 through its console (stdin) or its activate_hal scenario, capture both links, keep canopend's log
 (its own report of its NMT state) and judge the observation with judges.judge_n1..n7. The
 expectations come from cia301.py and canopennode_facts.py (calibrated by
@@ -36,10 +36,10 @@ LOOP = F.LOOPBACK_OBJECT
 TPDO_MAP = [(LOOP[0], 1, 32), (LOOP[0], 2, 32)]  # N1, N4: 8 bytes.
 RPDO_MAP = [(LOOP[0], 1, 16)]  # N4, N6: 2 bytes.
 N4_VALUES = (F.LOOPBACK_DISABLED | 0x123, F.LOOPBACK_DISABLED | 0x456)
-N4_RPDO = bytes.fromhex("2301")  # 0x1280:01 = 0x00000123 (bits 11..29 clear: accepted).
+# 0x1280:01 = 0x00000234: bits 11..29 clear and a free CAN-ID, so canopend accepts it.
+N4_RPDO = F.LOOPBACK_FREE_VALID.to_bytes(2, "little")
 N5_VALUES = 24
-N5_PAD_EVERY = 3  # A SYNC with no RPDO before value i when i % 3 == 1: both parities occur.
-N5_MAX_ATTEMPTS = 3  # The judge fails a value not applied by the second SYNC; the third shows it.
+N5_PAD_EVERY = 3  # A SYNC with no RPDO pending before value i when i % 3 == 1.
 
 
 class Rig:
@@ -342,11 +342,9 @@ def test_master_emcy_reception(rig):
 
 
 def run_sync_order(r, rpdo_type):
-    """N5: SYNC paused before canopend starts (so every SYNC canopend saw is on vcan_device after
-    its boot-up); RPDO1 and TPDO1 map 0x1280:01 (32 bits), TPDO1 type 1; Operational. For each
-    value k: an optional SYNC with nothing pending, then RPDO1 = 0x80000000 | k, an SDO upload of
-    0x1280:01, one SYNC step, the upload again; until k is visible the RPDO1 is sent again
-    before the next step (a synchronous RPDO is written every cycle)."""
+    """N5: SYNC paused before canopend starts; RPDO1 and TPDO1 map 0x1280:01 (32 bits), TPDO1
+    type 1; Operational. For each value k: an optional SYNC with nothing pending, then RPDO1 =
+    0x80000000 | k, an SDO upload of 0x1280:01, one SYNC step, the upload again."""
     cli = r.console()
     n = r.run("sync pause")
     r.canopend()
@@ -364,16 +362,13 @@ def run_sync_order(r, rpdo_type):
     for i in range(N5_VALUES):
         k = 0x100 + 7 * i
         value = F.LOOPBACK_DISABLED | k
-        entry = {"k": k, "pads": [], "attempts": []}
+        entry = {"k": k, "pads": []}
         if i % N5_PAD_EVERY == 1:
             entry["pads"].append(r.step_sync())
-        for _ in range(N5_MAX_ATTEMPTS):
-            a = {"rpdo": r.run(f"send {RPDO1:#x} {value.to_bytes(4, 'little').hex()}"),
-                 "before": r.read(*LOOP)[0], "step": r.step_sync()}
-            a["after"], seen = r.read(*LOOP)
-            entry["attempts"].append(a)
-            if seen == value:
-                break
+        entry["rpdo"] = r.run(f"send {RPDO1:#x} {value.to_bytes(4, 'little').hex()}")
+        entry["before"] = r.read(*LOOP)[0]
+        entry["step"] = r.step_sync()
+        entry["after"] = r.read(*LOOP)[0]
         h["values"].append(entry)
     assert cli.proc.poll() is None
     return r.end()
@@ -381,13 +376,11 @@ def run_sync_order(r, rpdo_type):
 
 def test_master_sync_application_and_sampling_order(rig):
     """N5. With a synchronous RPDO1 (type 0) our master pauses SYNC and steps it one at a time:
-    k is never visible before the first SYNC after its RPDO; it is visible by SDO and in the
-    TPDO1 our master decodes after the SYNC that applied it; that SYNC is the first or the second
-    after the RPDO, as the pinned CANopenNode 76b43c8 parity defect (CO_PDO.c:811, Task 0's
-    SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC) predicts from the SYNCs canopend has seen since boot-up, so
-    a wrong SYNC still fails; 24 values, both parities. Then the control: the same sequence with
-    RPDO1 type 255 (applied on reception) must FAIL the same judge (recorded as n5_type255, the
-    committed negative fixture)."""
+    k is never visible before the SYNC after its RPDO, and it is visible after that SYNC, by SDO
+    and in the TPDO1 our master decodes (every SYNC applies the RPDO before it, Task 0's
+    SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC); 24 values, every third after a SYNC with nothing pending.
+    Then the control: the same sequence with RPDO1 type 255 (applied on reception) must FAIL the
+    same judge (recorded as n5_type255, the committed negative fixture)."""
     judge(run_sync_order(rig("N5"), 0))
 
 
