@@ -1414,14 +1414,16 @@ def cn_line(obs, n):
 
 
 def cn_complete(obs, scenario="console", ending="scenario_done"):
-    """The CLI ran to its scenario's end, the proxy forwarded with no rules and complete counts,
-    both captures saw traffic, and every canopend reported running. Inconclusive otherwise."""
+    """The CLI ran to its scenario's end (`ending`, or one of a tuple of them), the proxy forwarded
+    with no rules and complete counts, both captures saw traffic, and every canopend reported
+    running. Inconclusive otherwise."""
     cli = obs.get("cli") or []
     need(len(cn_events(obs, "start")) == 1, "canopen_master_cli printed no single start line")
     need(cli and cli[-1].get("event") == "exit", f"the CLI's last line is not exit: {cli[-1:]}")
     need(cli[-1].get("event_overflows") == 0, f"the CLI lost events: {cli[-1]}")
-    end = cn_events(obs, ending, scenario=scenario)
-    need(len(end) == 1, f"no single {ending} for {scenario}: "
+    endings = (ending,) if isinstance(ending, str) else ending
+    end = [e for name in endings for e in cn_events(obs, name, scenario=scenario)]
+    need(len(end) == 1, f"no single {' or '.join(endings)} for {scenario}: "
                         f"{cn_events(obs, 'scenario_failed') or cn_events(obs, 'scenario_done')}")
     proxy = obs.get("proxy_exit") or {}
     need(proxy.get("event") == "exit" and proxy.get("trace_overflow") == 0,
@@ -2046,13 +2048,17 @@ def judge_n5(obs):
 # ---- N7: capability refusal ----
 
 def judge_n7(obs):
-    end = cn_complete(obs, "activate_hal", "scenario_failed")
+    # Either end is a completed run: a master that activates anyway ends with scenario_done and
+    # exit 0, which is a FAIL of the row, not a missing precondition.
+    end = cn_complete(obs, "activate_hal", ("scenario_failed", "scenario_done"))
     daemons = obs["canopend"]
     need(sorted(d["node"] for d in daemons) == list(CN_SESSION_NODES),
          f"canopend nodes {[d['node'] for d in daemons]}")
     for node in CN_SESSION_NODES:
         need(cn_states(obs, "host", node), f"no heartbeat from node {node}")
-    need(obs["harness"]["cli_rc"] == 1, f"the CLI exited {obs['harness']['cli_rc']}")
+    check(end["event"] == "scenario_failed", f"activate_hal ended with {end['event']}: the "
+                                             f"master activated")
+    check(obs["harness"]["cli_rc"] == 1, f"the CLI exited {obs['harness']['cli_rc']}")
     steps = {e["line"]: e["n"] for e in cn_events(obs, "cmd")}
     need(set(steps) == {"configure", "activate"}, f"scenario steps {steps}")
     configure = cn_events(obs, "cmd_done", n=steps["configure"])
