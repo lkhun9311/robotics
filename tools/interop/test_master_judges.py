@@ -620,6 +620,47 @@ def test_n1_no_client_abort_after_the_stopped_timeout_fails():
     expect(obs, "FAIL", "our master's abort after the timeout")
 
 
+def stopped_abort(obs, side):
+    """The one client abort frame of the Stopped SDO line on `side` (moved by the tests below)."""
+    n = [n for state, n in obs["harness"]["sdo"] if state == cia301.STATE_STOPPED][0]
+    rx = cia301.SDO_RX_BASE + NODE
+    t0 = cmd_t(obs, n)
+    found = [f for f in obs[side] if f[1] == rx and t0 < f[0] < t0 + 1.0 and
+             f[2].startswith("80")]
+    assert len(found) == 1, found
+    return n, found[0]
+
+
+def test_n1_abort_forwarded_after_cmd_done_passes():
+    # CI run 44720552690: the proxy forwarded the abort to vcan_device 177 us after vcan_host,
+    # which was after the CLI printed cmd_done.
+    obs = load("N1")
+    n, host = stopped_abort(obs, "host")
+    _, device = stopped_abort(obs, "device")
+    device[0] = host[0] + 177e-6
+    obs["device"].sort(key=lambda f: f[0])
+    assert device[0] > cmd_t(obs, n, "cmd_done")
+    expect(obs, "PASS", "")
+
+
+def test_n1_abort_after_the_stopped_window_fails():
+    obs = load("N1")
+    _, device = stopped_abort(obs, "device")
+    pre_operational = judges.cn_nmt_commands(obs)[2][1]
+    device[0] = pre_operational + 0.001
+    obs["device"].sort(key=lambda f: f[0])
+    expect(obs, "FAIL", "our master's abort after the timeout")
+
+
+def test_n1_host_abort_after_cmd_done_fails():
+    # The worker sends the abort before it forwards cmd_done, so on vcan_host it must precede it.
+    obs = load("N1")
+    n, host = stopped_abort(obs, "host")
+    host[0] = cmd_t(obs, n, "cmd_done") + 0.001
+    obs["host"].sort(key=lambda f: f[0])
+    expect(obs, "FAIL", "on vcan_host before cmd_done")
+
+
 def test_n1_pdo_decoded_with_no_frame_in_stopped_fails():
     obs = load("N1")
     t = nmt_device_time(obs, 1) + 0.1
