@@ -407,6 +407,8 @@ class VdriveSession {
   std::optional<Op> op_;
   runtime_core::MonoTime op_started_{};
   std::uint64_t epoch_{1};
+  // While set, the error a latch gives the op it ends (static storage); else the generic one.
+  const char* latch_reason_{nullptr};
   std::array<OpRecord, kOpRing> ops_{};
   std::size_t ops_next_{0};
   int probe_left_{0};
@@ -420,8 +422,6 @@ class VdriveSession {
   std::optional<hal_contract::AuthorityId> armed_id_;
 
   bool inhibited_{false};
-  // While set, the error a latch gives the op it ends (static storage); else the generic one.
-  const char* latch_reason_{nullptr};
   hal_contract::FaultSet faults_{};
   hal_contract::CommandCounters counters_{};
   SessionCounts counts_{};

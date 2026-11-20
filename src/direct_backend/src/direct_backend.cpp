@@ -365,6 +365,7 @@ void DirectBackend::progress_deactivate(rc::MonoTime t) {
 
 // A failed or timed-out op latches the group inhibit (C17).
 void DirectBackend::fail_deactivate(const char* error, rc::MonoTime t) {
+  if (!deactivate_op_.has_value()) return;
   set_op(deactivate_op_->op_id, hc::OpState::kFailed, error);
   deactivate_op_.reset();
   latch(t);
