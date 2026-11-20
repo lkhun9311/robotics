@@ -377,7 +377,7 @@ void VdriveSession::on_sample(std::size_t i, const NodeSample& s, MonoTime now) 
     check_state(i, state, now);
   }
   latch_reason_ = nullptr;
-  stop_on_sample(i, s);
+  stop_on_sample(i, s, now);
   if (op_is(OpKind::kActivate)) {
     if (s.sampled_at >= op_started_ && state == DriveState::kSwitchedOn) {
       n.activated = true;
@@ -1250,7 +1250,7 @@ void VdriveSession::begin_stop(std::size_t i, std::uint8_t accept, MonoTime now)
   }
 }
 
-void VdriveSession::stop_on_sample(std::size_t i, const NodeSample& s) {
+void VdriveSession::stop_on_sample(std::size_t i, const NodeSample& s, MonoTime now) {
   NodeState& n = nodes_[i];
   StopTrack& t = n.stop;
   if (t.status != StopStatus::kStopping || t.mode != StopMode::kSamples) {
@@ -1262,6 +1262,9 @@ void VdriveSession::stop_on_sample(std::size_t i, const NodeSample& s) {
   }
   if (s.sampled_at < t.started) {
     return;  // Not fresh: sampled before the stop began.
+  }
+  if (now - s.sampled_at > config_.max_feedback_age) {
+    return;  // Not fresh: older than max_feedback_age when it arrived (C18).
   }
   const DriveState state = decode_statusword(s.statusword);
   if (!at_rest(s.velocity_urad_s) || (t.accept & bit(state)) == 0U) {

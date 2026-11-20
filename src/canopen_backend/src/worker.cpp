@@ -77,6 +77,10 @@ class Ring {
     tail_.store(tail + 1, std::memory_order_release);
     return true;
   }
+  // On the producer's thread, a false result holds until its next push: only it adds.
+  bool full() const {
+    return tail_.load(std::memory_order_relaxed) - head_.load(std::memory_order_acquire) == N;
+  }
   bool pop(T& out) {
     const std::size_t head = head_.load(std::memory_order_relaxed);
     if (head == tail_.load(std::memory_order_acquire)) {
@@ -618,7 +622,7 @@ int make_eventfd() {
 Worker::Worker(CanopenConfig config, std::unique_ptr<Transport> transport, WorkerOptions options)
     : state_(std::make_shared<WorkerState>()), local_(std::make_unique<Local>()) {
   std::unique_ptr<Transport> t = require(std::move(transport));
-  state_->options = options;
+  state_->options = std::move(options);
   state_->transport = t.get();
   state_->backend = std::make_unique<CanopenBackend>(config, std::move(t));
   state_->event_fd = make_eventfd();
@@ -632,7 +636,7 @@ Worker::Worker(CanopenConfig config, std::unique_ptr<Transport> transport, Worke
 Worker::Worker(cm::MasterConfig config, std::unique_ptr<Transport> transport, WorkerOptions options)
     : state_(std::make_shared<WorkerState>()), local_(std::make_unique<Local>()) {
   state_->bare_transport = require(std::move(transport));
-  state_->options = options;
+  state_->options = std::move(options);
   state_->transport = state_->bare_transport.get();
   state_->master = std::make_unique<cm::Master>(std::move(config));
   state_->event_fd = make_eventfd();
@@ -721,15 +725,19 @@ void Worker::post(std::uint8_t kind, const hc::OpTicket& ticket, const hc::ArmRe
     local_->refuse(ticket.op_id, kMasterOnly);
     return;
   }
-  OpSlot& slot = state_->table[ticket.op_id % kOpTable];
-  const std::uint64_t before = slot.word.load(std::memory_order_acquire);
-  slot.word.store((ticket.op_id << 2U) | kStatePending, std::memory_order_release);
-  if (!state_->ops.push(PostedOp{static_cast<OpKind>(kind), ticket, request})) {
-    slot.word.store(before, std::memory_order_release);
+  // A post the queue cannot take is refused before it touches the op table.
+  // The slot may still hold an older op in flight, whose end only the worker publishes.
+  if (state_->ops.full()) {
     ++local_->ops_refused;
     local_->refuse(ticket.op_id, kQueueFull);
+    if (state_->options.on_post_refused) state_->options.on_post_refused(ticket.op_id);
     return;
   }
+  // The pending word is stored before the push, so the worker never ends an op it cannot see.
+  // The push cannot fail: this thread is the only producer, and the queue had room above.
+  state_->table[ticket.op_id % kOpTable].word.store((ticket.op_id << 2U) | kStatePending,
+                                                    std::memory_order_release);
+  state_->ops.push(PostedOp{static_cast<OpKind>(kind), ticket, request});
   wake();
 }
 

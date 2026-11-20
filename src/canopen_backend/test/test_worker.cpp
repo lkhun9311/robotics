@@ -468,6 +468,72 @@ TEST(Worker, StaleOpKeepsTheNewerOpsError) {
       << "op 17 reports the error of the op it superseded: " << r->error;
 }
 
+// A post refused for a full op queue never touches a live table slot.
+// Op 17 shares op 1's slot; it is refused while op 1 is still in flight, and op 1 ends inside
+// that refusal (the seam runs a wake there).
+// Op 1's end must still be published, never overwritten by the refused post.
+TEST(Worker, RefusedPostKeepsAnOlderOpsEnd) {
+  rc::MonoTime now = kT0;
+  FakeBus bus([&] { return now; });  // Nobody answers: a configure stays in its probe.
+  cb::Worker* worker = nullptr;
+  int refused = 0;
+  cb::WorkerOptions options;
+  options.on_post_refused = [&](std::uint64_t op_id) {
+    ++refused;
+    EXPECT_EQ(op_id, 17U);
+    now = now + kW;
+    worker->run_once(now);
+  };
+  cb::Worker w(config(), bus.transport(), options);
+  worker = &w;
+  w.configure(hc::OpTicket{1, now + hc::kConfigureTimeout}, now);
+  now = now + kW;
+  w.run_once(now);
+  ASSERT_EQ(w.op_state(1), hc::OpState::kPending) << "INCONCLUSIVE: op 1 is not in flight";
+  // Ops 2 to 9 fill the queue; the next wake starts each, and the first supersedes op 1.
+  for (std::uint64_t id = 2; id < 2 + cb::kOpQueueCapacity; ++id) {
+    w.activate(hc::OpTicket{id, now + hc::kActivateTimeout}, now);
+  }
+  w.activate(hc::OpTicket{17, now + hc::kActivateTimeout}, now);
+  ASSERT_EQ(refused, 1) << "INCONCLUSIVE: op 17 was not refused for a full queue";
+  EXPECT_EQ(w.op_state(17), hc::OpState::kFailed);
+  for (int i = 0; i < 3; ++i) {
+    now = now + kW;
+    w.run_once(now);
+  }
+  EXPECT_EQ(w.op_state(1), hc::OpState::kFailed)
+      << "op 1 ended inside the refused post, and its end was lost";
+  const std::optional<hc::OpResult> r = w.wait(1, rc::Duration{});
+  ASSERT_TRUE(r.has_value()) << "op 1 reads as still pending";
+  EXPECT_FALSE(r->ok);
+}
+
+// The same refusal with the worker thread running, for the thread sanitizer: the control thread
+// checks the queue's room while the worker drains it.
+// The worker is held inside the wake that started op 1 until the queue is full and op 17 refused.
+TEST(Worker, RefusedPostWithTheWorkerThread) {
+  FakeBus bus(system_now);
+  cb::Worker w(config(), bus.transport());
+  std::string error;
+  ASSERT_TRUE(w.start(&error)) << error;
+  bus.close_gate(is_sdo_request);
+  w.configure(hc::OpTicket{1, system_now() + hc::kConfigureTimeout}, system_now());
+  ASSERT_TRUE(bus.wait_blocked(std::chrono::milliseconds(1000)))
+      << "INCONCLUSIVE: configure sent no probe";
+  for (std::uint64_t id = 2; id < 2 + cb::kOpQueueCapacity; ++id) {
+    w.activate(hc::OpTicket{id, system_now() + hc::kActivateTimeout}, system_now());
+  }
+  w.activate(hc::OpTicket{17, system_now() + hc::kActivateTimeout}, system_now());
+  ASSERT_EQ(w.stats().ops_refused, 1U) << "INCONCLUSIVE: op 17 was not refused";
+  EXPECT_EQ(w.op_state(17), hc::OpState::kFailed);
+  bus.open_gate();
+  ASSERT_TRUE(
+      w.await([&] { return w.op_state(1) != hc::OpState::kPending; }, rc::milliseconds(1000)))
+      << "op 1 never ended after a refused post shared its slot";
+  EXPECT_EQ(w.op_state(1), hc::OpState::kFailed);
+  EXPECT_TRUE(w.shutdown(rc::milliseconds(1000)));
+}
+
 TEST(Worker, SocketWriteErrorsAreCounted) {
   rc::MonoTime now = kT0;
   FakeBus bus([&] { return now; });

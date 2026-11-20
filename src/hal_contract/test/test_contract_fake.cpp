@@ -122,6 +122,12 @@ class ReferenceBackend final : public hc::Backend {
     ops_[t.op_id] = active_ ? hc::OpState::kSucceeded : hc::OpState::kFailed;
   }
   void arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime now) override {
+    // A newer arm supersedes a pending one: a started one fails and latches (C17).
+    // One not yet started is replaced without a latch.
+    if (arm_op_.has_value() && arm_op_->disabled) {
+      fail_arm();
+      latch(now);
+    }
     if (arm_op_.has_value()) ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
     arm_op_.reset();
     supersede_deactivate(now);
@@ -425,17 +431,17 @@ class ReferenceBackend final : public hc::Backend {
     for (std::size_t i = 0; i < hc::kJoints; ++i) {
       Node& n = nodes_[i];
       if (n.stop != hc::StopStatus::kStopping) continue;
-      if (fresh_) {
-        n.rest_samples =
-            std::abs(latest_->velocity[i]) < ht::kRestVelocity ? n.rest_samples + 1 : 0;
-        if (n.rest_samples >= kConfirmSamples) {
-          n.stop = hc::StopStatus::kConfirmed;
-          continue;
-        }
-      }
+      // The deadline first: a sample that arrives past it confirms nothing, as on CANopen.
       if (t - n.stop_from >= ht::kStopConfirmDeadline) {
         n.stop = hc::StopStatus::kUnconfirmed;
         faults_.set(hc::Fault::kStopUnconfirmed);
+        continue;
+      }
+      // A sample older than max_feedback_age when it arrives is not fresh (C18).
+      if (fresh_ && t - latest_->at <= kMaxFeedbackAge) {
+        n.rest_samples =
+            std::abs(latest_->velocity[i]) < ht::kRestVelocity ? n.rest_samples + 1 : 0;
+        if (n.rest_samples >= kConfirmSamples) n.stop = hc::StopStatus::kConfirmed;
       }
     }
   }

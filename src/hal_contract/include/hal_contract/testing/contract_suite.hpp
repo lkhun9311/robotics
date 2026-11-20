@@ -996,6 +996,92 @@ TYPED_TEST_P(Contract, DeactivateOverPendingDeactivate) {
   EXPECT_NE(this->hal_.op_state(second), OpState::kPending) << "the second deactivate never ended";
 }
 
+// C18: only fresh samples confirm a stop, and a sample older than max_feedback_age when it
+// arrives is not fresh, even if it was taken after the stop began.
+// With every sample delayed past that age, a deactivate's stops stay unconfirmed and it fails.
+TYPED_TEST_P(Contract, DelayedFeedbackConfirmsNoStop) {
+  constexpr runtime_core::Duration kDelay = plus(kMaxFeedbackAge, kMaxFeedbackAge);
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  this->step(kPeriod);
+  this->fx_.delay_feedback(kDelay);
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  this->feedback_ = this->hal_.read(this->now());
+
+  for (const TraceSample& s : this->trace_) {
+    if (s.at < deactivated) continue;
+    for (std::size_t i = 0; i < kJoints; ++i) {
+      EXPECT_NE(s.feedback.stop[i], StopStatus::kConfirmed)
+          << "axis " << i << " confirmed from samples " << this->ms(kDelay) << " ms old at +"
+          << this->ms(s.at - deactivated) << " ms";
+    }
+  }
+  EXPECT_EQ(this->hal_.op_state(d), OpState::kFailed)
+      << "a deactivate succeeded on samples older than max_feedback_age";
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kStopUnconfirmed));
+}
+
+// An arm posted while an earlier arm is still disabling the moving axes supersedes it.
+// The earlier arm has started, so it fails as a failed op and latches the inhibit (C17), as on
+// CANopen; the newer arm then fails on the latched inhibit.
+// No axis commits or enables either identity after the newer arm.
+TYPED_TEST_P(Contract, ArmOverStartedArmLatches) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the re-arm";
+  const AuthorityId second{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const OpHandle first = this->hal_.arm(
+      ArmRequest{second, this->now() + runtime_core::milliseconds(500), 80}, this->now());
+  this->step(kPeriod);
+  ASSERT_EQ(this->hal_.op_state(first), OpState::kPending)
+      << "INCONCLUSIVE: the first re-arm was no longer pending";
+  const AuthorityId third{this->kA.manager, this->kA.session, runtime_core::Generation{3}};
+  const runtime_core::MonoTime superseded = this->now();
+  const OpHandle newer = this->hal_.arm(
+      ArmRequest{third, this->now() + runtime_core::milliseconds(500), 81}, this->now());
+  this->settle(newer, kArmTimeout);
+  this->settle(first, kArmTimeout);
+  this->feedback_ = this->hal_.read(this->now());
+
+  EXPECT_EQ(this->hal_.op_state(first), OpState::kFailed) << "a superseded arm did not fail";
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited))
+      << "a started arm was superseded without latching the inhibit";
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kArmFailed));
+  EXPECT_EQ(this->hal_.op_state(newer), OpState::kFailed) << "an arm ran over a latched inhibit";
+  EXPECT_NE(this->hal_.arm_state(), ArmState::kArmed);
+  for (const DeviceEvent& e : this->events_) {
+    if (e.at < superseded) continue;
+    EXPECT_NE(e.kind, DeviceEventKind::kCommitted) << "node " << e.node << " committed";
+    EXPECT_NE(e.kind, DeviceEventKind::kEnabled) << "node " << e.node << " enabled";
+  }
+}
+
+// An arm posted in the same instant as an earlier one, before the earlier one has started,
+// replaces it: the earlier arm fails without a latch, as an op superseded before it started on
+// CANopen, and the newer arm completes.
+TYPED_TEST_P(Contract, ArmOverUnstartedArmReplacesIt) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const AuthorityId second{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const AuthorityId third{this->kA.manager, this->kA.session, runtime_core::Generation{3}};
+  const OpHandle first = this->hal_.arm(
+      ArmRequest{second, this->now() + runtime_core::milliseconds(500), 90}, this->now());
+  const OpHandle newer = this->hal_.arm(
+      ArmRequest{third, this->now() + runtime_core::milliseconds(500), 91}, this->now());
+  this->settle(newer, kArmTimeout);
+  this->feedback_ = this->hal_.read(this->now());
+
+  EXPECT_EQ(this->hal_.op_state(first), OpState::kFailed) << "a replaced arm did not fail";
+  EXPECT_EQ(this->hal_.op_state(newer), OpState::kSucceeded) << "the newer arm did not complete";
+  EXPECT_FALSE(this->feedback_.faults.has(Fault::kInhibited))
+      << "an arm replaced before it started latched the inhibit";
+  EXPECT_EQ(this->hal_.adopted(), std::optional<AuthorityId>{third});
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -1006,6 +1092,7 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
                             ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm,
                             ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults,
-                            DeactivateOverPendingDeactivate);
+                            DeactivateOverPendingDeactivate, DelayedFeedbackConfirmsNoStop,
+                            ArmOverStartedArmLatches, ArmOverUnstartedArmReplacesIt);
 
 }  // namespace hal_contract::testing

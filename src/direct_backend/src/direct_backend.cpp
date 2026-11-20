@@ -160,8 +160,16 @@ void DirectBackend::activate(const hc::OpTicket& t, rc::MonoTime now) {
 
 void DirectBackend::arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime now) {
   now_ = now;
-  if (arm_op_.has_value()) {  // a newer arm supersedes a pending one; that is not an arm fault
-    set_op(arm_op_->ticket.op_id, hc::OpState::kFailed, "superseded by a newer arm");
+  // A newer arm supersedes a pending one, as on CANopen.
+  // Once the pending arm has started (its first step ran), it fails as a failed op and latches
+  // the inhibit (C17), so this arm fails too.
+  // Before that it is replaced without a latch, as an op superseded before it started.
+  if (arm_op_.has_value() && arm_op_->disabled) {
+    fail_arm("superseded by a newer op");
+    latch(now);
+  } else if (arm_op_.has_value()) {
+    set_op(arm_op_->ticket.op_id, hc::OpState::kFailed,
+           "superseded by a newer op before it started");
     arm_op_.reset();
   }
   supersede_deactivate(now);
@@ -268,8 +276,10 @@ void DirectBackend::step(rc::MonoTime t) {
   take_command(t);
   local_stops(t);
   move(t);
-  sample(t);
+  // The deadline is judged before this step's samples are counted, as on CANopen.
+  // A step that jumps past the deadline cannot confirm a stop with the samples it delivers.
   judge_stops(t);
+  sample(t);
   check_feedback_age(t);
 }
 
@@ -484,18 +494,22 @@ void DirectBackend::sample(rc::MonoTime t) {
     latest_ = ring_[ring_head_];
     ring_head_ = (ring_head_ + 1) % kSampleRing;
     --ring_size_;
-    count_rest(*latest_);
+    count_rest(*latest_, t);
   }
 }
 
 // C18: a stop is confirmed after 5 distinct fresh samples, each at rest with the joint in a mode
 // its track accepts (Quick Stop Active for an inhibit, Switched On for a deactivate).
 // A sample is counted once, when it arrives, and only if it was taken after the stop began.
+// A sample older than max_feedback_age when it arrives is not fresh and is not counted.
 // A drive that reports itself unavailable confirms nothing (judge_stops).
-void DirectBackend::count_rest(const Sample& s) {
+void DirectBackend::count_rest(const Sample& s, rc::MonoTime t) {
+  const bool stale = t - s.at > max_feedback_age_;
   for (std::size_t i = 0; i < hc::kJoints; ++i) {
     Node& n = nodes_[i];
-    if (n.stop != hc::StopStatus::kStopping || !n.drive_available || s.at < n.stop_from) continue;
+    if (n.stop != hc::StopStatus::kStopping || !n.drive_available || s.at < n.stop_from || stale) {
+      continue;
+    }
     n.rest_samples = (accepts(n.accept, s.mode[i]) && std::abs(s.velocity[i]) < kRestVelocity)
                          ? n.rest_samples + 1
                          : 0;
