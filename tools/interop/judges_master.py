@@ -125,27 +125,54 @@ def replay(obs, rules, tol):
     return matched
 
 
+def acted_at_edge(obs, rule, frame):
+    """Whether the proxy acted on a frame that lies within EDGE_S of its rule's window edge, read
+    from the capture the rule forwards to: vcan_device for h2d, vcan_host for d2h.
+    A drop rule acted when no copy of the frame arrived within HELD_SLACK_S of it.
+    A delay rule acted when a copy arrived one delay later and none within HELD_SLACK_S of it.
+    Anything else is a frame the wire cannot place, and the verdict is not reached."""
+    t, cob, data = frame
+    side = "device" if rule["dir"] == "h2d" else "host"
+    slack = judges.HELD_SLACK_S
+    hops = [c[0] - t for c in judges.frames(obs, side, cob, t) if c[2] == data]
+    on_time = any(hop <= slack for hop in hops)
+    where = (f"{rule['dir']} edge frame {cob:#x} {data.hex()} {t - epoch(obs):.6f} s after the "
+             f"proxy's start")
+    if rule["action"] == "drop":
+        return not on_time
+    need(rule["action"] == "delay", f"{where}: a {rule['action']} rule is not resolved at the edge")
+    delay_s = int(rule["args"][0]) / 1000
+    held = any(abs(hop - delay_s) <= slack for hop in hops)
+    copies = "both on time and one delay later" if held else "neither on time nor one delay later"
+    need(on_time != held, f"{where}: its copies on vcan_{side} are {copies}")
+    return held
+
+
 def fault_rules(obs):
-    """(rules, the frames each acted on): the proxy's own match counts must lie between what the
-    captures select with the window shrunk and grown by EDGE_S (the two clocks differ by a few
-    hundred microseconds), every rule must have matched something, and the proxy must have
-    sent everything."""
+    """(rules, the frames each acted on): a frame inside the window shrunk by EDGE_S is certain
+    (the proxy's clock and the captures' differ by a few hundred microseconds); a frame within
+    EDGE_S of an edge is resolved from the capture of its rule's destination (acted_at_edge).
+    The proxy's own match counts must equal what that resolves, every rule must have matched
+    something, and the proxy must have sent everything."""
     # Every x row starts here, before complete(), and a stall that overloads the bank also delays
     # the proxy, so the overload is named before the rule checks.
     bank_not_overloaded(obs.get("bank") or [])
     rules = parse_rules(obs["harness"]["rules"])
     need(rules and all(r["from_s"] is not None for r in rules), "a rule without a window")
-    inner, outer = replay(obs, rules, EDGE_S), replay(obs, rules, -EDGE_S)
+    t0 = epoch(obs)
+    outer = replay(obs, rules, -EDGE_S)
+    matched = [[f for f in frames if r["from_s"] + EDGE_S <= f[0] - t0 < r["to_s"] - EDGE_S or
+                acted_at_edge(obs, r, f)]
+               for r, frames in zip(rules, outer)]
     got = [r["matched"] for r in obs["proxy_exit"]["rules"]]
-    need(len(got) == len(rules) and all(len(a) <= g <= len(b)
-                                        for a, g, b in zip(inner, got, outer)),
-         f"proxy rule match counts {got}, the captures of the source interfaces select "
-         f"{[len(a) for a in inner]}..{[len(b) for b in outer]}")
+    need(len(got) == len(rules) and all(g == len(m) for g, m in zip(got, matched)),
+         f"proxy rule match counts {got}, the captures select {[len(m) for m in matched]} "
+         f"(the frames within {EDGE_S * 1000:.0f} ms of a window edge resolved from the "
+         f"destination capture)")
     need(all(got), f"the window matched nothing: proxy match counts {got}")
     need(obs["proxy_exit"].get("send_failed") == {"h2d": 0, "d2h": 0},
          f"the proxy failed to send: {obs['proxy_exit'].get('send_failed')}")
-    # The frames the proxy acted on, inside both bounds: certain.
-    return rules, inner
+    return rules, matched
 
 
 # ---- preconditions shared by every row ----
