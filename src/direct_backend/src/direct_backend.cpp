@@ -201,7 +201,8 @@ void DirectBackend::deactivate(const hc::OpTicket& t, rc::MonoTime now) {
 void DirectBackend::on_error_nonblocking() { latch(now_); }
 
 void DirectBackend::submit(const hc::ApprovedCommand& command, rc::MonoTime /*now*/) {
-  if (dropping_ || !armed_.has_value() || inhibited_) return;
+  // Only the armed identity reaches the joints, as on CANopen (defence in depth behind the Hal).
+  if (dropping_ || !armed_.has_value() || !(command.id == *armed_) || inhibited_) return;
   for (const double x : command.position) {
     if (!std::isfinite(x)) return;
   }

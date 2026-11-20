@@ -294,3 +294,26 @@ TEST(DirectBackend, DeactivateWithAnUnavailableDriveFails) {
   EXPECT_TRUE(fb.faults.has(hc::Fault::kStopUnconfirmed));
   EXPECT_TRUE(rig.backend.inhibited());
 }
+
+// A command whose identity is not the armed one never reaches the joints.
+// The Hal checks identity first; the backend checks it again, as the CANopen session does.
+TEST(DirectBackend, SubmitDropsACommandOfAnotherIdentity) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  hc::ApprovedCommand c{};
+  c.id = hc::AuthorityId{rc::ManagerInstance{2}, kId.session, kId.generation};
+  c.source_seq = 1;
+  c.position = rig.backend.joint_position();
+  c.position[0] += 0.5;
+  c.approved_at = rig.t;
+  c.valid_until = rig.t + rc::milliseconds(40);
+  rig.backend.submit(c, rig.t);
+  rig.events.clear();
+  for (int i = 0; i < 5; ++i) rig.tick();
+  for (const db::Event& e : rig.events) {
+    if (e.kind == db::EventKind::kActuated) {
+      EXPECT_FALSE(e.source_seq.has_value()) << "a command of another identity was applied";
+    }
+  }
+  EXPECT_EQ(rig.backend.poll(rig.t).group_applied_source_seq, std::nullopt);
+}
