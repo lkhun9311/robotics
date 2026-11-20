@@ -1366,6 +1366,8 @@ CN_HB_LOST_S = (0.250, 0.400)  # N2: C7's 250 ms consumer time, observed by 400 
 CN_MIN_HEARTBEATS = 3
 CN_MIN_TPDOS = 5
 CN_N5_VALUES = 20
+# The N5 harness steps a SYNC with no RPDO pending before every third of its 24 values.
+CN_N5_PADS = 8
 # N7: what generic_cia402_profile() lacks against --required all, as the activation gate names it
 # (runtime_core test_capability.cpp: three unsupported, two unknown).
 CN_GENERIC_MISSING = {"DEVICE_SIDE_EXPIRY": "UNSUPPORTED", "EXECUTION_GENERATION": "UNSUPPORTED",
@@ -2033,6 +2035,7 @@ def judge_n5(obs):
         old = value
     check(len(values) >= CN_N5_VALUES, f"{len(values)} values; at least {CN_N5_VALUES} needed")
     pads = sum(len(v["pads"]) for v in values)
+    check(pads >= CN_N5_PADS, f"{pads} SYNCs with no RPDO pending; at least {CN_N5_PADS} needed")
     return [f"{len(values)} values (RPDO type {h['rpdo_type']}), each invisible by SDO before the "
             f"SYNC after its RPDO and visible after that SYNC, by SDO and in the TPDO our master "
             f"decoded",

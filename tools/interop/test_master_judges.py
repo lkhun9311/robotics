@@ -401,6 +401,14 @@ def test_n5_fewer_than_twenty_values_fails():
     expect(obs, "FAIL", "at least 20 needed")
 
 
+def test_n5_without_padding_syncs_fails():
+    """With no SYNC that has no RPDO pending, the old-value check of those SYNCs never runs."""
+    obs = load("N5")
+    for value in obs["harness"]["values"]:
+        value["pads"] = []
+    expect(obs, "FAIL", "SYNCs with no RPDO pending; at least")
+
+
 # ---- N6 ----
 
 def test_n6_emcy_code_decoded_wrong_fails():
