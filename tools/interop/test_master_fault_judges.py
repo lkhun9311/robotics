@@ -93,6 +93,16 @@ def test_trace_overflow_is_inconclusive(row):
 
 
 @pytest.mark.parametrize("row", ROWS)
+def test_bank_overload_is_inconclusive(row):
+    # The record vdrive_bank writes when a wake finds three releases skipped (spec 10.2).
+    obs = load(row)
+    t = [r["t_ns"] for r in obs["bank"] if "t_ns" in r]
+    add_bank(obs, {"event": "overload", "t_ns": t[len(t) // 2],
+                   "consecutive_skipped": 3, "error_code": 0x6100})
+    expect(obs, "INCONCLUSIVE", "vdrive_bank overload")
+
+
+@pytest.mark.parametrize("row", ROWS)
 def test_cli_that_lost_events_is_inconclusive(row):
     obs = load(row)
     cli_events(obs, "exit")[0]["event_overflows"] = 1

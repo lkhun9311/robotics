@@ -119,11 +119,27 @@ def bank_started(bank):
     need(not failed, f"vdrive_bank start_failed: {failed[:1]}")
 
 
+def bank_not_overloaded(bank):
+    """No vdrive_bank `overload` record.
+    The bank writes one when a wake finds three releases of its 2 ms period skipped, and then
+    faults every drive with 0x6100 (spec 10.2), so what the row saw after it is the overload's
+    doing, not the row's.
+    It is checked before the peer's and the CLI's ends, since a failed scenario is its symptom."""
+    overloads = [r for r in bank if r.get("event") == "overload"]
+    first = overloads[0] if overloads else {}
+    need(not overloads,
+         f"vdrive_bank overload at {first.get('t_ns', 0) / 1e9:.6f} s: "
+         f"{first.get('consecutive_skipped')} releases of its 2 ms period skipped in a row, every "
+         f"drive faulted 0x{first.get('error_code', 0):04X} (spec 10.2; {len(overloads)} overload "
+         f"record(s)); the row is not judged")
+
+
 def complete(obs, scenario):
     """Traces complete, processes ran, the scenario finished; Inconclusive otherwise."""
     bank = obs.get("bank") or []
     need(bank, "no vdrive_bank trace records")
     bank_started(bank)
+    bank_not_overloaded(bank)
     overflow = [r for r in bank if r.get("trace_overflow", 0) != 0]
     need(not overflow, f"vdrive_bank trace incomplete: trace_overflow = "
                        f"{overflow[0].get('trace_overflow') if overflow else 0}")

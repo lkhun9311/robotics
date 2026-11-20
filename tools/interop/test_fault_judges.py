@@ -233,6 +233,31 @@ def test_f7_held_copy_missing_on_device_is_inconclusive():
     assert status == "INCONCLUSIVE" and "one delay later" in text, f"{status}: {text}"
 
 
+def overload_record(t_ns):
+    """The record vdrive_bank writes when a wake finds three releases skipped (spec 10.2)."""
+    return {"event": "overload", "t_ns": t_ns, "consecutive_skipped": 3, "error_code": 0x6100}
+
+
+def test_f7_bank_overload_is_inconclusive():
+    # CI run 44722382439 attempt 1: the bank overloaded before the peer's 0x06.
+    obs = load("F7")
+    add_record(obs, overload_record(mid_time(obs)))
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "vdrive_bank overload" in text, f"{status}: {text}"
+
+
+def test_f7_bank_overload_is_named_over_the_failed_scenario():
+    # The peer's failure is the overload's symptom, so the reason names the overload.
+    obs = load("F7")
+    add_record(obs, overload_record(mid_time(obs)))
+    done = next(e for e in obs["peer"] if e.get("event") == "scenario_done")
+    obs["peer"][obs["peer"].index(done)] = {
+        "t": done["t"], "event": "scenario_failed", "scenario": done["scenario"],
+        "reason": "node 3 did not report Ready to Switch On after 0x06"}
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "vdrive_bank overload" in text, f"{status}: {text}"
+
+
 def test_f3_actuated_set_differs_from_no_rule_run_fails():
     obs = load("F3")
     obs["bank"].remove(next(r for r in drive(obs, "actuated") if r["seq"] == 30))
