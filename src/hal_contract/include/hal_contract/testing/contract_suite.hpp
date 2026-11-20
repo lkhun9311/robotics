@@ -887,6 +887,71 @@ TYPED_TEST_P(Contract, DeactivateDuringArm) {
   }
 }
 
+// An activate posted while a deactivate is still stopping the axes supersedes the deactivate.
+// The superseded op fails and latches the inhibit (C17), so neither the activate nor a following
+// arm succeeds.
+// No axis commits or enables after the deactivate, and none actuates after the activate.
+TYPED_TEST_P(Contract, ArmWhileDeactivatePending) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the deactivate";
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->step(kPeriod);
+  ASSERT_EQ(this->hal_.op_state(d), OpState::kPending)
+      << "INCONCLUSIVE: the deactivate was no longer pending";
+  const runtime_core::MonoTime activated = this->now();
+  const OpHandle a = this->hal_.activate(this->now());
+  this->settle(a, kActivateTimeout);
+  const AuthorityId next{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const OpHandle arm = this->hal_.arm(
+      ArmRequest{next, this->now() + runtime_core::milliseconds(500), 70}, this->now());
+  this->settle(arm, kArmTimeout);
+  this->settle(d, kDeactivateTimeout);
+  this->step(kPeriod);
+
+  EXPECT_EQ(this->hal_.op_state(a), OpState::kFailed) << "an activate ran over a deactivate";
+  EXPECT_EQ(this->hal_.op_state(arm), OpState::kFailed) << "an arm ran over a deactivate";
+  EXPECT_NE(this->hal_.arm_state(), ArmState::kArmed);
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited))
+      << "the superseded deactivate did not latch the inhibit";
+  for (const DeviceEvent& e : this->events_) {
+    if (e.at < deactivated) continue;
+    EXPECT_NE(e.kind, DeviceEventKind::kCommitted) << "node " << e.node << " committed";
+    EXPECT_NE(e.kind, DeviceEventKind::kEnabled) << "node " << e.node << " enabled";
+    // A command dispatched before the deactivate took effect may still land; none after the
+    // activate.
+    if (e.at >= activated) {
+      EXPECT_NE(e.kind, DeviceEventKind::kActuated) << "node " << e.node << " actuated";
+    }
+  }
+}
+
+// After a deactivate the next activate starts with no stop result.
+// An axis that is not enabled reports no stop, never the outcome of the previous cycle.
+TYPED_TEST_P(Contract, ActivateAfterDeactivateClearsStopResults) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  ASSERT_EQ(this->hal_.op_state(d), OpState::kSucceeded) << "INCONCLUSIVE: deactivate failed";
+  this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    ASSERT_EQ(this->feedback_.stop[i], StopStatus::kConfirmed)
+        << "INCONCLUSIVE: axis " << i << " has no confirmed deactivate stop";
+  }
+  const OpHandle a = this->hal_.activate(this->now());
+  this->settle(a, kActivateTimeout);
+  ASSERT_EQ(this->hal_.op_state(a), OpState::kSucceeded) << "INCONCLUSIVE: activate failed";
+  this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_EQ(this->feedback_.stop[i], StopStatus::kNone)
+        << "axis " << i << " reports the previous cycle's stop";
+  }
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -895,6 +960,7 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             SteadyAcceptanceLatency, SupersededCommandsAreCountedNotAcknowledged,
                             SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
                             InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
-                            ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm);
+                            ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm,
+                            ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults);
 
 }  // namespace hal_contract::testing

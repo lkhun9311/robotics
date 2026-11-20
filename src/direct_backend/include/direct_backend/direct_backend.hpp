@@ -175,6 +175,7 @@ class DirectBackend final : public hal_contract::Backend {
   void fail_arm(const char* error);
   void begin_stop(std::size_t i, std::uint8_t accept, runtime_core::MonoTime t);
   void fail_deactivate(const char* error, runtime_core::MonoTime t);
+  void supersede_deactivate(runtime_core::MonoTime t);
   void latch(runtime_core::MonoTime t);
   void progress_arm(runtime_core::MonoTime t);
   void progress_deactivate(runtime_core::MonoTime t);

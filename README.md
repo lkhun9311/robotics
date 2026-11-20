@@ -602,7 +602,7 @@ neither link shows an NMT Start or an RPDO afterwards:
 
 ### One contract suite, two backends
 
-The same 17 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
+The same 19 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
 `DirectBackend` (`direct_backend_tests`, `Direct/Contract/*`) and against `CanopenBackend` with
 its session and master over six in-memory `drive_core` drives (`canopen_backend_tests`,
 `Canopen/Contract/*`), both in logic time. A fixture declares only two latencies: arming from
@@ -619,8 +619,10 @@ release build (a test requires this table to be exactly what the script prints):
 <!-- backend table: python3 tools/evidence/backend_table.py --write-readme -->
 | Contract case | DirectBackend | CanopenBackend (in-memory drive bus) |
 |---|---|---|
+| `ActivateAfterDeactivateClearsStopResults` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldEndsAtHoldUntil` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldsActualPositionWithoutPermit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ArmWhileDeactivatePending` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ConfigureRefusedWhileAStopIsUnresolved` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `DeactivateDuringArm` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ExpiredPermitStopsWithinBound` | PASS: arm 2.000 ms; motion ended 106.000 ms after the reference; travel 0.057 rad | PASS: arm 30.000 ms; motion ended 126.000 ms after the reference; travel 0.075 rad |

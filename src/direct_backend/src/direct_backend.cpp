@@ -143,8 +143,15 @@ rc::DeviceCapabilities DirectBackend::capabilities() const { return rc::direct_b
 
 void DirectBackend::activate(const hc::OpTicket& t, rc::MonoTime now) {
   now_ = now;
+  supersede_deactivate(now);
   active_ = configured_ && !inhibited_;
   if (active_) {
+    // A new cycle starts with no stop result, as on CANopen.
+    for (Node& n : nodes_) {
+      n.stop = hc::StopStatus::kNone;
+      n.rest_samples = 0;
+      n.accept = 0;
+    }
     set_op(t.op_id, hc::OpState::kSucceeded);
   } else {
     set_op(t.op_id, hc::OpState::kFailed, "not configured or the group inhibit is latched");
@@ -157,6 +164,7 @@ void DirectBackend::arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc
     set_op(arm_op_->ticket.op_id, hc::OpState::kFailed, "superseded by a newer arm");
     arm_op_.reset();
   }
+  supersede_deactivate(now);
   if (!active_ || inhibited_) {
     set_op(t.op_id, hc::OpState::kFailed, "not active or the group inhibit is latched");
     return;
@@ -361,6 +369,12 @@ void DirectBackend::progress_deactivate(rc::MonoTime t) {
   active_ = false;
   set_op(id, hc::OpState::kSucceeded);
   deactivate_op_.reset();
+}
+
+// An activate or arm posted while a deactivate is pending supersedes it, as on CANopen.
+// The deactivate fails and latches the inhibit (C17), so the new op fails too.
+void DirectBackend::supersede_deactivate(rc::MonoTime t) {
+  fail_deactivate("superseded by a newer op", t);
 }
 
 // A failed or timed-out op latches the group inhibit (C17).
