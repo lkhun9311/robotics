@@ -119,11 +119,27 @@ def bank_started(bank):
     need(not failed, f"vdrive_bank start_failed: {failed[:1]}")
 
 
+def bank_not_overloaded(bank):
+    """No vdrive_bank `overload` record.
+    The bank writes one when a wake finds three releases of its 2 ms period skipped, and then
+    faults every drive with 0x6100 (spec 10.2), so what the row saw after it is the overload's
+    doing, not the row's.
+    It is checked before the peer's and the CLI's ends, since a failed scenario is its symptom."""
+    overloads = [r for r in bank if r.get("event") == "overload"]
+    first = overloads[0] if overloads else {}
+    need(not overloads,
+         f"vdrive_bank overload at {first.get('t_ns', 0) / 1e9:.6f} s: "
+         f"{first.get('consecutive_skipped')} releases of its 2 ms period skipped in a row, every "
+         f"drive faulted 0x{first.get('error_code', 0):04X} (spec 10.2; {len(overloads)} overload "
+         f"record(s)); the row is not judged")
+
+
 def complete(obs, scenario):
     """Traces complete, processes ran, the scenario finished; Inconclusive otherwise."""
     bank = obs.get("bank") or []
     need(bank, "no vdrive_bank trace records")
     bank_started(bank)
+    bank_not_overloaded(bank)
     overflow = [r for r in bank if r.get("trace_overflow", 0) != 0]
     need(not overflow, f"vdrive_bank trace incomplete: trace_overflow = "
                        f"{overflow[0].get('trace_overflow') if overflow else 0}")
@@ -1163,6 +1179,9 @@ def view(obs, peer, bank):
 def judge_r1(obs):
     h = obs["harness"]
     first, last = view(obs, 0, 0), view(obs, -1, -1)
+    # R1 does not go through complete(), so every bank run is checked for an overload here.
+    for bank in obs["banks"]:
+        bank_not_overloaded(bank)
     for v in (first, last):
         overflow = [r for r in v["bank"] if r.get("trace_overflow", 0) != 0]
         need(not overflow, "vdrive_bank trace incomplete: trace_overflow != 0")
@@ -1400,7 +1419,9 @@ def cn_sdo_value(obs, n):
 def cn_sdo_wire(obs, n, side="host"):
     """(requests, responses, client aborts) of console line n's SDO exchange on one link: node
     2's frames between its cmd and cmd_done lines. A client abort is what our master sends when
-    its request times out (CiA 301: abort transfer on the client-to-server identifier)."""
+    its request times out (CiA 301: abort transfer on the client-to-server identifier).
+    On vcan_device a frame the master sends last (the abort) may arrive after cmd_done, since the
+    proxy's forwarding is not ordered against the CLI's print; judge_n1 widens that search."""
     _, cmd, done = cn_step(obs, n)
     sent = frames(obs, side, CN_SDO_RX, cmd["t"], done["t"])
     reqs = [f for f in sent if f[2][:1] and f[2][0] >> 5 != cia301.CS_ABORT]
@@ -1649,7 +1670,7 @@ def judge_n1(obs):
         _, cmd, _ = cn_step(obs, n)
         win = [w for w in windows if w[0] < cmd["t"] < w[1]]
         need(len(win) == 1 and win[0][2] == state, f"SDO line {n} is not in a {state:#04x} window")
-        reqs, resps, aborts = cn_sdo_wire(obs, n, "device")
+        reqs, resps, _ = cn_sdo_wire(obs, n, "device")
         need(len(reqs) == 1, f"SDO line {n}: {len(reqs)} requests on vcan_device")
         result = cn_sdo(obs, n)
         if state in cia301.SDO_STATES:
@@ -1661,6 +1682,15 @@ def judge_n1(obs):
                 frames(obs, "host", CN_SDO_TX, reqs[0][0], win[0][1])
             check(not silent, f"an SDO answer in Stopped: {hexes(silent)}")
             timeout = (CN_SDO_RX, cia301.sdo_abort(CN_NODE, 0x1000, 0, cia301.ABORT_TIMEOUT)[1])
+            # The worker sends the abort before it forwards cmd_done, so on vcan_host it is inside
+            # the line.
+            _, _, host_aborts = cn_sdo_wire(obs, n, "host")
+            check([(c, d) for _, c, d in host_aborts] == [timeout],
+                  f"our master's abort on vcan_host before cmd_done {hexes(host_aborts)}")
+            # The proxy's copy on vcan_device is not ordered against the CLI's print, so it is
+            # looked for up to the end of the Stopped window.
+            aborts = [f for f in frames(obs, "device", CN_SDO_RX, reqs[0][0], win[0][1])
+                      if f[2][:1] and f[2][0] >> 5 == cia301.CS_ABORT]
             check([(c, d) for _, c, d in aborts] == [timeout],
                   f"our master's abort after the timeout {hexes(aborts)}")
             notes.append(f"Stopped: SDO upload of 0x1000 ended sdo_timeout, no 0x{CN_SDO_TX:03X}")

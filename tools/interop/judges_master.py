@@ -20,7 +20,7 @@ the moving baseline (at least 50 dispatched commands actuated on all six), the f
 first frame the rule acted on, after the arm completed), and the stop observation.
 """
 import judges
-from judges import Failure, Inconclusive, bank_started, check, need
+from judges import Failure, Inconclusive, bank_not_overloaded, bank_started, check, need
 
 NODES = judges.NODES
 cia301 = judges.cia301
@@ -130,6 +130,9 @@ def fault_rules(obs):
     captures select with the window shrunk and grown by EDGE_S (the two clocks differ by a few
     hundred microseconds), every rule must have matched something, and the proxy must have
     sent everything."""
+    # Every x row starts here, before complete(), and a stall that overloads the bank also delays
+    # the proxy, so the overload is named before the rule checks.
+    bank_not_overloaded(obs.get("bank") or [])
     rules = parse_rules(obs["harness"]["rules"])
     need(rules and all(r["from_s"] is not None for r in rules), "a rule without a window")
     inner, outer = replay(obs, rules, EDGE_S), replay(obs, rules, -EDGE_S)
@@ -153,6 +156,7 @@ def complete(obs, scenario):
     bank = obs.get("bank") or []
     need(bank, "no vdrive_bank trace records")
     bank_started(bank)
+    bank_not_overloaded(bank)
     overflow = [r for r in bank if r.get("trace_overflow", 0) != 0]
     need(not overflow, f"vdrive_bank trace incomplete: trace_overflow = "
                        f"{overflow[0].get('trace_overflow') if overflow else 0}")
