@@ -602,7 +602,7 @@ neither link shows an NMT Start or an RPDO afterwards:
 
 ### One contract suite, two backends
 
-The same 21 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
+The same 23 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
 `DirectBackend` (`direct_backend_tests`, `Direct/Contract/*`) and against `CanopenBackend` with
 its session and master over six in-memory `drive_core` drives (`canopen_backend_tests`,
 `Canopen/Contract/*`), both in logic time. A fixture declares only two latencies: arming from
@@ -622,6 +622,8 @@ release build (a test requires this table to be exactly what the script prints):
 | `ActivateAfterDeactivateClearsStopResults` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldEndsAtHoldUntil` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldsActualPositionWithoutPermit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ArmOverStartedArmLatches` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ArmOverUnstartedArmReplacesIt` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmWhileDeactivatePending` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ConfigureRefusedWhileAStopIsUnresolved` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `DeactivateDuringArm` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |

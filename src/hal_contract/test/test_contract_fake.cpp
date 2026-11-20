@@ -122,6 +122,12 @@ class ReferenceBackend final : public hc::Backend {
     ops_[t.op_id] = active_ ? hc::OpState::kSucceeded : hc::OpState::kFailed;
   }
   void arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime now) override {
+    // A newer arm supersedes a pending one: a started one fails and latches (C17).
+    // One not yet started is replaced without a latch.
+    if (arm_op_.has_value() && arm_op_->disabled) {
+      fail_arm();
+      latch(now);
+    }
     if (arm_op_.has_value()) ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
     arm_op_.reset();
     supersede_deactivate(now);

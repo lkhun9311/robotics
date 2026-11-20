@@ -160,8 +160,16 @@ void DirectBackend::activate(const hc::OpTicket& t, rc::MonoTime now) {
 
 void DirectBackend::arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime now) {
   now_ = now;
-  if (arm_op_.has_value()) {  // a newer arm supersedes a pending one; that is not an arm fault
-    set_op(arm_op_->ticket.op_id, hc::OpState::kFailed, "superseded by a newer arm");
+  // A newer arm supersedes a pending one, as on CANopen.
+  // Once the pending arm has started (its first step ran), it fails as a failed op and latches
+  // the inhibit (C17), so this arm fails too.
+  // Before that it is replaced without a latch, as an op superseded before it started.
+  if (arm_op_.has_value() && arm_op_->disabled) {
+    fail_arm("superseded by a newer op");
+    latch(now);
+  } else if (arm_op_.has_value()) {
+    set_op(arm_op_->ticket.op_id, hc::OpState::kFailed,
+           "superseded by a newer op before it started");
     arm_op_.reset();
   }
   supersede_deactivate(now);
