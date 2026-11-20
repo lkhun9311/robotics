@@ -187,8 +187,14 @@ void DirectBackend::deactivate(const hc::OpTicket& t, rc::MonoTime now) {
   armed_.reset();
   box_.reset();
   command_.reset();
-  if (!active_) {
-    set_op(t.op_id, hc::OpState::kSucceeded);  // already Switched On or lower
+  // Not active and every stop resolved: already Switched On or lower.
+  // A stop still being confirmed, an unconfirmed stop or a joint still moving goes through the
+  // pending path instead, which waits for the outcome and fails on an unconfirmed stop (C18).
+  const bool unresolved = std::any_of(nodes_.begin(), nodes_.end(), [](const Node& n) {
+    return n.stop == hc::StopStatus::kStopping || n.stop == hc::StopStatus::kUnconfirmed;
+  });
+  if (!active_ && !unresolved && all_at_rest()) {
+    set_op(t.op_id, hc::OpState::kSucceeded);
     return;
   }
   deactivate_op_ = t;

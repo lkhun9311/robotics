@@ -927,6 +927,32 @@ TYPED_TEST_P(Contract, ArmWhileDeactivatePending) {
       EXPECT_NE(e.kind, DeviceEventKind::kActuated) << "node " << e.node << " actuated";
     }
   }
+
+  // A deactivate retried while the latched stops still resolve waits for their outcome.
+  // It never succeeds while a stop is being confirmed or with an unconfirmed stop (C18).
+  const auto stopping = [this] {
+    return std::any_of(this->feedback_.stop.begin(), this->feedback_.stop.end(),
+                       [](StopStatus s) { return s == StopStatus::kStopping; });
+  };
+  ASSERT_TRUE(stopping()) << "INCONCLUSIVE: no stop was still being confirmed at the retry";
+  const OpHandle again = this->hal_.deactivate(this->now());
+  const runtime_core::MonoTime retried = this->now();
+  while (this->hal_.op_state(again) == OpState::kPending &&
+         this->now() - retried < kDeactivateTimeout) {
+    this->step(kW);
+  }
+  this->feedback_ = this->hal_.read(this->now());
+  ASSERT_NE(this->hal_.op_state(again), OpState::kPending) << "the retried deactivate never ended";
+  if (this->hal_.op_state(again) == OpState::kSucceeded) {
+    for (std::size_t i = 0; i < kJoints; ++i) {
+      EXPECT_TRUE(this->feedback_.stop[i] == StopStatus::kConfirmed ||
+                  this->feedback_.stop[i] == StopStatus::kNotEnabled)
+          << "the retried deactivate succeeded with axis " << i << " "
+          << to_string(this->feedback_.stop[i]);
+      EXPECT_LT(std::abs(this->fx_.device().velocity[i]), kRestVelocity)
+          << "the retried deactivate succeeded with axis " << i << " moving";
+    }
+  }
 }
 
 // After a deactivate the next activate starts with no stop result.
