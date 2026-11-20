@@ -622,7 +622,7 @@ int make_eventfd() {
 Worker::Worker(CanopenConfig config, std::unique_ptr<Transport> transport, WorkerOptions options)
     : state_(std::make_shared<WorkerState>()), local_(std::make_unique<Local>()) {
   std::unique_ptr<Transport> t = require(std::move(transport));
-  state_->options = options;
+  state_->options = std::move(options);
   state_->transport = t.get();
   state_->backend = std::make_unique<CanopenBackend>(config, std::move(t));
   state_->event_fd = make_eventfd();
@@ -636,7 +636,7 @@ Worker::Worker(CanopenConfig config, std::unique_ptr<Transport> transport, Worke
 Worker::Worker(cm::MasterConfig config, std::unique_ptr<Transport> transport, WorkerOptions options)
     : state_(std::make_shared<WorkerState>()), local_(std::make_unique<Local>()) {
   state_->bare_transport = require(std::move(transport));
-  state_->options = options;
+  state_->options = std::move(options);
   state_->transport = state_->bare_transport.get();
   state_->master = std::make_unique<cm::Master>(std::move(config));
   state_->event_fd = make_eventfd();
