@@ -401,12 +401,199 @@ def test_n5_fewer_than_twenty_values_fails():
     expect(obs, "FAIL", "at least 20 needed")
 
 
-def test_n5_without_padding_syncs_fails():
-    """With no SYNC that has no RPDO pending, the old-value check of those SYNCs never runs."""
+def host_syncs(obs):
+    return [t for t, c, _ in obs["host"] if c == cia301.SYNC_COB]
+
+
+def n5_sync_index(obs, n):
+    """The master's sync_index of the SYNC that console line n stepped."""
+    return judges.cn_sync_step(obs, n, judges.cn_sync_alignment(obs))[0]
+
+
+def n5_pad_lines(obs):
+    return [n for value in obs["harness"]["values"] for n in value["pads"]]
+
+
+def insert_sync(obs, t, raw):
+    """Adds a SYNC at t on both links with a TPDO1 of `raw` after it, and our master's sync and
+    pdo events of it.
+    The SYNCs after it are renumbered."""
+    k = sum(1 for s in host_syncs(obs) if s < t) + 1
+    for e in obs["cli"]:
+        if e.get("event") in ("sync", "pdo") and e["sync_index"] >= k:
+            e["sync_index"] += 1
+    data = raw.to_bytes(4, "little")
+    add_frame(obs, "host", t, cia301.SYNC_COB, b"")
+    add_frame(obs, "device", t + 0.00001, cia301.SYNC_COB, b"")
+    add_frame(obs, "device", t + 0.00002, TPDO1, data)
+    add_frame(obs, "host", t + 0.00003, TPDO1, data)
+    at = round(t * 1e9)
+    field = {"index": F.LOOPBACK_OBJECT[0], "sub": F.LOOPBACK_OBJECT[1], "raw": raw}
+    i = next(i for i, e in enumerate(obs["cli"]) if e["t"] > t)
+    obs["cli"][i:i] = [{"t": t, "event": "sync", "at_ns": at, "sync_index": k},
+                       {"t": t + 0.00003, "event": "pdo", "at_ns": at + 30000, "node": NODE,
+                        "cob": TPDO1, "sync_index": k, "fields": [field]}]
+
+
+def drop_sync(obs, k):
+    """Removes SYNC k (our master's sync_index) from both links with its TPDO1, and our master's
+    sync and pdo events of it.
+    The SYNCs after it are renumbered."""
+    for side in ("host", "device"):
+        syncs = [t for t, c, _ in obs[side] if c == cia301.SYNC_COB]
+        s = syncs[k - 1]
+        end = syncs[k] if k < len(syncs) else float("inf")
+        obs[side] = [f for f in obs[side] if not (f[1] == cia301.SYNC_COB and f[0] == s) and
+                     not (f[1] == TPDO1 and s < f[0] < end)]
+    obs["cli"] = [e for e in obs["cli"]
+                  if not (e.get("event") in ("sync", "pdo") and e["sync_index"] == k)]
+    for e in obs["cli"]:
+        if e.get("event") in ("sync", "pdo") and e["sync_index"] > k:
+            e["sync_index"] -= 1
+
+
+def set_tpdo(obs, k, raw):
+    """Sets the TPDO1 after SYNC k on both links, and our master's decoded value of it, to raw."""
+    data = raw.to_bytes(4, "little").hex()
+    for side in ("host", "device"):
+        syncs = [t for t, c, _ in obs[side] if c == cia301.SYNC_COB]
+        end = syncs[k] if k < len(syncs) else float("inf")
+        edit_frames(obs, side, TPDO1, syncs[k - 1], end, data)
+    for e in cli(obs, "pdo", sync_index=k):
+        e["fields"][0]["raw"] = raw
+
+
+def test_n5_sync_with_the_old_value_before_the_step_fails():
+    """An extra SYNC between a value's RPDO and its step that leaves the TPDO at the old value:
+    the first SYNC after the RPDO did not apply it."""
     obs = load("N5")
+    h = obs["harness"]
+    old = sdo_event(obs, h["initial"])["value"]
+    insert_sync(obs, cmd_t(obs, h["values"][0]["step"]) - 0.0008, old)
+    expect(obs, "FAIL", f"TPDO1 after SYNC 2 carries {old:#x}")
+
+
+def test_n5_sync_applying_before_the_step_fails():
+    """An extra SYNC that applies the value before the step: the step's SYNC is not the first
+    after the RPDO, so the SDO reads around it do not bracket the applying SYNC."""
+    obs = load("N5")
+    value = obs["harness"]["values"][0]
+    insert_sync(obs, cmd_t(obs, value["step"]) - 0.0008, F.LOOPBACK_DISABLED | value["k"])
+    expect(obs, "FAIL", "k = 256: SYNC 2 on vcan_device is the first after its RPDO, not the "
+                        "step's SYNC 3")
+
+
+def test_n5_sync_between_the_rpdo_and_the_read_is_inconclusive():
+    """A SYNC before the read that should see the old value: the harness did not keep its
+    order."""
+    obs = load("N5")
+    value = obs["harness"]["values"][0]
+    reqs, _, _ = judges.cn_sdo_wire(obs, value["before"], "device")
+    insert_sync(obs, reqs[0][0] - 0.0005, F.LOOPBACK_DISABLED | value["k"])
+    expect(obs, "INCONCLUSIVE", "k = 256: SYNC 2, the first on vcan_device after its RPDO, is "
+                                "before the read")
+
+
+def test_n5_master_decoding_a_new_value_at_a_padding_sync_fails():
+    obs = load("N5")
+    k = n5_sync_index(obs, n5_pad_lines(obs)[0])
+    for e in cli(obs, "pdo", sync_index=k):
+        e["fields"][0]["raw"] = 0x12345678
+    expect(obs, "FAIL", f"our master decoded 0x12345678 after SYNC {k}, a SYNC with no RPDO "
+                        f"pending")
+
+
+def test_n5_padding_syncs_with_the_wrong_value_fail():
+    """The `pads` references moved to SYNCs that applied an RPDO, and every SYNC with no RPDO
+    pending corrupted: the judge finds those SYNCs on the wire."""
+    obs = load("N5")
+    values = obs["harness"]["values"]
+    for k in [n5_sync_index(obs, n) for n in n5_pad_lines(obs)]:
+        set_tpdo(obs, k, 0xFFFFFFFF)
+    for i, value in enumerate(values):
+        if value["pads"]:
+            value["pads"] = [values[i - 1]["step"]]
+    expect(obs, "FAIL", "a SYNC with no RPDO pending, carries 0xffffffff")
+
+
+def test_n5_duplicated_pads_do_not_inflate_the_count():
+    """One SYNC with no RPDO pending left on the wire, referenced eight times by `pads`: it is
+    one SYNC, not eight."""
+    obs = load("N5")
+    lines = n5_pad_lines(obs)
+    for k in sorted((n5_sync_index(obs, n) for n in lines[1:]), reverse=True):
+        drop_sync(obs, k)
     for value in obs["harness"]["values"]:
         value["pads"] = []
-    expect(obs, "FAIL", "SYNCs with no RPDO pending; at least")
+    obs["harness"]["values"][1]["pads"] = [lines[0]] * 8
+    expect(obs, "FAIL", "1 SYNCs with no RPDO pending on the wire; at least 8 needed")
+
+
+def test_n5_fewer_than_eight_padding_syncs_fails():
+    obs = load("N5")
+    drop_sync(obs, n5_sync_index(obs, n5_pad_lines(obs)[3]))
+    expect(obs, "FAIL", "7 SYNCs with no RPDO pending on the wire; at least 8 needed")
+
+
+def _pads_cleared(values):
+    for value in values:
+        value["pads"] = []
+
+
+def _pads_one_line(values, copies):
+    line = values[1]["pads"][0]
+    _pads_cleared(values)
+    values[1]["pads"] = [line] * copies
+
+
+def _pads_at_the_steps(values):
+    for i, value in enumerate(values):
+        value["pads"] = [values[i - 1]["step"]] if i else []
+
+
+PADS_EDITS = {"cleared": _pads_cleared,
+              "eight_copies": lambda values: _pads_one_line(values, 8),
+              "nine_copies": lambda values: _pads_one_line(values, 9),
+              "at_the_steps": _pads_at_the_steps}
+
+
+@pytest.mark.parametrize("edit", PADS_EDITS)
+def test_n5_verdict_does_not_depend_on_the_pads_references(edit):
+    obs = load("N5")
+    PADS_EDITS[edit](obs["harness"]["values"])
+    assert judges.verdict(obs) == judges.verdict(load("N5"))
+
+
+def test_n5_device_missing_a_sync_is_inconclusive():
+    obs = load("N5")
+    t = host_syncs(obs)[5]
+    edit_frames(obs, "device", cia301.SYNC_COB, t, t + 0.005, drop=True)
+    expect(obs, "INCONCLUSIVE", "SYNCs on vcan_device")
+
+
+def test_n5_device_sync_far_from_the_host_sync_is_inconclusive():
+    obs = load("N5")
+    t = host_syncs(obs)[5]
+    for f in obs["device"]:
+        if f[1] == cia301.SYNC_COB and t < f[0] < t + 0.005:
+            f[0] += 0.006
+    obs["device"].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "on vcan_device is 6.0 ms from SYNC 6")
+
+
+def test_n5_rpdo_on_one_link_only_is_inconclusive():
+    obs = load("N5")
+    t = host_syncs(obs)[5]
+    add_frame(obs, "host", t - 0.001, cia301.RPDO_BASE[1] + NODE, bytes(4))
+    expect(obs, "INCONCLUSIVE", "before SYNC 6 on vcan_device")
+
+
+def test_n5_two_rpdos_before_one_sync_is_inconclusive():
+    obs = load("N5")
+    t = host_syncs(obs)[5]
+    for side in ("host", "device"):
+        add_frame(obs, side, t - 0.001, cia301.RPDO_BASE[1] + NODE, bytes(4))
+    expect(obs, "INCONCLUSIVE", "2 RPDO1 before SYNC 6")
 
 
 # ---- N6 ----

@@ -1979,6 +1979,33 @@ def cn_tpdo_after(obs, k, host_syncs):
     return cn_u32(tpdo[0][2]), pdo[0]["fields"][0]["raw"]
 
 
+def cn_n5_syncs(obs, host_syncs, boot):
+    """[(sync_index, RPDO1 frame pending or None, its time on vcan_device)] of every SYNC on
+    vcan_device after the boot-up, classified from the wire alone.
+    A SYNC has an RPDO pending when an RPDO1 reached vcan_device after the SYNC before it.
+    vcan_host must show the same RPDO1 between the same two SYNCs, since the proxy forwards in
+    order."""
+    device = [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB)]
+    need(len(device) == len(host_syncs),
+         f"{len(device)} SYNCs on vcan_device, {len(host_syncs)} on vcan_host")
+    for i, (d, h) in enumerate(zip(device, host_syncs), 1):
+        need(abs(d - h) < 0.005, f"SYNC {i} on vcan_device is {abs(d - h) * 1000:.1f} ms from "
+                                 f"SYNC {i} on vcan_host")
+    out = []
+    for i, t in enumerate(device):
+        if t < boot:
+            continue
+        on_device = frames(obs, "device", CN_RPDO1, device[i - 1] if i else None, t)
+        on_host = frames(obs, "host", CN_RPDO1, host_syncs[i - 1] if i else None, host_syncs[i])
+        need([d for _, _, d in on_device] == [d for _, _, d in on_host],
+             f"RPDO1 {hexes(on_device)} before SYNC {i + 1} on vcan_device, {hexes(on_host)} on "
+             f"vcan_host")
+        need(len(on_device) <= 1 and all(len(d) == 4 for _, _, d in on_device),
+             f"{len(on_device)} RPDO1 before SYNC {i + 1}: {hexes(on_device)}")
+        out.append((i + 1, on_device[0] if on_device else None, t))
+    return out
+
+
 def judge_n5(obs):
     # Every SYNC applies the RPDO received before it (SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC is 1..8).
     need(cnf.SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC ==
@@ -1992,7 +2019,7 @@ def judge_n5(obs):
     need(len(daemons) == 1, f"{len(daemons)} canopend processes")
     boots = [t for t, s in cn_states(obs, "device", CN_NODE) if s == cia301.STATE_BOOT_UP]
     need(len(boots) == 1, f"{len(boots)} boot-ups of node 2")
-    device_syncs = [t for t, _, _ in frames(obs, "device", cia301.SYNC_COB, boots[0])]
+    syncs = cn_n5_syncs(obs, host_syncs, boots[0])
     for n in h["config"]:
         need(cn_sdo(obs, n)["event"] == "sdo_ok", f"configuration line {cn_line(obs, n)!r}")
     commands = cn_nmt_commands(obs)
@@ -2002,13 +2029,26 @@ def judge_n5(obs):
     values = h["values"]
     ks = [v["k"] for v in values]
     need(len(set(ks)) == len(ks) and all(0 < k <= 0x7FF for k in ks), f"values {ks}")
+    # Every SYNC on the wire, not only the ones the harness says it stepped: a SYNC with an RPDO
+    # pending applies it, a SYNC with none pending leaves the TPDO at the value before it.
+    current, idle = old, 0
+    for idx, rpdo, _ in syncs:
+        tpdo, decoded = cn_tpdo_after(obs, idx, host_syncs)
+        if rpdo is None:
+            check(tpdo == current, f"TPDO1 after SYNC {idx}, a SYNC with no RPDO pending, carries "
+                                   f"{tpdo:#x}, not the old {current:#x}")
+            check(decoded == current, f"our master decoded {decoded:#x} after SYNC {idx}, a SYNC "
+                                      f"with no RPDO pending, not the old {current:#x}")
+            idle += 1
+            continue
+        value = cn_u32(rpdo[2])
+        check(tpdo == value, f"TPDO1 after SYNC {idx} carries {tpdo:#x}, not {value:#x}, the RPDO1 "
+                             f"before it: every SYNC applies the RPDO before it")
+        check(decoded == value, f"our master decoded {decoded:#x} after SYNC {idx}, not {value:#x}")
+        current = value
     for v in values:
         k = v["k"]
         value = cnf.LOOPBACK_DISABLED | k
-        for n in v["pads"]:
-            idx, _ = cn_sync_step(obs, n, host_syncs)
-            check(cn_tpdo_after(obs, idx, host_syncs) == (old, old),
-                  f"TPDO1 after a SYNC with no RPDO pending is not the old {old:#x}")
         _, cmd, _ = cn_step(obs, v["rpdo"])
         reqs, _, _ = cn_sdo_wire(obs, v["before"], "device")
         need(len(reqs) == 1, f"k = {k}: {len(reqs)} SDO requests of the read before the SYNC")
@@ -2017,29 +2057,32 @@ def judge_n5(obs):
         mine = [r for r in rpdos if cmd["t"] < r[0] < reqs[0][0]]
         need(len(mine) == 1 and mine[0][2] == value.to_bytes(4, "little"),
              f"k = {k}: RPDO1 before the read on vcan_device {hexes(mine)}")
-        idx, t_sync = cn_sync_step(obs, v["step"], host_syncs)
-        on_device = [t for t in device_syncs if t > mine[0][0]]
-        need(on_device and on_device[0] > reqs[0][0] and abs(on_device[0] - t_sync) < 0.005,
-             f"k = {k}: the step's SYNC is not the first on vcan_device after the read")
+        idx, _ = cn_sync_step(obs, v["step"], host_syncs)
+        # The first SYNC after the RPDO applies it (checked above), so it must be the step's
+        # SYNC that the SDO reads before and after bracket.
+        first = [(i, t) for i, _, t in syncs if t > mine[0][0]]
+        need(first, f"k = {k}: no SYNC on vcan_device after its RPDO")
+        need(first[0][1] > reqs[0][0], f"k = {k}: SYNC {first[0][0]}, the first on vcan_device "
+                                       f"after its RPDO, is before the read")
+        check(first[0][0] == idx, f"k = {k}: SYNC {first[0][0]} on vcan_device is the first after "
+                                  f"its RPDO, not the step's SYNC {idx}")
         before = cn_sdo_value(obs, v["before"])
         check(before != value, f"k = {k} visible by SDO before the SYNC after its RPDO")
         check(before == old, f"k = {k}: 0x1280:01 reads {before:#x} before the SYNC, "
                              f"the old value is {old:#x}")
         after = cn_sdo_value(obs, v["after"])
-        tpdo, decoded = cn_tpdo_after(obs, idx, host_syncs)
         check(after == value, f"k = {k}: after the SYNC after its RPDO 0x1280:01 reads "
                               f"{after:#x}, not {value:#x}: every SYNC applies the RPDO before it")
-        check(tpdo == value, f"k = {k}: TPDO1 after SYNC {idx} carries {tpdo:#x}, not {value:#x}")
-        check(decoded == value, f"k = {k}: our master decoded {decoded:#x} after SYNC {idx}, "
-                                f"not {value:#x}")
         old = value
     check(len(values) >= CN_N5_VALUES, f"{len(values)} values; at least {CN_N5_VALUES} needed")
-    pads = sum(len(v["pads"]) for v in values)
-    check(pads >= CN_N5_PADS, f"{pads} SYNCs with no RPDO pending; at least {CN_N5_PADS} needed")
+    # The SYNCs with none pending are counted on the wire, each once; the harness `pads` lines
+    # are not read.
+    check(idle >= CN_N5_PADS, f"{idle} SYNCs with no RPDO pending on the wire; at least "
+                              f"{CN_N5_PADS} needed")
     return [f"{len(values)} values (RPDO type {h['rpdo_type']}), each invisible by SDO before the "
             f"SYNC after its RPDO and visible after that SYNC, by SDO and in the TPDO our master "
             f"decoded",
-            f"{pads} SYNCs with no RPDO pending left the TPDO at the old value"]
+            f"{idle} SYNCs with no RPDO pending on the wire left the TPDO at the old value"]
 
 
 # ---- N7: capability refusal ----
