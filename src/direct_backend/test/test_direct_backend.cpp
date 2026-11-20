@@ -317,3 +317,29 @@ TEST(DirectBackend, SubmitDropsACommandOfAnotherIdentity) {
   }
   EXPECT_EQ(rig.backend.poll(rig.t).group_applied_source_seq, std::nullopt);
 }
+
+// C18: the 172 ms deadline is judged before any sample of the step is counted, as on CANopen.
+// A step that jumps past the deadline (a catch-up after a stall) cannot confirm the stop with
+// the sample it takes, even when that sample is the fifth at rest.
+TEST(DirectBackend, StopIsNotConfirmedPastItsDeadline) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  const rc::MonoTime began = rig.t;
+  rig.backend.deactivate({++rig.ids, rig.t + rc::milliseconds(1000)}, rig.t);
+  const std::uint64_t op = rig.ids;
+  for (int i = 0; i < db::kConfirmSamples - 1; ++i) rig.tick();
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    ASSERT_EQ(rig.backend.poll(rig.t).stop[i], hc::StopStatus::kStopping)
+        << "INCONCLUSIVE: joint " << i << " no longer stopping before the jump";
+  }
+  rig.t = began + db::kStopConfirmDeadline + kW;
+  rig.backend.step(rig.t);
+  const hc::Feedback fb = rig.backend.poll(rig.t);
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    EXPECT_EQ(fb.stop[i], hc::StopStatus::kUnconfirmed)
+        << "joint " << i << " confirmed after its deadline";
+  }
+  EXPECT_TRUE(fb.faults.has(hc::Fault::kStopUnconfirmed));
+  rig.tick();
+  EXPECT_EQ(rig.backend.op_state(op), hc::OpState::kFailed);
+}

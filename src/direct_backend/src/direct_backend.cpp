@@ -268,8 +268,10 @@ void DirectBackend::step(rc::MonoTime t) {
   take_command(t);
   local_stops(t);
   move(t);
-  sample(t);
+  // The deadline is judged before this step's samples are counted, as on CANopen.
+  // A step that jumps past the deadline cannot confirm a stop with the samples it delivers.
   judge_stops(t);
+  sample(t);
   check_feedback_age(t);
 }
 

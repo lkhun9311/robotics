@@ -425,17 +425,16 @@ class ReferenceBackend final : public hc::Backend {
     for (std::size_t i = 0; i < hc::kJoints; ++i) {
       Node& n = nodes_[i];
       if (n.stop != hc::StopStatus::kStopping) continue;
-      if (fresh_) {
-        n.rest_samples =
-            std::abs(latest_->velocity[i]) < ht::kRestVelocity ? n.rest_samples + 1 : 0;
-        if (n.rest_samples >= kConfirmSamples) {
-          n.stop = hc::StopStatus::kConfirmed;
-          continue;
-        }
-      }
+      // The deadline first: a sample that arrives past it confirms nothing, as on CANopen.
       if (t - n.stop_from >= ht::kStopConfirmDeadline) {
         n.stop = hc::StopStatus::kUnconfirmed;
         faults_.set(hc::Fault::kStopUnconfirmed);
+        continue;
+      }
+      if (fresh_) {
+        n.rest_samples =
+            std::abs(latest_->velocity[i]) < ht::kRestVelocity ? n.rest_samples + 1 : 0;
+        if (n.rest_samples >= kConfirmSamples) n.stop = hc::StopStatus::kConfirmed;
       }
     }
   }

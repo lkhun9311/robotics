@@ -86,7 +86,8 @@ class DirectBackend final : public hal_contract::Backend {
   explicit DirectBackend(const DirectConfig& config);
 
   // One device period W at time t: arm and deactivate phases, command intake, the stop decisions,
-  // motion, one feedback sample, then stop confirmation and the feedback-age check.
+  // motion, the stop deadlines, one feedback sample with stop confirmation, then the feedback-age
+  // check.
   void step(runtime_core::MonoTime t);
 
   // ---- hal_contract::Backend ----
