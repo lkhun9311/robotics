@@ -996,6 +996,33 @@ TYPED_TEST_P(Contract, DeactivateOverPendingDeactivate) {
   EXPECT_NE(this->hal_.op_state(second), OpState::kPending) << "the second deactivate never ended";
 }
 
+// C18: only fresh samples confirm a stop, and a sample older than max_feedback_age when it
+// arrives is not fresh, even if it was taken after the stop began.
+// With every sample delayed past that age, a deactivate's stops stay unconfirmed and it fails.
+TYPED_TEST_P(Contract, DelayedFeedbackConfirmsNoStop) {
+  constexpr runtime_core::Duration kDelay = plus(kMaxFeedbackAge, kMaxFeedbackAge);
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  this->step(kPeriod);
+  this->fx_.delay_feedback(kDelay);
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  this->feedback_ = this->hal_.read(this->now());
+
+  for (const TraceSample& s : this->trace_) {
+    if (s.at < deactivated) continue;
+    for (std::size_t i = 0; i < kJoints; ++i) {
+      EXPECT_NE(s.feedback.stop[i], StopStatus::kConfirmed)
+          << "axis " << i << " confirmed from samples " << this->ms(kDelay) << " ms old at +"
+          << this->ms(s.at - deactivated) << " ms";
+    }
+  }
+  EXPECT_EQ(this->hal_.op_state(d), OpState::kFailed)
+      << "a deactivate succeeded on samples older than max_feedback_age";
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kStopUnconfirmed));
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -1006,6 +1033,6 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
                             ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm,
                             ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults,
-                            DeactivateOverPendingDeactivate);
+                            DeactivateOverPendingDeactivate, DelayedFeedbackConfirmsNoStop);
 
 }  // namespace hal_contract::testing

@@ -382,7 +382,7 @@ class VdriveSession {
   void latch(std::optional<hal_contract::Fault> fault, runtime_core::MonoTime now,
              bool cancelled_arm = false);
   void begin_stop(std::size_t i, std::uint8_t accept, runtime_core::MonoTime now);
-  void stop_on_sample(std::size_t i, const NodeSample& s);
+  void stop_on_sample(std::size_t i, const NodeSample& s, runtime_core::MonoTime now);
   void request_flags(std::size_t i);
   void poll(std::size_t i, runtime_core::MonoTime now);
   void poll_round_done(std::size_t i);

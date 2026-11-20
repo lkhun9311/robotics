@@ -431,7 +431,8 @@ class ReferenceBackend final : public hc::Backend {
         faults_.set(hc::Fault::kStopUnconfirmed);
         continue;
       }
-      if (fresh_) {
+      // A sample older than max_feedback_age when it arrives is not fresh (C18).
+      if (fresh_ && t - latest_->at <= kMaxFeedbackAge) {
         n.rest_samples =
             std::abs(latest_->velocity[i]) < ht::kRestVelocity ? n.rest_samples + 1 : 0;
         if (n.rest_samples >= kConfirmSamples) n.stop = hc::StopStatus::kConfirmed;

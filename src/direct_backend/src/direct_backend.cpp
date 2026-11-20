@@ -486,18 +486,22 @@ void DirectBackend::sample(rc::MonoTime t) {
     latest_ = ring_[ring_head_];
     ring_head_ = (ring_head_ + 1) % kSampleRing;
     --ring_size_;
-    count_rest(*latest_);
+    count_rest(*latest_, t);
   }
 }
 
 // C18: a stop is confirmed after 5 distinct fresh samples, each at rest with the joint in a mode
 // its track accepts (Quick Stop Active for an inhibit, Switched On for a deactivate).
 // A sample is counted once, when it arrives, and only if it was taken after the stop began.
+// A sample older than max_feedback_age when it arrives is not fresh and is not counted.
 // A drive that reports itself unavailable confirms nothing (judge_stops).
-void DirectBackend::count_rest(const Sample& s) {
+void DirectBackend::count_rest(const Sample& s, rc::MonoTime t) {
+  const bool stale = t - s.at > max_feedback_age_;
   for (std::size_t i = 0; i < hc::kJoints; ++i) {
     Node& n = nodes_[i];
-    if (n.stop != hc::StopStatus::kStopping || !n.drive_available || s.at < n.stop_from) continue;
+    if (n.stop != hc::StopStatus::kStopping || !n.drive_available || s.at < n.stop_from || stale) {
+      continue;
+    }
     n.rest_samples = (accepts(n.accept, s.mode[i]) && std::abs(s.velocity[i]) < kRestVelocity)
                          ? n.rest_samples + 1
                          : 0;

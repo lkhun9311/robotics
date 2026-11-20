@@ -184,7 +184,7 @@ class DirectBackend final : public hal_contract::Backend {
   void local_stops(runtime_core::MonoTime t);
   void move(runtime_core::MonoTime t);
   void sample(runtime_core::MonoTime t);
-  void count_rest(const Sample& s);
+  void count_rest(const Sample& s, runtime_core::MonoTime t);
   void judge_stops(runtime_core::MonoTime t);
   void check_feedback_age(runtime_core::MonoTime t);
   bool all_at_rest() const;
