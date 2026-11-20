@@ -100,6 +100,17 @@ void DirectBackend::configure(const hc::OpTicket& t, rc::MonoTime now) {
            "max_feedback_age must be in [20, 30] ms (the E3a drive profile)");
     return;
   }
+  const bool stopping = std::any_of(nodes_.begin(), nodes_.end(), [](const Node& n) {
+    return n.stop == hc::StopStatus::kStopping;
+  });
+  if (stopping) {
+    // C18: the stop keeps its tracking until it has an outcome.
+    // Configure would erase it before that, so it is refused and nothing here changes.
+    set_op(t.op_id, hc::OpState::kFailed,
+           "configure refused while a stop is still being confirmed: it would erase the stop "
+           "before its outcome is known");
+    return;
+  }
   inhibited_ = false;
   faults_ = hc::FaultSet{};
   active_ = false;

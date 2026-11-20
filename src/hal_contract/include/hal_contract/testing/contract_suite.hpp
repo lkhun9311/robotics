@@ -813,6 +813,45 @@ TYPED_TEST_P(Contract, StaleAtRestSampleConfirmsNothing) {
   }
 }
 
+// C17 makes configure the only reset of the inhibit, and C18 gives every stop an outcome.
+// A configure posted while a stop is still being confirmed would erase that stop before its
+// outcome is known, so it is refused.
+// The stop tracking runs on to its outcome, and a configure after that outcome is accepted.
+TYPED_TEST_P(Contract, ConfigureRefusedWhileAStopIsUnresolved) {
+  constexpr std::size_t kNode = 2;
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the stop";
+  const runtime_core::MonoTime injected = this->now();
+  this->fx_.inject_node_stop(kNode);
+  const auto stopping = [this] {
+    return std::any_of(this->feedback_.stop.begin(), this->feedback_.stop.end(),
+                       [](StopStatus s) { return s == StopStatus::kStopping; });
+  };
+  while (!stopping() && this->now() < injected + kGroupStopLatency) this->step(kW);
+  ASSERT_TRUE(stopping()) << "INCONCLUSIVE: no stop was being confirmed";
+
+  const OpHandle refused = this->hal_.configure(this->now());
+  this->settle(refused, kConfigureTimeout);
+  EXPECT_EQ(this->hal_.op_state(refused), OpState::kFailed)
+      << "a configure erased a stop whose outcome was not known";
+  this->feedback_ = this->hal_.read(this->now());
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
+  EXPECT_TRUE(stopping()) << "the refused configure reset the stop tracking";
+
+  while (this->now() < injected + kStopConfirmDeadline + kTBus) this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_EQ(this->feedback_.stop[i], StopStatus::kConfirmed) << "axis " << i;
+  }
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
+  const OpHandle accepted = this->hal_.configure(this->now());
+  this->settle(accepted, kConfigureTimeout);
+  EXPECT_EQ(this->hal_.op_state(accepted), OpState::kSucceeded)
+      << "configure stayed refused after every stop had its outcome";
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -820,6 +859,7 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             OldIdentityRefusedAfterReadoption, LostFeedbackTurnsStale,
                             SteadyAcceptanceLatency, SupersededCommandsAreCountedNotAcknowledged,
                             SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
-                            InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing);
+                            InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
+                            ConfigureRefusedWhileAStopIsUnresolved);
 
 }  // namespace hal_contract::testing

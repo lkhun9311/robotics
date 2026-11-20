@@ -602,7 +602,7 @@ neither link shows an NMT Start or an RPDO afterwards:
 
 ### One contract suite, two backends
 
-The same 15 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
+The same 16 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
 `DirectBackend` (`direct_backend_tests`, `Direct/Contract/*`) and against `CanopenBackend` with
 its session and master over six in-memory `drive_core` drives (`canopen_backend_tests`,
 `Canopen/Contract/*`), both in logic time. A fixture declares only two latencies: arming from
@@ -621,6 +621,7 @@ release build (a test requires this table to be exactly what the script prints):
 |---|---|---|
 | `ArmHoldEndsAtHoldUntil` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldsActualPositionWithoutPermit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ConfigureRefusedWhileAStopIsUnresolved` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ExpiredPermitStopsWithinBound` | PASS: arm 2.000 ms; motion ended 106.000 ms after the reference; travel 0.057 rad | PASS: arm 30.000 ms; motion ended 126.000 ms after the reference; travel 0.075 rad |
 | `InhibitStopsEveryAxisAndConfirms` | PASS: arm 2.000 ms; motion ended 48.000 ms after the reference; travel 0.012 rad; all axes stopped 2.000 ms after the injection | PASS: arm 30.000 ms; motion ended 100.000 ms after the reference; travel 0.051 rad; all axes stopped 2.000 ms after the injection |
 | `LostCommandsStopWithinBound` | PASS: arm 2.000 ms; motion ended 10.000 ms after the reference; travel 0.009 rad | PASS: arm 30.000 ms; motion ended 30.000 ms after the reference; travel 0.027 rad |
@@ -639,7 +640,9 @@ release build (a test requires this table to be exactly what the script prints):
 Recovery differs on purpose until E4: a new `configure` of `DirectBackend` clears a latched
 policy stop (`DirectBackend.ConfigureClearsALatchedPolicyStop`), while a `drive_core` drive keeps
 its D11 policy latch until an explicit policy reset (`Latch.PolicyResetOverSdo`), so every
-contract case that stops the device starts from a fresh fixture.
+contract case that stops the device starts from a fresh fixture. Both backends refuse a
+`configure` while any stop is still being confirmed, so a configure never erases a stop before
+its outcome (confirmed or unconfirmed) is reported (`ConfigureRefusedWhileAStopIsUnresolved`).
 
 ### The plugins under ros2_control
 
