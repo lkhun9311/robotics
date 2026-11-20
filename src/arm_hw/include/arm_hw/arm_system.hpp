@@ -245,6 +245,11 @@ namespace arm_hw::testing {
 using TransportFactory = std::unique_ptr<canopen_backend::Transport> (*)(
     const std::string& can_interface, std::string* error);
 void set_transport_factory(TransportFactory factory);
+
+// The clock both plugins read (CLOCK_MONOTONIC by default), for a test that steps time itself.
+// nullptr restores CLOCK_MONOTONIC.
+using Clock = runtime_core::MonoTime (*)();
+void set_clock(Clock clock);
 }  // namespace arm_hw::testing
 
 // The same seam with C linkage, for a test that loads the plugin library with dlopen and finds it
