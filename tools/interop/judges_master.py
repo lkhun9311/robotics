@@ -130,6 +130,9 @@ def fault_rules(obs):
     captures select with the window shrunk and grown by EDGE_S (the two clocks differ by a few
     hundred microseconds), every rule must have matched something, and the proxy must have
     sent everything."""
+    # Every x row starts here, before complete(), and a stall that overloads the bank also delays
+    # the proxy, so the overload is named before the rule checks.
+    bank_not_overloaded(obs.get("bank") or [])
     rules = parse_rules(obs["harness"]["rules"])
     need(rules and all(r["from_s"] is not None for r in rules), "a rule without a window")
     inner, outer = replay(obs, rules, EDGE_S), replay(obs, rules, -EDGE_S)

@@ -258,6 +258,18 @@ def test_f7_bank_overload_is_named_over_the_failed_scenario():
     assert status == "INCONCLUSIVE" and "vdrive_bank overload" in text, f"{status}: {text}"
 
 
+@pytest.mark.parametrize("bank", (0, -1))
+def test_r1_bank_overload_is_inconclusive(bank):
+    # R1 judges two bank runs without complete(), so each one is checked on its own.
+    obs = load("R1")
+    records = obs["banks"][bank]
+    t = [r["t_ns"] for r in records if "t_ns" in r]
+    records.append(overload_record(t[len(t) // 2]))
+    records.sort(key=lambda r: r.get("t_ns", 0))
+    status, text = verdict(obs)
+    assert status == "INCONCLUSIVE" and "vdrive_bank overload" in text, f"{status}: {text}"
+
+
 def test_f3_actuated_set_differs_from_no_rule_run_fails():
     obs = load("F3")
     obs["bank"].remove(next(r for r in drive(obs, "actuated") if r["seq"] == 30))

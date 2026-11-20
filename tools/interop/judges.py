@@ -1179,6 +1179,9 @@ def view(obs, peer, bank):
 def judge_r1(obs):
     h = obs["harness"]
     first, last = view(obs, 0, 0), view(obs, -1, -1)
+    # R1 does not go through complete(), so every bank run is checked for an overload here.
+    for bank in obs["banks"]:
+        bank_not_overloaded(bank)
     for v in (first, last):
         overflow = [r for r in v["bank"] if r.get("trace_overflow", 0) != 0]
         need(not overflow, "vdrive_bank trace incomplete: trace_overflow != 0")
