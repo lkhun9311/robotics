@@ -170,6 +170,10 @@ struct WorkerOptions {
   // How long a timed-out wait() blocks for the worker to take its cancel (C10); past it the
   // inhibit is requested instead.
   runtime_core::Duration cancel_ack_timeout{3 * 2'000'000};
+  // Test seam: called on the control thread when a post is refused for a full op queue, before
+  // post() returns.
+  // A logic-time test runs a wake from it, so an older op ends inside the refusal.
+  std::function<void(std::uint64_t op_id)> on_post_refused{};
 };
 
 struct WorkerState;  // The channels and everything the thread owns (worker.cpp).
