@@ -555,7 +555,7 @@ only `arm_hw` does.
 - `canopen_master_cli`: our master as a process, for the vcan tests (JSON lines out).
 - `arm_hw`: the ros2_control `SystemInterface` plugins `arm_hw/CanopenArmHw` and
   `arm_hw/DirectArmHw`, thin shells over the `Hal`.
-- CANopenNode (CANopenLinux v4.0 `87cfbac`, CANopenNode `76b43c8`) is built into the dev image
+- CANopenNode (CANopenNode v4.1 `ac21407`, built by CANopenLinux `f1348d4`) is built into the dev image
   from tarballs pinned by commit and SHA-256 (`docker/Dockerfile`; sources and licences in
   `THIRD_PARTY_NOTICES`) and runs as
   `canopend`, configured not to start itself (`test_canopennode_config.py` pins every fact the
@@ -723,9 +723,9 @@ INCONCLUSIVE (`test_master_fault_judges.py`, `test_master_judges.py`):
 | N2 | No slave: `boot_timeout` 1002 ms after our master's first SYNC, no NMT; canopend stopped by SIGSTOP: `hb_lost` 251 ms after its last heartbeat; SIGCONT: `hb_resumed`; no NMT frame at all | Consumer accuracy beyond the 250-400 ms window |
 | N3 | Uploads of 0x1000 and 0x1018:01 (both 0 in the example OD); a 0x1017 download changes canopend's heartbeat period; six aborts decoded with canopend's codes (0x06020000 twice, 0x06010002, 0x06090011, 0x06070013, 0x06070012) | Segmented or block transfers (our client has none) |
 | N4 | Our master maps TPDO1 (8 bytes) and RPDO1 (2 bytes) by CiA 301 dynamic mapping; 16 TPDO1 of DLC 8 whose bytes equal the values read by SDO and decoded by our master; a 2-byte RPDO1 the harness composes and sends as a raw frame through the console's `send` (our master has no generic RPDO producer) applied; a DLC 1 RPDO1 gives canopend's EMCY 0x8210 and it stays Operational | Our vdrive's PDO layouts (CANopenNode never sees them) |
-| N5 | 24 synchronous (type 0) RPDO values, SYNC stepped one at a time: each invisible by SDO before the SYNC predicted to apply it and visible after it, by SDO and in the TPDO our master decoded; applied at the first SYNC after the RPDO 9 times and at the second 15 times, as the pinned parity defect predicts (below); the same sequence with type 255 must FAIL the same judge (`n5_type255`) | Ideal CiA 301 timing of a synchronous RPDO (the pinned build does not have it) |
+| N5 | 24 synchronous (type 0) RPDO values, SYNC stepped one at a time: each invisible by SDO before the SYNC after its RPDO and visible after that SYNC, by SDO and in the TPDO our master decoded (every SYNC applies the RPDO before it); 8 SYNCs with no RPDO pending leave the TPDO at the old value; the same sequence with type 255 must FAIL the same judge (`n5_type255`) | RPDO types 1-240 and the synchronous window length (0x1007) |
 | N6 | canopend's EMCY 0x8210 and its error-reset EMCY 0x0000, each decoded by our master with the frame's code and register | Any other error code |
-| N7 | Six canopend nodes: 0x2012 aborts 0x06020000 on all six, configure succeeds with the generic profile, activation is refused naming five capabilities, no NMT Start and no RPDO for 390 ms after the refusal | Our vdrive extension against an independent peer (there is none) |
+| N7 | Six canopend nodes: 0x2012 aborts 0x06020000 on all six, configure succeeds with the generic profile, activation is refused naming five capabilities, no NMT Start and no RPDO for 391 ms after the refusal | Our vdrive extension against an independent peer (there is none) |
 
 ### Our master's SYNC cycle on the wire
 
@@ -756,12 +756,13 @@ script writes.
    expiry or timeout keeps its D11 policy latch until a policy reset. The arm_hw plugin makes every
    configure a fresh session, so it starts only over drives a master deactivated. Recovery from
    there is E4.
-4. The pinned CANopenNode `76b43c8` applies a synchronous RPDO on alternate SYNCs: `CO_PDO.c:811`
-   processes a received synchronous RPDO only when the SYNC toggle (`CO_SYNC.c:63`) has the
-   parity of its reception buffer, so an RPDO received after an odd SYNC count waits one more
-   SYNC. N5 predicts the applying SYNC (first or second after the RPDO) from the SYNCs canopend
-   has seen since boot-up, as pinned by `test_canopennode_config.py`, and fails on any other;
-   it judges this build, not ideal CiA 301 timing.
+4. The CANopenNode pin is not a released pair. CANopenLinux has no release after v4.0, and the
+   CANopenNode `76b43c8` that v4.0 pins applies a synchronous RPDO only on alternate SYNCs
+   (`CO_PDO.c:811` reads the wrong RX buffer; fixed upstream by CANopenNode PR #320, `84487ef`).
+   The pin is therefore the CANopenNode tag v4.1 built by the CANopenLinux master head
+   `f1348d4`, whose own submodule is 8 commits behind v4.1 (bitwise PDO mapping, off by
+   default, and documentation).
+   `test_canopennode_config.py` pins every fact the N rows rely on against that build.
 5. Recovery differs between the backends until E4 (`DirectBackend.ConfigureClearsALatchedPolicyStop`
    against the vdrive's D11 latch).
 6. The X rows run our master against our own drives: the master's side is checked against

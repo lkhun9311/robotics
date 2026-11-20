@@ -2,7 +2,7 @@
 """Calibration of the independent CANopenNode slave (canopend, E3c Task 0) before the master
 interop matrix (N1-N7) depends on it, in the manner of test_peer_config.py for Lely.
 
-The slave is CANopenLinux v4.0 + CANopenNode 76b43c8 as built into the dev image (no self-start
+The slave is CANopenLinux f1348d4 + CANopenNode v4.1 as built into the dev image (no self-start
 to Operational, log on stderr; docker/canopennode_build.h), node 2, the shipped example DS301
 object dictionary, storage pre-seeded by canopend.seed_storage (0x1017 = 100 ms). Each test
 starts its own canopend on vcan_device directly (no proxy, no master) and talks to it with the
@@ -21,13 +21,14 @@ Observed (the first column is the test that pins it):
   sdo_abort_codes         0x06020000 unknown object, 0x06090011 unknown sub-index, 0x06010002
                           write to read-only, 0x06070013 / 0x06070012 wrong download size
   pdo_configuration       communication and mapping objects are writable by SDO (CiA 301 dynamic
-                          mapping); the example OD maps only 0x1001, 0x1200:1/2 (TPDO), 0x1280:1/2
+                          mapping); the example OD maps only 0x1280:1/2 (RPDO and TPDO),
+                          0x1001 and 0x1200:1/2 (TPDO only)
   pdo_length_emcy         0x8210 (RPDO too short), 0x8220 (too long), 0x0000 when it clears
   service_gating          Stopped: no SDO answer; Pre-operational: SDO, no TPDO at SYNC;
                           Operational: TPDO at SYNC
   reset_node_behaviour    process exits 0 and puts nothing on the bus; restart gives boot-up
-  sync_rpdo_...           applied at SYNC for types 0-240, at reception for 255; defect: every
-                          second SYNC does not apply it (see canopennode_facts.py)
+  sync_rpdo_...           applied at SYNC for types 0-240 (every SYNC applies the RPDO received
+                          before it), at reception for 255
 """
 import collections
 import pathlib
@@ -250,8 +251,14 @@ def test_canopend_sdo_abort_codes(start_canopend, bus):
     0x06020000 (upload and download), unknown sub-index 0x1018:05 0x06090011, download to the
     read-only 0x1000 and 0x1018:01 0x06010002, wrong sizes into the 2-byte 0x1017: 1 byte
     0x06070013 (too low), 4 bytes 0x06070012 (too high); 1 byte into the 4-byte 0x1280:01
-    0x06070013; 0x1280:01 = 0x1234 (bits 11..29 set) 0x06090030."""
+    0x06070013; 0x1280:01 = 0x1234 (bits 11..29 set) 0x06090030. A valid COB-ID (bit 31 clear)
+    with a CAN-ID CiA 301 restricts (0x123) is refused with 0x06090030 too; one with a free
+    CAN-ID (0x234) is accepted (N4's RPDO carries that one)."""
     start_canopend()
+    assert dl(bus, *LOOP, F.LOOPBACK_RESTRICTED_VALID, 4) == ("abort", F.ABORT_INVALID_VALUE)
+    assert dl(bus, *LOOP, F.LOOPBACK_FREE_VALID, 4) == "ok"
+    assert sdo_code(bus, *LOOP) == F.LOOPBACK_FREE_VALID
+    assert dl(bus, *LOOP, F.LOOPBACK_DISABLED, 4) == "ok"
     assert sdo_code(bus, 0x2FFF, 0) == ("abort", F.ABORT_NO_OBJECT)
     assert dl(bus, 0x2FFF, 0, 1, 1) == ("abort", F.ABORT_NO_OBJECT)
     assert sdo_code(bus, 0x1018, 5) == ("abort", F.ABORT_NO_SUBINDEX)
@@ -269,8 +276,8 @@ def test_canopend_pdo_configuration_facts(start_canopend, bus):
     """PDO configuration by SDO, in Pre-operational. Defaults: RPDO1 COB 0x80000202, TPDO1
     0xC0000182 (disabled), type 0xFE, no mapping. The communication and mapping objects are
     writable by SDO (disable, sub0 = 0, entries, sub0 = n, enable), RPDO and TPDO alike. The
-    example OD has no application objects, so the mappable set is small: RPDO 0x1001:0 and
-    0x1280:1/2, TPDO also 0x1200:1/2 (read-only constants); every other object is refused with
+    example OD has no application objects, so the mappable set is small: RPDO 0x1280:1/2, TPDO
+    also 0x1001:0 and 0x1200:1/2 (read-only); every other object is refused with
     0x06040041, "object cannot be mapped" (found by trying each sub-index of each object in the
     OD with its own size). Mapping a 64-bit entry onto a 32-bit object is refused with the same
     0x06040041. TPDO1 mapped to 0x1280:1 + 0x1280:2 (8 bytes) is accepted."""
@@ -443,12 +450,11 @@ def test_canopend_reset_communication_behaviour(start_canopend, bus, capture):
 def test_canopend_sync_rpdo_applied_at_sync(start_canopend, bus, capture):
     """RPDO1 (one 32-bit mapping of 0x1280:01, type 0), TPDO1 (type 1, same object) and a paused
     SYNC. The value is not visible by SDO after the RPDO: it is applied by the SYNC, and the TPDO
-    sent at that same SYNC carries the applied value (RPDO is processed first); after a SYNC that
-    does not apply it, the TPDO carries the old value. A type 255 RPDO is visible at once.
-    Defect of the pinned commit (CO_PDO.c:811): from a fresh start, eight pairs RPDO v / SYNC
-    (v = 1..8) leave 1, 1, 3, 3, 5, 5, 7, 7, i.e. every second SYNC does not apply the RPDO
-    (the data is read from the wrong RX buffer); pinned here as SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC.
-    N5 cannot expect 'one RPDO, one SYNC, value k' on every step from this build."""
+    sent at that same SYNC carries the applied value (RPDO is processed first). A type 255 RPDO
+    is visible at once.
+    From a fresh start, eight pairs RPDO v / SYNC (v = 1..8) leave 1, 2, ..., 8: every SYNC
+    applies the RPDO before it (SYNC_RPDO_SEQUENCE_AFTER_EACH_SYNC), which N5 expects of each
+    value. CANopenNode 76b43c8 left 1, 1, 3, 3, 5, 5, 7, 7 here (CO_PDO.c:811, fixed in v4.1)."""
     cap = capture(DEVICE_IF)
     start_canopend()
     assert dl(bus, *LOOP, F.LOOPBACK_DISABLED, 4) == "ok"
