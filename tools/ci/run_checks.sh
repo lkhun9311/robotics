@@ -43,10 +43,10 @@ ASAN=(--build-base build/asan --install-base install/asan)
 # missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
 # Raise these when adding tests.
 GTEST_FLOOR=504
-PYTEST_FLOOR=252
+PYTEST_FLOOR=253
 INTEGRATION_FLOOR=11
 SIM_FLOOR=32
-VCAN_FLOOR=550
+VCAN_FLOOR=551
 TSAN_FLOOR=33
 TSAN_HAL_FLOOR=141
 

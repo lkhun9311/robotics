@@ -5,6 +5,9 @@ tools/interop/recorded/x1..x7.json.gz are observations of passing runs of test_m
 (written with INTEROP_RECORD_DIR). Each recording passes its judge unchanged (the control). Each
 edit below breaks one thing a row asserts, and the judge must say so: a broken pass condition is
 FAIL, a missing precondition INCONCLUSIVE, never PASS.
+
+x7_edge.json.gz is a kept observation of X7 that the judge once got wrong (#38): its last delayed
+RPDO2 left vcan_host 1.847 ms before the window's end, inside the EDGE_S slack.
 """
 import copy
 import gzip
@@ -562,6 +565,16 @@ def test_x7_edge_frame_neither_on_time_nor_held_is_inconclusive():
     frame = place_at_edge(obs, "end")
     move(obs, "device", copies(obs, "device", frame)[0], frame[0] + 0.030)
     expect(obs, "INCONCLUSIVE", "edge")
+
+
+def test_x7_edge_regression_recording_passes():
+    # The kept observation's last delayed frame lies inside the slack, the proxy delayed it, and
+    # the bank dropped it not-valid: all 18 are counted.
+    obs = load("X7_EDGE")
+    rule = jm.parse_rules(obs["harness"]["rules"])[0]
+    last = jm.replay(obs, [rule], 0)[0][-1][0] - jm.epoch(obs)
+    assert 0 < rule["to_s"] - last < jm.EDGE_S, f"{(rule['to_s'] - last) * 1000:.3f} ms"
+    expect(obs, "PASS", "18 reached the drive with the tag current = 18 not-valid drops")
 
 
 @pytest.mark.parametrize("row", ("X1", "X2", "X3", "X4", "X5"))

@@ -727,6 +727,12 @@ INCONCLUSIVE (`test_master_fault_judges.py`, `test_master_judges.py`):
 | N6 | canopend's EMCY 0x8210 and its error-reset EMCY 0x0000, each decoded by our master with the frame's code and register | Any other error code |
 | N7 | Six canopend nodes: 0x2012 aborts 0x06020000 on all six, configure succeeds with the generic profile, activation is refused naming five capabilities, no NMT Start and no RPDO for 391 ms after the refusal | Our vdrive extension against an independent peer (there is none) |
 
+A frame within 2 ms of a rule window's edge may fall on either side of the proxy's clock, so the
+X judges resolve it from the capture the rule forwards to (`vcan_device` for h2d, `vcan_host` for
+d2h) and require the proxy's match count to equal that. `tools/interop/recorded/x7_edge.json.gz`
+is a kept X7 observation whose last delayed RPDO2 lay 1.847 ms inside the window's end, which the
+judge once counted wrong (#38); `rejudge.py` judges it with the committed rows.
+
 ### Our master's SYNC cycle on the wire
 
 [docs/media/e3c-master-frame-trace.txt](docs/media/e3c-master-frame-trace.txt) lists every

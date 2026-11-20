@@ -306,6 +306,22 @@ def test_rejudge_of_a_partial_directory_names_the_missing_rows(tmp_path, capsys)
     assert "F2 PASS:" in out
     assert "M1 NOT RECORDED:" in out and "R1 NOT RECORDED:" in out
     assert "INTEROP_RECORD_DIR=tools/interop/recorded" not in out
+    # The kept regression recordings are committed only, so a CI directory is not asked for them.
+    assert "X7_EDGE" not in out
+
+
+def test_rejudge_judges_the_kept_regression_recordings(capsys):
+    """The committed set includes the kept recordings: x7_edge (#38) passes X7's judge with all 18
+    delayed frames counted, and its reproduce line says it is kept, not a command that records it
+    again."""
+    rc = rejudge.main([])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "X7_EDGE PASS:" in out
+    assert "18 reached the drive with the tag current = 18 not-valid drops" in out.split(
+        "X7_EDGE PASS:")[1].splitlines()[0]
+    assert "input: tools/interop/recorded/x7_edge.json.gz" in out
+    assert "reproduce the input: kept, not re-recordable" in out
 
 
 def test_rejudge_finds_the_master_rows_in_their_own_directory(capsys):
