@@ -526,13 +526,84 @@ def test_n5_duplicated_pads_do_not_inflate_the_count():
     for value in obs["harness"]["values"]:
         value["pads"] = []
     obs["harness"]["values"][1]["pads"] = [lines[0]] * 8
-    expect(obs, "FAIL", "1 SYNCs with no RPDO pending on the wire; at least 8 needed")
+    expect(obs, "FAIL", "1 SYNCs with no RPDO pending on the wire after a value was applied; "
+                        "at least 8 needed")
 
 
 def test_n5_fewer_than_eight_padding_syncs_fails():
     obs = load("N5")
     drop_sync(obs, n5_sync_index(obs, n5_pad_lines(obs)[3]))
-    expect(obs, "FAIL", "7 SYNCs with no RPDO pending on the wire; at least 8 needed")
+    expect(obs, "FAIL", "7 SYNCs with no RPDO pending on the wire after a value was applied; "
+                        "at least 8 needed")
+
+
+def test_n5_padding_syncs_only_before_the_first_value_fail():
+    """Eight SYNCs with no RPDO pending, all before the first RPDO, and none between the values:
+    an idle SYNC that corrupts an applied value would go untested."""
+    obs = load("N5")
+    for k in sorted((n5_sync_index(obs, n) for n in n5_pad_lines(obs)), reverse=True):
+        drop_sync(obs, k)
+    h = obs["harness"]
+    old = sdo_event(obs, h["initial"])["value"]
+    t_rpdo = cmd_t(obs, h["values"][0]["rpdo"])
+    for j in range(8):
+        insert_sync(obs, t_rpdo - 0.0035 + j * 0.0004, old)
+    expect(obs, "FAIL", "0 SYNCs with no RPDO pending on the wire after a value was applied; "
+                        "at least 8 needed")
+
+
+def device_frame(obs, cob, data=None, k=0):
+    """The k-th frame of `cob` (with `data`, if given) on vcan_device."""
+    return [f for f in obs["device"] if f[1] == cob and (data is None or f[2] == data)][k]
+
+
+def move_first_sync(obs, t, host=False):
+    """Moves the startup SYNC on vcan_device to t; with `host`, on vcan_host and in our master's
+    sync event too."""
+    device_frame(obs, cia301.SYNC_COB)[0] = t
+    obs["device"].sort(key=lambda f: f[0])
+    if host:
+        next(f for f in obs["host"] if f[1] == cia301.SYNC_COB)[0] = t - 0.00001
+        obs["host"].sort(key=lambda f: f[0])
+        cli(obs, "sync", sync_index=1)[0]["at_ns"] = round(t * 1e9)
+
+
+def test_n5_startup_sync_in_pre_operational_passes():
+    """The startup SYNC reaching vcan_device just after the boot-up: node 2 is Pre-operational
+    and sends no TPDO for it."""
+    obs = load("N5")
+    move_first_sync(obs, device_frame(obs, HB, "00")[0] + 0.0001)
+    assert judges.verdict(obs) == judges.verdict(load("N5"))
+
+
+def test_n5_tpdo_after_a_pre_operational_sync_fails():
+    obs = load("N5")
+    t = device_frame(obs, HB, "00")[0] + 0.0001
+    move_first_sync(obs, t)
+    add_frame(obs, "host", t + 0.0001, TPDO1, bytes(4))
+    expect(obs, "FAIL", "TPDO1 after SYNC 1, before NMT Start on vcan_device")
+
+
+def test_n5_sync_between_nmt_start_and_operational_is_inconclusive():
+    obs = load("N5")
+    start = device_frame(obs, cia301.NMT_COB)[0]
+    move_first_sync(obs, start + 0.00002, host=True)
+    expect(obs, "INCONCLUSIVE", "SYNC 1 on vcan_device between NMT Start and the Operational "
+                                "heartbeat")
+
+
+def test_n5_no_operational_heartbeat_is_inconclusive():
+    obs = load("N5")
+    obs["device"] = [f for f in obs["device"] if not (f[1] == HB and f[2] == "05")]
+    expect(obs, "INCONCLUSIVE", "no Operational heartbeat of node 2 on vcan_device")
+
+
+def test_n5_rpdo_before_operational_is_inconclusive():
+    obs = load("N5")
+    t = device_frame(obs, cia301.NMT_COB)[0] - 0.001
+    for side in ("host", "device"):
+        add_frame(obs, side, t, cia301.RPDO_BASE[1] + NODE, bytes(4))
+    expect(obs, "INCONCLUSIVE", "RPDO1 on vcan_device before node 2 was Operational")
 
 
 def _pads_cleared(values):

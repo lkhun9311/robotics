@@ -2019,11 +2019,21 @@ def judge_n5(obs):
     need(len(daemons) == 1, f"{len(daemons)} canopend processes")
     boots = [t for t, s in cn_states(obs, "device", CN_NODE) if s == cia301.STATE_BOOT_UP]
     need(len(boots) == 1, f"{len(boots)} boot-ups of node 2")
-    syncs = cn_n5_syncs(obs, host_syncs, boots[0])
     for n in h["config"]:
         need(cn_sdo(obs, n)["event"] == "sdo_ok", f"configuration line {cn_line(obs, n)!r}")
     commands = cn_nmt_commands(obs)
     need([cs for cs, _, _ in commands] == [cia301.NMT_START], f"NMT commands {commands}")
+    # Node 2 sends TPDOs from its Operational heartbeat after NMT Start on vcan_device.
+    # A SYNC before NMT Start (the startup SYNC may still be in flight after the boot-up) draws
+    # none.
+    t_start = commands[0][1]
+    operational = [t for t, s in cn_states(obs, "device", CN_NODE, t_start)
+                   if s == cia301.STATE_OPERATIONAL]
+    need(operational, "no Operational heartbeat of node 2 on vcan_device after NMT Start")
+    t_operational = operational[0]
+    early = frames(obs, "device", CN_RPDO1, boots[0], t_operational)
+    need(not early, f"RPDO1 on vcan_device before node 2 was Operational {hexes(early)}")
+    syncs = cn_n5_syncs(obs, host_syncs, boots[0])
     old = cn_sdo_value(obs, h["initial"])
     rpdos = frames(obs, "device", CN_RPDO1)
     values = h["values"]
@@ -2031,21 +2041,32 @@ def judge_n5(obs):
     need(len(set(ks)) == len(ks) and all(0 < k <= 0x7FF for k in ks), f"values {ks}")
     # Every SYNC on the wire, not only the ones the harness says it stepped: a SYNC with an RPDO
     # pending applies it, a SYNC with none pending leaves the TPDO at the value before it.
-    current, idle = old, 0
-    for idx, rpdo, _ in syncs:
+    # Only the idle SYNCs after a value was applied count, since one that corrupts an applied
+    # value is what the count must cover.
+    current, applied, idle = old, False, 0
+    for idx, rpdo, t in syncs:
+        if t < t_start:
+            end = host_syncs[idx] if idx < len(host_syncs) else None
+            sent = frames(obs, "host", CN_TPDO1, host_syncs[idx - 1], end)
+            check(not sent, f"TPDO1 after SYNC {idx}, before NMT Start on vcan_device: "
+                            f"{hexes(sent)}")
+            continue
+        need(t > t_operational, f"SYNC {idx} on vcan_device between NMT Start and the "
+                                f"Operational heartbeat")
         tpdo, decoded = cn_tpdo_after(obs, idx, host_syncs)
         if rpdo is None:
             check(tpdo == current, f"TPDO1 after SYNC {idx}, a SYNC with no RPDO pending, carries "
                                    f"{tpdo:#x}, not the old {current:#x}")
             check(decoded == current, f"our master decoded {decoded:#x} after SYNC {idx}, a SYNC "
                                       f"with no RPDO pending, not the old {current:#x}")
-            idle += 1
+            if applied:
+                idle += 1
             continue
         value = cn_u32(rpdo[2])
         check(tpdo == value, f"TPDO1 after SYNC {idx} carries {tpdo:#x}, not {value:#x}, the RPDO1 "
                              f"before it: every SYNC applies the RPDO before it")
         check(decoded == value, f"our master decoded {decoded:#x} after SYNC {idx}, not {value:#x}")
-        current = value
+        current, applied = value, True
     for v in values:
         k = v["k"]
         value = cnf.LOOPBACK_DISABLED | k
@@ -2077,12 +2098,13 @@ def judge_n5(obs):
     check(len(values) >= CN_N5_VALUES, f"{len(values)} values; at least {CN_N5_VALUES} needed")
     # The SYNCs with none pending are counted on the wire, each once; the harness `pads` lines
     # are not read.
-    check(idle >= CN_N5_PADS, f"{idle} SYNCs with no RPDO pending on the wire; at least "
-                              f"{CN_N5_PADS} needed")
+    check(idle >= CN_N5_PADS, f"{idle} SYNCs with no RPDO pending on the wire after a value was "
+                              f"applied; at least {CN_N5_PADS} needed")
     return [f"{len(values)} values (RPDO type {h['rpdo_type']}), each invisible by SDO before the "
             f"SYNC after its RPDO and visible after that SYNC, by SDO and in the TPDO our master "
             f"decoded",
-            f"{idle} SYNCs with no RPDO pending on the wire left the TPDO at the old value"]
+            f"{idle} SYNCs with no RPDO pending on the wire, after a value was applied, left the "
+            f"TPDO at the old value"]
 
 
 # ---- N7: capability refusal ----
