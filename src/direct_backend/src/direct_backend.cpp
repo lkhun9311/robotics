@@ -178,6 +178,8 @@ void DirectBackend::arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc
 
 void DirectBackend::deactivate(const hc::OpTicket& t, rc::MonoTime now) {
   now_ = now;
+  // A deactivate over a pending one supersedes it, as on CANopen: the first fails and latches.
+  fail_deactivate("superseded by a newer op", now);
   if (arm_op_.has_value()) {
     // The deactivate supersedes a pending arm, which fails and never enables.
     // A failed op latches the inhibit (C17), as on CANopen.

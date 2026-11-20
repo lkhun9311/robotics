@@ -91,6 +91,9 @@ class ReferenceBackend final : public hc::Backend {
     faults_ = hc::FaultSet{};
     active_ = false;
     armed_.reset();
+    // Ops still pending are superseded: each ends instead of staying pending for good.
+    if (arm_op_.has_value()) ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
+    if (deactivate_op_.has_value()) ops_[deactivate_op_->op_id] = hc::OpState::kFailed;
     arm_op_.reset();
     deactivate_op_.reset();
     box_.reset();
@@ -153,6 +156,8 @@ class ReferenceBackend final : public hc::Backend {
     return fb;
   }
   void deactivate(const hc::OpTicket& t, rc::MonoTime now) override {
+    // A deactivate over a pending one supersedes it: the first fails and latches.
+    fail_deactivate(now);
     // A pending arm is superseded: it fails and never enables, and the failed op latches (C17).
     if (arm_op_.has_value()) {
       ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;

@@ -978,6 +978,24 @@ TYPED_TEST_P(Contract, ActivateAfterDeactivateClearsStopResults) {
   }
 }
 
+// A deactivate posted over a pending deactivate supersedes it.
+// Both ops end: the first fails, and neither stays pending past its deadline.
+TYPED_TEST_P(Contract, DeactivateOverPendingDeactivate) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const OpHandle first = this->hal_.deactivate(this->now());
+  this->step(kW);
+  ASSERT_EQ(this->hal_.op_state(first), OpState::kPending)
+      << "INCONCLUSIVE: the first deactivate was no longer pending";
+  const runtime_core::MonoTime second_at = this->now();
+  const OpHandle second = this->hal_.deactivate(this->now());
+  while (this->now() - second_at < plus(kDeactivateTimeout, kTBus)) this->step(kW);
+
+  EXPECT_EQ(this->hal_.op_state(first), OpState::kFailed)
+      << "the superseded deactivate did not end as failed";
+  EXPECT_NE(this->hal_.op_state(second), OpState::kPending) << "the second deactivate never ended";
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -987,6 +1005,7 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
                             InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
                             ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm,
-                            ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults);
+                            ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults,
+                            DeactivateOverPendingDeactivate);
 
 }  // namespace hal_contract::testing
