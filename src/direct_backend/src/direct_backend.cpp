@@ -111,12 +111,19 @@ void DirectBackend::configure(const hc::OpTicket& t, rc::MonoTime now) {
            "before its outcome is known");
     return;
   }
+  // A configure supersedes the ops still pending: each ends instead of staying pending for good.
+  if (arm_op_.has_value()) {
+    set_op(arm_op_->ticket.op_id, hc::OpState::kFailed, "superseded by a configure");
+    arm_op_.reset();
+  }
+  if (deactivate_op_.has_value()) {
+    set_op(deactivate_op_->op_id, hc::OpState::kFailed, "superseded by a configure");
+    deactivate_op_.reset();
+  }
   inhibited_ = false;
   faults_ = hc::FaultSet{};
   active_ = false;
   armed_.reset();
-  arm_op_.reset();
-  deactivate_op_.reset();
   box_.reset();
   command_.reset();
   dropping_ = false;
@@ -125,6 +132,7 @@ void DirectBackend::configure(const hc::OpTicket& t, rc::MonoTime now) {
     n.mode = n.model.state().velocity_nrad_s != 0 ? Mode::kDisabling : Mode::kDisabled;
     n.stop = hc::StopStatus::kNone;
     n.rest_samples = 0;
+    n.accept = 0;
     n.inject = false;
   }
   configured_ = true;
@@ -162,6 +170,12 @@ void DirectBackend::arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc
 
 void DirectBackend::deactivate(const hc::OpTicket& t, rc::MonoTime now) {
   now_ = now;
+  if (arm_op_.has_value()) {
+    // The deactivate supersedes a pending arm, which fails and never enables.
+    // A failed op latches the inhibit (C17), as on CANopen.
+    fail_arm("superseded by a deactivate");
+    latch(now);
+  }
   armed_.reset();
   box_.reset();
   command_.reset();
@@ -171,6 +185,17 @@ void DirectBackend::deactivate(const hc::OpTicket& t, rc::MonoTime now) {
   }
   deactivate_op_ = t;
   set_op(t.op_id, hc::OpState::kPending);
+  if (inhibited_) return;  // The inhibit already tracks every stop.
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    Node& n = nodes_[i];
+    if (enabled(n.mode)) {
+      n.mode = Mode::kDisabling;
+      emit(now, i, EventKind::kDisabled);
+      begin_stop(i, kAcceptSwitchedOn, now);
+    } else if (n.stop == hc::StopStatus::kNone) {
+      n.stop = hc::StopStatus::kNotEnabled;
+    }
+  }
 }
 
 void DirectBackend::on_error_nonblocking() { latch(now_); }
@@ -243,7 +268,6 @@ void DirectBackend::fail_arm(const char* error) {
 void DirectBackend::latch(rc::MonoTime t) {
   if (inhibited_) return;
   inhibited_ = true;
-  inhibit_at_ = t;
   box_.reset();
   command_.reset();
   fail_arm("the group inhibit latched during the arm");
@@ -252,14 +276,32 @@ void DirectBackend::latch(rc::MonoTime t) {
     n.rest_samples = 0;
     if (enabled(n.mode) || n.mode == Mode::kDisabling) {
       n.mode = Mode::kStopping;
-      n.stop = hc::StopStatus::kStopping;
       emit(t, i, EventKind::kQuickStop);
-    } else if (n.mode == Mode::kStopping) {
-      n.stop = hc::StopStatus::kStopping;
-    } else {
+    }
+    // A stop that already has its outcome keeps it.
+    if (n.stop == hc::StopStatus::kConfirmed || n.stop == hc::StopStatus::kUnconfirmed) continue;
+    if (n.mode != Mode::kStopping) {
       n.stop = hc::StopStatus::kNotEnabled;
+    } else if (n.stop == hc::StopStatus::kStopping) {
+      n.accept = static_cast<std::uint8_t>(n.accept | kAcceptQuickStop);
+    } else {
+      begin_stop(i, kAcceptQuickStop, t);
     }
   }
+}
+
+void DirectBackend::begin_stop(std::size_t i, std::uint8_t accept, rc::MonoTime t) {
+  Node& n = nodes_[i];
+  n.stop = hc::StopStatus::kStopping;
+  n.rest_samples = 0;
+  n.stop_from = t;
+  n.accept = accept;
+}
+
+bool DirectBackend::accepts(std::uint8_t accept, Mode m) {
+  if (m == Mode::kStopping) return (accept & kAcceptQuickStop) != 0U;
+  if (m == Mode::kDisabling || m == Mode::kDisabled) return (accept & kAcceptSwitchedOn) != 0U;
+  return false;
 }
 
 // Re-arm phases, group-wide (C9): disable every enabled joint, wait for all at rest, then
@@ -300,24 +342,31 @@ void DirectBackend::progress_deactivate(rc::MonoTime t) {
   if (!deactivate_op_.has_value()) return;
   const std::uint64_t id = deactivate_op_->op_id;
   if (t >= deactivate_op_->deadline) {
-    set_op(id, hc::OpState::kFailed, "deactivate deadline passed");
-    deactivate_op_.reset();
+    fail_deactivate("deactivate deadline passed", t);
     return;
-  }
-  for (std::size_t i = 0; i < hc::kJoints; ++i) {
-    if (enabled(nodes_[i].mode)) {
-      nodes_[i].mode = Mode::kDisabling;
-      emit(t, i, EventKind::kDisabled);
-    }
   }
   const bool confirming = std::any_of(nodes_.begin(), nodes_.end(), [](const Node& n) {
     return n.stop == hc::StopStatus::kStopping;
   });
   if (!all_at_rest() || confirming) return;
+  const bool unconfirmed = std::any_of(nodes_.begin(), nodes_.end(), [](const Node& n) {
+    return n.stop == hc::StopStatus::kUnconfirmed;
+  });
+  if (unconfirmed) {
+    fail_deactivate("a stop was not confirmed", t);
+    return;
+  }
   for (Node& n : nodes_) n.mode = Mode::kDisabled;
   active_ = false;
   set_op(id, hc::OpState::kSucceeded);
   deactivate_op_.reset();
+}
+
+// A failed or timed-out op latches the group inhibit (C17).
+void DirectBackend::fail_deactivate(const char* error, rc::MonoTime t) {
+  set_op(deactivate_op_->op_id, hc::OpState::kFailed, error);
+  deactivate_op_.reset();
+  latch(t);
 }
 
 void DirectBackend::take_command(rc::MonoTime t) {
@@ -345,7 +394,7 @@ void DirectBackend::local_stops(rc::MonoTime t) {
     }
     if (!stop) continue;
     n.mode = Mode::kStopping;
-    n.stop = hc::StopStatus::kStopping;
+    begin_stop(i, kAcceptQuickStop, t);
     emit(t, i, EventKind::kLocalStop);
     any = true;
   }
@@ -397,7 +446,7 @@ void DirectBackend::sample(rc::MonoTime t) {
     for (std::size_t i = 0; i < hc::kJoints; ++i) {
       s.position[i] = to_rad(nodes_[i].model.state().position_nrad);
       s.velocity[i] = to_rad(nodes_[i].model.state().velocity_nrad_s);
-      s.in_stop[i] = nodes_[i].mode == Mode::kStopping;
+      s.mode[i] = nodes_[i].mode;
     }
     s.applied = applied_;
     if (ring_size_ == kSampleRing) {  // the oldest in-flight sample is lost
@@ -415,26 +464,26 @@ void DirectBackend::sample(rc::MonoTime t) {
   }
 }
 
-// C18: a stop is confirmed after 5 distinct fresh samples, each at rest with the joint in Quick
-// Stop Active. A sample is counted once, when it arrives; a drive that reports itself
-// unavailable confirms nothing (judge_stops).
+// C18: a stop is confirmed after 5 distinct fresh samples, each at rest with the joint in a mode
+// its track accepts (Quick Stop Active for an inhibit, Switched On for a deactivate).
+// A sample is counted once, when it arrives, and only if it was taken after the stop began.
+// A drive that reports itself unavailable confirms nothing (judge_stops).
 void DirectBackend::count_rest(const Sample& s) {
-  if (!inhibited_) return;
   for (std::size_t i = 0; i < hc::kJoints; ++i) {
     Node& n = nodes_[i];
-    if (n.stop != hc::StopStatus::kStopping || !n.drive_available) continue;
-    n.rest_samples =
-        (s.in_stop[i] && std::abs(s.velocity[i]) < kRestVelocity) ? n.rest_samples + 1 : 0;
+    if (n.stop != hc::StopStatus::kStopping || !n.drive_available || s.at < n.stop_from) continue;
+    n.rest_samples = (accepts(n.accept, s.mode[i]) && std::abs(s.velocity[i]) < kRestVelocity)
+                         ? n.rest_samples + 1
+                         : 0;
     if (n.rest_samples >= kConfirmSamples) n.stop = hc::StopStatus::kConfirmed;
   }
 }
 
-// The drive's own evidence first, then the deadline from the inhibit.
+// The drive's own evidence first, then the deadline from the start of the stop.
 void DirectBackend::judge_stops(rc::MonoTime t) {
-  if (!inhibited_) return;
   for (Node& n : nodes_) {
     if (n.stop != hc::StopStatus::kStopping) continue;
-    if (!n.drive_available || t - inhibit_at_ >= kStopConfirmDeadline) {
+    if (!n.drive_available || t - n.stop_from >= kStopConfirmDeadline) {
       n.stop = hc::StopStatus::kUnconfirmed;
       faults_.set(hc::Fault::kStopUnconfirmed);
     }

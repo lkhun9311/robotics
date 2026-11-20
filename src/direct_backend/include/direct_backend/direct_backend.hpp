@@ -74,6 +74,8 @@ using EventSink = void (*)(void* context, const Event& event);
 // a_stop and latches a policy stop; any unexpected stop, a stale feedback or a failed op latches
 // the group inhibit (C17) and every enabled joint is stopped, then each stop is confirmed (C18)
 // from the joint's own availability first and then 5 distinct fresh samples at rest.
+// Deactivate disables every enabled joint and confirms each stop the same way, at rest and
+// Switched On; it fails, and latches the inhibit, on an unconfirmed stop or at its deadline.
 //
 // Not thread-safe. The control path (submit, poll, step, op_state, inhibited, can_apply) does not
 // allocate: every buffer is fixed. wait() builds an OpResult and may allocate.
@@ -125,11 +127,19 @@ class DirectBackend final : public hal_contract::Backend {
  private:
   enum class Mode : std::uint8_t { kDisabled, kHolding, kTracking, kDisabling, kStopping };
 
+  // The joint modes a stop track accepts as stopped (C18), as a bit set.
+  // An inhibit stop ends in Quick Stop Active; a deactivate stop ends Switched On.
+  static constexpr std::uint8_t kAcceptQuickStop = 1U << 0U;
+  static constexpr std::uint8_t kAcceptSwitchedOn = 1U << 1U;
+
   struct Node {
     drive_core::JointModel model{};
     Mode mode{Mode::kDisabled};
     hal_contract::StopStatus stop{hal_contract::StopStatus::kNone};
     int rest_samples{0};
+    // While stop is kStopping: when the track began and the modes it accepts.
+    runtime_core::MonoTime stop_from{};
+    std::uint8_t accept{0};
     bool inject{false};
     bool drive_available{true};
     std::int64_t hold_nrad{0};
@@ -146,7 +156,7 @@ class DirectBackend final : public hal_contract::Backend {
     std::uint64_t seq{0};  // distinct per sample (C18)
     hal_contract::Joints position{};
     hal_contract::Joints velocity{};
-    std::array<bool, hal_contract::kJoints> in_stop{};  // statusword: Quick Stop Active
+    std::array<Mode, hal_contract::kJoints> mode{};  // the statusword's drive state
     std::optional<std::uint64_t> applied{};
   };
 
@@ -157,11 +167,14 @@ class DirectBackend final : public hal_contract::Backend {
   };
 
   static bool enabled(Mode m) { return m == Mode::kHolding || m == Mode::kTracking; }
+  static bool accepts(std::uint8_t accept, Mode m);
 
   void set_op(std::uint64_t id, hal_contract::OpState state, const char* error = nullptr);
   void emit(runtime_core::MonoTime t, std::size_t i, EventKind kind, double target = 0.0,
             std::optional<std::uint64_t> seq = std::nullopt, hal_contract::AuthorityId id = {});
   void fail_arm(const char* error);
+  void begin_stop(std::size_t i, std::uint8_t accept, runtime_core::MonoTime t);
+  void fail_deactivate(const char* error, runtime_core::MonoTime t);
   void latch(runtime_core::MonoTime t);
   void progress_arm(runtime_core::MonoTime t);
   void progress_deactivate(runtime_core::MonoTime t);
@@ -181,7 +194,6 @@ class DirectBackend final : public hal_contract::Backend {
   bool configured_{false};
   bool active_{false};
   bool inhibited_{false};
-  runtime_core::MonoTime inhibit_at_{};
   hal_contract::FaultSet faults_{};
   hal_contract::CommandCounters counters_{};
 

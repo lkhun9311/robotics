@@ -852,6 +852,41 @@ TYPED_TEST_P(Contract, ConfigureRefusedWhileAStopIsUnresolved) {
       << "configure stayed refused after every stop had its outcome";
 }
 
+// A deactivate posted while a re-arm is still disabling the moving axes supersedes the arm.
+// The arm fails: no axis commits or enables the new identity, and nothing is actuated after the
+// deactivate.
+TYPED_TEST_P(Contract, DeactivateDuringArm) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the re-arm";
+  const AuthorityId next{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const OpHandle arm = this->hal_.arm(
+      ArmRequest{next, this->now() + runtime_core::milliseconds(500), 60}, this->now());
+  this->step(kPeriod);
+  ASSERT_EQ(this->hal_.op_state(arm), OpState::kPending)
+      << "INCONCLUSIVE: the re-arm was no longer pending at the deactivate";
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  this->settle(arm, kArmTimeout);
+
+  EXPECT_EQ(this->hal_.op_state(arm), OpState::kFailed) << "a superseded arm did not fail";
+  EXPECT_NE(this->hal_.op_state(d), OpState::kPending) << "the deactivate never ended";
+  EXPECT_NE(this->hal_.arm_state(), ArmState::kArmed);
+  for (const DeviceEvent& e : this->events_) {
+    if (e.at < deactivated) continue;
+    EXPECT_NE(e.kind, DeviceEventKind::kCommitted) << "node " << e.node << " committed";
+    EXPECT_NE(e.kind, DeviceEventKind::kEnabled) << "node " << e.node << " enabled";
+    EXPECT_NE(e.kind, DeviceEventKind::kActuated) << "node " << e.node << " actuated";
+  }
+  const DeviceState final_state = this->fx_.device();
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_LT(std::abs(final_state.velocity[i]), kRestVelocity) << "joint " << i;
+  }
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -860,6 +895,6 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             SteadyAcceptanceLatency, SupersededCommandsAreCountedNotAcknowledged,
                             SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
                             InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
-                            ConfigureRefusedWhileAStopIsUnresolved);
+                            ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm);
 
 }  // namespace hal_contract::testing
