@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "arm_hw/arm_system.hpp"
 
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <exception>
@@ -238,7 +239,16 @@ std::optional<double> finite_number(const std::string& text) {
 // The derived destructors have already dropped the cycle (their forget_backend ran there).
 ArmSystem::~ArmSystem() { hal_.reset(); }
 
-rc::MonoTime ArmSystem::now() { return rc::SystemMonotonicClock{}.now(); }
+namespace {
+std::atomic<testing::Clock> g_clock{nullptr};
+}  // namespace
+
+rc::MonoTime ArmSystem::now() {
+  if (const testing::Clock clock = g_clock.load()) return clock();
+  return rc::SystemMonotonicClock{}.now();
+}
+
+void testing::set_clock(testing::Clock clock) { g_clock.store(clock); }
 
 ArmSystem::CallbackReturn ArmSystem::fail(const std::string& reason, CallbackReturn result) {
   last_error_ = reason;
@@ -608,6 +618,10 @@ rc::MonoTime to_time(std::uint64_t ns) {
 hi::return_type ArmSystem::write(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
   if (!hal_ || !bound_) return hi::return_type::OK;
   const rc::MonoTime t = now();
+  // A logic-time backend catches up to t first.
+  // Otherwise a step dated before t, replayed by the next read(), would take this write's command
+  // before it was approved.
+  advance(t);
 
   // arm: a new non-zero request id posts one arm op, never waited for.
   std::array<std::uint64_t, kArmFields.size()> a{};

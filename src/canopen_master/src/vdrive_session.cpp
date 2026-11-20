@@ -27,6 +27,9 @@ constexpr std::uint8_t bit(DriveState s) {
 // stop) or in Fault (after a fault reaction); a disable ends in Switched On.
 constexpr std::uint8_t kAcceptInhibit = bit(DriveState::kQuickStopActive) | bit(DriveState::kFault);
 constexpr std::uint8_t kAcceptDisable = bit(DriveState::kSwitchedOn);
+constexpr const char* kLeftOperational =
+    "a node was already Operational at configure and reports an earlier master's state (a stop "
+    "or an old tag): reset the drives before a new session configures them";
 
 constexpr std::uint16_t kIdxDeviceType = 0x1000;
 constexpr std::uint16_t kIdxIdentity = 0x1018;
@@ -363,10 +366,17 @@ void VdriveSession::on_sample(std::size_t i, const NodeSample& s, MonoTime now) 
     return;  // Residue of the state this configure clears (see start_configure).
   }
   const DriveState state = decode_statusword(s.statusword);
+  // A node this session did not know Operational still sends its PDOs during configure, so an
+  // earlier master left it Operational.
+  // If its state (a stop, an old tag) latches the inhibit, the configure fails naming that cause.
+  if (phase_ == SessionPhase::kConfiguring && op_is(OpKind::kConfigure)) {
+    latch_reason_ = kLeftOperational;
+  }
   check_tag(i, s, now);
   if (!inhibited_) {
     check_state(i, state, now);
   }
+  latch_reason_ = nullptr;
   stop_on_sample(i, s);
   if (op_is(OpKind::kActivate)) {
     if (s.sampled_at >= op_started_ && state == DriveState::kSwitchedOn) {
@@ -1171,7 +1181,9 @@ void VdriveSession::latch(std::optional<Fault> fault, MonoTime now, bool cancell
   inhibited_ = true;
   faults_.set(Fault::kInhibited);
   if (op_) {
-    cancelled_arm = end_failed("an unexpected event latched the inhibit") || cancelled_arm;
+    const char* why =
+        latch_reason_ != nullptr ? latch_reason_ : "an unexpected event latched the inhibit";
+    cancelled_arm = end_failed(why) || cancelled_arm;
   }
   stop_streaming();
   for (std::size_t i = 0; i < kSessionNodes; ++i) {

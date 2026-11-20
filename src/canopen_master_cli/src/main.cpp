@@ -54,7 +54,10 @@
 // --arm-at-ns (CLOCK_MONOTONIC ns) holds the arm step until that instant, so a harness whose
 // fault window is fixed to its proxy's start knows the fault comes after the arm.
 // --duration-ms is the deadline of activate_hal and arm (default 15000) and of console (default
-// none). SIGTERM/SIGINT end any scenario.
+// none).
+// The bring-up of stream (configure, activate, arm) has its own 15 s deadline; its deactivate has
+// only the op's own deadline.
+// SIGTERM/SIGINT end any scenario.
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -410,7 +413,11 @@ class HalRun {
         run_.finish(false, "stopped by a signal before the scenario ended");
         break;
       }
-      if (deadline && t >= *deadline && stage_ != Stage::kStream && stage_ != Stage::kObserve) {
+      // The deadline bounds the bring-up only.
+      // The deactivate after a stream keeps its own op deadline.
+      const bool bring_up =
+          stage_ == Stage::kConfigure || stage_ == Stage::kActivate || stage_ == Stage::kArm;
+      if (deadline && t >= *deadline && bring_up) {
         run_.finish(false, "the deadline passed in step " + std::to_string(step_n_));
         break;
       }

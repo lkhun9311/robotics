@@ -81,10 +81,19 @@ class ReferenceBackend final : public hc::Backend {
   // ---- Backend ----
 
   void configure(const hc::OpTicket& t, rc::MonoTime /*now*/) override {
+    // A stop still being confirmed keeps its tracking: configure would erase it, so it is refused.
+    if (std::any_of(nodes_.begin(), nodes_.end(),
+                    [](const Node& n) { return n.stop == hc::StopStatus::kStopping; })) {
+      ops_[t.op_id] = hc::OpState::kFailed;
+      return;
+    }
     inhibited_ = false;
     faults_ = hc::FaultSet{};
     active_ = false;
     armed_.reset();
+    // Ops still pending are superseded: each ends instead of staying pending for good.
+    if (arm_op_.has_value()) ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
+    if (deactivate_op_.has_value()) ops_[deactivate_op_->op_id] = hc::OpState::kFailed;
     arm_op_.reset();
     deactivate_op_.reset();
     box_.reset();
@@ -100,13 +109,22 @@ class ReferenceBackend final : public hc::Backend {
     ops_[t.op_id] = hc::OpState::kSucceeded;
   }
   rc::DeviceCapabilities capabilities() const override { return rc::virtual_canopen_profile(); }
-  void activate(const hc::OpTicket& t, rc::MonoTime /*now*/) override {
+  void activate(const hc::OpTicket& t, rc::MonoTime now) override {
+    supersede_deactivate(now);
     active_ = configured_ && !inhibited_;
+    if (active_) {
+      // A new cycle starts with no stop result.
+      for (Node& n : nodes_) {
+        n.stop = hc::StopStatus::kNone;
+        n.rest_samples = 0;
+      }
+    }
     ops_[t.op_id] = active_ ? hc::OpState::kSucceeded : hc::OpState::kFailed;
   }
-  void arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime /*now*/) override {
+  void arm(const hc::OpTicket& t, const hc::ArmRequest& request, rc::MonoTime now) override {
     if (arm_op_.has_value()) ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
     arm_op_.reset();
+    supersede_deactivate(now);
     if (!active_ || inhibited_) {
       ops_[t.op_id] = hc::OpState::kFailed;
       return;
@@ -137,7 +155,15 @@ class ReferenceBackend final : public hc::Backend {
     fb.counters = counters_;
     return fb;
   }
-  void deactivate(const hc::OpTicket& t, rc::MonoTime /*now*/) override {
+  void deactivate(const hc::OpTicket& t, rc::MonoTime now) override {
+    // A deactivate over a pending one supersedes it: the first fails and latches.
+    fail_deactivate(now);
+    // A pending arm is superseded: it fails and never enables, and the failed op latches (C17).
+    if (arm_op_.has_value()) {
+      ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
+      arm_op_.reset();
+      latch(now);
+    }
     deactivate_op_ = t;
     ops_[t.op_id] = hc::OpState::kPending;
     armed_.reset();
@@ -169,6 +195,7 @@ class ReferenceBackend final : public hc::Backend {
     Mode mode{Mode::kDisabled};
     hc::StopStatus stop{hc::StopStatus::kNone};
     int rest_samples{0};
+    rc::MonoTime stop_from{};  // when the stop being confirmed began
     bool inject{false};
     bool stopping_now{false};
   };
@@ -204,6 +231,16 @@ class ReferenceBackend final : public hc::Backend {
     n.x += n.v * kWSeconds;
   }
 
+  // A failed deactivate latches the inhibit (C17).
+  void fail_deactivate(rc::MonoTime t) {
+    if (!deactivate_op_.has_value()) return;
+    ops_[deactivate_op_->op_id] = hc::OpState::kFailed;
+    deactivate_op_.reset();
+    latch(t);
+  }
+  // An activate or arm posted while a deactivate is pending supersedes it, so the new op fails.
+  void supersede_deactivate(rc::MonoTime t) { fail_deactivate(t); }
+
   void fail_arm() {
     if (!arm_op_.has_value()) return;
     ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
@@ -216,7 +253,6 @@ class ReferenceBackend final : public hc::Backend {
   void latch(rc::MonoTime t) {
     if (inhibited_) return;
     inhibited_ = true;
-    inhibit_at_ = t;
     box_.reset();
     command_.reset();
     fail_arm();
@@ -225,6 +261,7 @@ class ReferenceBackend final : public hc::Backend {
       n.rest_samples = 0;
       if (enabled(n.mode) || n.mode == Mode::kDisabling) {
         n.mode = Mode::kStopping;
+        if (n.stop != hc::StopStatus::kStopping) n.stop_from = t;
         n.stop = hc::StopStatus::kStopping;
         emit(t, i, ht::DeviceEventKind::kQuickStop);
       } else if (n.mode == Mode::kStopping) {
@@ -271,15 +308,29 @@ class ReferenceBackend final : public hc::Backend {
     arm_op_.reset();
   }
 
+  // C18: each disabled axis's stop is confirmed before the deactivate succeeds.
   void progress_deactivate(rc::MonoTime t) {
     if (!deactivate_op_.has_value()) return;
     for (std::size_t i = 0; i < hc::kJoints; ++i) {
-      if (enabled(nodes_[i].mode)) {
-        nodes_[i].mode = Mode::kDisabling;
+      Node& n = nodes_[i];
+      if (enabled(n.mode)) {
+        n.mode = Mode::kDisabling;
         emit(t, i, ht::DeviceEventKind::kDisabled);
+        if (!inhibited_) {
+          n.stop = hc::StopStatus::kStopping;
+          n.stop_from = t;
+          n.rest_samples = 0;
+        }
       }
     }
-    if (!std::all_of(nodes_.begin(), nodes_.end(), [](const Node& n) { return n.v == 0.0; })) {
+    if (!std::all_of(nodes_.begin(), nodes_.end(), [](const Node& n) { return n.v == 0.0; }) ||
+        std::any_of(nodes_.begin(), nodes_.end(),
+                    [](const Node& n) { return n.stop == hc::StopStatus::kStopping; })) {
+      return;
+    }
+    if (std::any_of(nodes_.begin(), nodes_.end(),
+                    [](const Node& n) { return n.stop == hc::StopStatus::kUnconfirmed; })) {
+      fail_deactivate(t);
       return;
     }
     for (Node& n : nodes_) n.mode = Mode::kDisabled;
@@ -314,6 +365,7 @@ class ReferenceBackend final : public hc::Backend {
       if (!stop) continue;
       n.mode = Mode::kStopping;
       n.stop = hc::StopStatus::kStopping;
+      n.stop_from = t;
       emit(t, i, ht::DeviceEventKind::kLocalStop);
       any = true;
     }
@@ -367,10 +419,9 @@ class ReferenceBackend final : public hc::Backend {
     }
   }
 
-  // C18: 5 distinct fresh samples at rest while in Quick Stop Active; the deadline runs from
-  // the inhibit. Without fresh samples nothing is confirmed.
+  // C18: 5 distinct fresh samples at rest; the deadline runs from the start of the stop.
+  // Without fresh samples nothing is confirmed.
   void confirm_stops(rc::MonoTime t) {
-    if (!inhibited_) return;
     for (std::size_t i = 0; i < hc::kJoints; ++i) {
       Node& n = nodes_[i];
       if (n.stop != hc::StopStatus::kStopping) continue;
@@ -382,7 +433,7 @@ class ReferenceBackend final : public hc::Backend {
           continue;
         }
       }
-      if (t - inhibit_at_ >= ht::kStopConfirmDeadline) {
+      if (t - n.stop_from >= ht::kStopConfirmDeadline) {
         n.stop = hc::StopStatus::kUnconfirmed;
         faults_.set(hc::Fault::kStopUnconfirmed);
       }
@@ -401,7 +452,6 @@ class ReferenceBackend final : public hc::Backend {
   bool configured_{false};
   bool active_{false};
   bool inhibited_{false};
-  rc::MonoTime inhibit_at_{};
   hc::FaultSet faults_{};
   hc::CommandCounters counters_{};
   std::optional<hc::AuthorityId> armed_{};

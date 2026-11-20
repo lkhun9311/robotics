@@ -390,6 +390,56 @@ TEST(ArmSystem, MissingPermitIsNoPermitVerdict) {
   }
 }
 
+// A clock the test steps itself (arm_hw::testing::set_clock), restored at scope exit.
+rc::MonoTime g_test_now{};
+rc::MonoTime test_now() { return g_test_now; }
+struct SteppedClock {
+  explicit SteppedClock(rc::MonoTime start) {
+    g_test_now = start;
+    ah::testing::set_clock(&test_now);
+  }
+  ~SteppedClock() { ah::testing::set_clock(nullptr); }
+  SteppedClock(const SteppedClock&) = delete;
+  SteppedClock& operator=(const SteppedClock&) = delete;
+  void advance(rc::Duration d) { g_test_now = g_test_now + d; }
+};
+
+// The device takes an approved command no earlier than the write that approved it.
+// read() replays the device steps since the previous read, so write() must catch up first.
+TEST(ArmSystem, DirectCommandIsNeverTakenBeforeItsApproval) {
+  struct Sink {
+    std::vector<direct_backend::Event> events;
+    static void put(void* self, const direct_backend::Event& e) {
+      static_cast<Sink*>(self)->events.push_back(e);
+    }
+  };
+  Component c(direct());
+  c.arm();
+  Sink sink;
+  dynamic_cast<ah::DirectArmHw&>(*c).backend()->set_event_sink(&Sink::put, &sink);
+  // From here time moves only when the test says so.
+  SteppedClock clock(mono_now());
+  c.read();
+  c.grant_permit();
+  c.setpoint(1, c.joints());
+  // Five device steps are due since this read when the write comes, 10 ms later.
+  clock.advance(rc::milliseconds(10));
+  const rc::MonoTime approved = g_test_now;
+  ASSERT_EQ(c.write(), hi::return_type::OK);
+  ASSERT_EQ(c.verdict(), hc::HalVerdict::kSend) << "INCONCLUSIVE: " << hc::to_string(c.verdict());
+  for (int k = 0; k < 5; ++k) {
+    clock.advance(rc::milliseconds(2));
+    c.read();
+  }
+  bool applied = false;
+  for (const direct_backend::Event& e : sink.events) {
+    if (e.kind != direct_backend::EventKind::kActuated || e.source_seq != 1U) continue;
+    applied = true;
+    EXPECT_GE(e.at, approved) << "applied " << (approved - e.at).ns << " ns before its approval";
+  }
+  ASSERT_TRUE(applied) << "INCONCLUSIVE: the command was never applied";
+}
+
 TEST(ArmSystem, GuardRefusalReturnsOk) {
   Component c(direct());
   c.arm();

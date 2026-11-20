@@ -602,7 +602,7 @@ neither link shows an NMT Start or an RPDO afterwards:
 
 ### One contract suite, two backends
 
-The same 15 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
+The same 20 cases (`hal_contract/testing/contract_suite.hpp`) run unchanged against
 `DirectBackend` (`direct_backend_tests`, `Direct/Contract/*`) and against `CanopenBackend` with
 its session and master over six in-memory `drive_core` drives (`canopen_backend_tests`,
 `Canopen/Contract/*`), both in logic time. A fixture declares only two latencies: arming from
@@ -619,8 +619,13 @@ release build (a test requires this table to be exactly what the script prints):
 <!-- backend table: python3 tools/evidence/backend_table.py --write-readme -->
 | Contract case | DirectBackend | CanopenBackend (in-memory drive bus) |
 |---|---|---|
+| `ActivateAfterDeactivateClearsStopResults` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldEndsAtHoldUntil` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ArmHoldsActualPositionWithoutPermit` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ArmWhileDeactivatePending` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `ConfigureRefusedWhileAStopIsUnresolved` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `DeactivateDuringArm` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
+| `DeactivateOverPendingDeactivate` | PASS: arm 2.000 ms | PASS: arm 30.000 ms |
 | `ExpiredPermitStopsWithinBound` | PASS: arm 2.000 ms; motion ended 106.000 ms after the reference; travel 0.057 rad | PASS: arm 30.000 ms; motion ended 126.000 ms after the reference; travel 0.075 rad |
 | `InhibitStopsEveryAxisAndConfirms` | PASS: arm 2.000 ms; motion ended 48.000 ms after the reference; travel 0.012 rad; all axes stopped 2.000 ms after the injection | PASS: arm 30.000 ms; motion ended 100.000 ms after the reference; travel 0.051 rad; all axes stopped 2.000 ms after the injection |
 | `LostCommandsStopWithinBound` | PASS: arm 2.000 ms; motion ended 10.000 ms after the reference; travel 0.009 rad | PASS: arm 30.000 ms; motion ended 30.000 ms after the reference; travel 0.027 rad |
@@ -639,7 +644,9 @@ release build (a test requires this table to be exactly what the script prints):
 Recovery differs on purpose until E4: a new `configure` of `DirectBackend` clears a latched
 policy stop (`DirectBackend.ConfigureClearsALatchedPolicyStop`), while a `drive_core` drive keeps
 its D11 policy latch until an explicit policy reset (`Latch.PolicyResetOverSdo`), so every
-contract case that stops the device starts from a fresh fixture.
+contract case that stops the device starts from a fresh fixture. Both backends refuse a
+`configure` while any stop is still being confirmed, so a configure never erases a stop before
+its outcome (confirmed or unconfirmed) is reported (`ConfigureRefusedWhileAStopIsUnresolved`).
 
 ### The plugins under ros2_control
 
@@ -712,7 +719,7 @@ INCONCLUSIVE (`test_master_fault_judges.py`, `test_master_judges.py`):
 | N1 | Start, Stop, Pre-operational, Reset Communication and Reset Node to node 2: canopend's heartbeat byte, its own log and our master's `state` event agree after each; boot-up after both resets (Reset Node ends the canopend process in this build; the harness restarts it, recorded separately); TPDO1 only in Operational; no SDO answer in Stopped | Other nodes; reset timing |
 | N2 | No slave: `boot_timeout` 1002 ms after our master's first SYNC, no NMT; canopend stopped by SIGSTOP: `hb_lost` 251 ms after its last heartbeat; SIGCONT: `hb_resumed`; no NMT frame at all | Consumer accuracy beyond the 250-400 ms window |
 | N3 | Uploads of 0x1000 and 0x1018:01 (both 0 in the example OD); a 0x1017 download changes canopend's heartbeat period; six aborts decoded with canopend's codes (0x06020000 twice, 0x06010002, 0x06090011, 0x06070013, 0x06070012) | Segmented or block transfers (our client has none) |
-| N4 | Our master maps TPDO1 (8 bytes) and RPDO1 (2 bytes) by CiA 301 dynamic mapping; 16 TPDO1 of DLC 8 whose bytes equal the values read by SDO and decoded by our master; our 2-byte RPDO1 applied; a DLC 1 RPDO1 gives canopend's EMCY 0x8210 and it stays Operational | Our vdrive's PDO layouts (CANopenNode never sees them) |
+| N4 | Our master maps TPDO1 (8 bytes) and RPDO1 (2 bytes) by CiA 301 dynamic mapping; 16 TPDO1 of DLC 8 whose bytes equal the values read by SDO and decoded by our master; a 2-byte RPDO1 the harness composes and sends as a raw frame through the console's `send` (our master has no generic RPDO producer) applied; a DLC 1 RPDO1 gives canopend's EMCY 0x8210 and it stays Operational | Our vdrive's PDO layouts (CANopenNode never sees them) |
 | N5 | 24 synchronous (type 0) RPDO values, SYNC stepped one at a time: each invisible by SDO before the SYNC predicted to apply it and visible after it, by SDO and in the TPDO our master decoded; applied at the first SYNC after the RPDO 9 times and at the second 15 times, as the pinned parity defect predicts (below); the same sequence with type 255 must FAIL the same judge (`n5_type255`) | Ideal CiA 301 timing of a synchronous RPDO (the pinned build does not have it) |
 | N6 | canopend's EMCY 0x8210 and its error-reset EMCY 0x0000, each decoded by our master with the frame's code and register | Any other error code |
 | N7 | Six canopend nodes: 0x2012 aborts 0x06020000 on all six, configure succeeds with the generic profile, activation is refused naming five capabilities, no NMT Start and no RPDO for 390 ms after the refusal | Our vdrive extension against an independent peer (there is none) |
@@ -740,7 +747,8 @@ script writes.
    CANopenNode example OD's, so what tells the two apart in N7 is the extension probe (0x2012
    aborts), not the identity.
 3. A new master process (a fresh session) that meets drives a previous master left Operational
-   fails configure: their Quick Stop Active TPDOs under the old tag latch its inhibit
+   fails configure: their Quick Stop Active TPDOs under the old tag latch its inhibit, and the
+   configure error says a node was already Operational and the drives must be reset
    (`test_fresh_master_over_operational_drives_fails_configure`), and a drive that stopped on
    expiry or timeout keeps its D11 policy latch until a policy reset. The arm_hw plugin makes every
    configure a fresh session, so it starts only over drives a master deactivated. Recovery from

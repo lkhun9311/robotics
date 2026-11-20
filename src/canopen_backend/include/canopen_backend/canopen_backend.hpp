@@ -137,6 +137,9 @@ class CanopenBackend final : public hal_contract::Backend {
   void refuse(const hal_contract::OpTicket& ticket, const char* error);
   // A configure now could reach drives that are (or may become) Operation Enabled, untracked.
   bool configure_unsafe() const;
+  // A stop is still being confirmed (C18).
+  // A configure now would erase it before its outcome is known, so configure waits for it.
+  bool stop_unresolved() const;
 
   CanopenConfig config_;
   std::unique_ptr<Transport> transport_;

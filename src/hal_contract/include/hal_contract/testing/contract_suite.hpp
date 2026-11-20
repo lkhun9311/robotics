@@ -813,6 +813,189 @@ TYPED_TEST_P(Contract, StaleAtRestSampleConfirmsNothing) {
   }
 }
 
+// C17 makes configure the only reset of the inhibit, and C18 gives every stop an outcome.
+// A configure posted while a stop is still being confirmed would erase that stop before its
+// outcome is known, so it is refused.
+// The stop tracking runs on to its outcome, and a configure after that outcome is accepted.
+TYPED_TEST_P(Contract, ConfigureRefusedWhileAStopIsUnresolved) {
+  constexpr std::size_t kNode = 2;
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the stop";
+  const runtime_core::MonoTime injected = this->now();
+  this->fx_.inject_node_stop(kNode);
+  const auto stopping = [this] {
+    return std::any_of(this->feedback_.stop.begin(), this->feedback_.stop.end(),
+                       [](StopStatus s) { return s == StopStatus::kStopping; });
+  };
+  while (!stopping() && this->now() < injected + kGroupStopLatency) this->step(kW);
+  ASSERT_TRUE(stopping()) << "INCONCLUSIVE: no stop was being confirmed";
+
+  const OpHandle refused = this->hal_.configure(this->now());
+  this->settle(refused, kConfigureTimeout);
+  EXPECT_EQ(this->hal_.op_state(refused), OpState::kFailed)
+      << "a configure erased a stop whose outcome was not known";
+  this->feedback_ = this->hal_.read(this->now());
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
+  EXPECT_TRUE(stopping()) << "the refused configure reset the stop tracking";
+
+  while (this->now() < injected + kStopConfirmDeadline + kTBus) this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_EQ(this->feedback_.stop[i], StopStatus::kConfirmed) << "axis " << i;
+  }
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited));
+  const OpHandle accepted = this->hal_.configure(this->now());
+  this->settle(accepted, kConfigureTimeout);
+  EXPECT_EQ(this->hal_.op_state(accepted), OpState::kSucceeded)
+      << "configure stayed refused after every stop had its outcome";
+}
+
+// A deactivate posted while a re-arm is still disabling the moving axes supersedes the arm.
+// The arm fails: no axis commits or enables the new identity, and nothing is actuated after the
+// deactivate.
+TYPED_TEST_P(Contract, DeactivateDuringArm) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the re-arm";
+  const AuthorityId next{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const OpHandle arm = this->hal_.arm(
+      ArmRequest{next, this->now() + runtime_core::milliseconds(500), 60}, this->now());
+  this->step(kPeriod);
+  ASSERT_EQ(this->hal_.op_state(arm), OpState::kPending)
+      << "INCONCLUSIVE: the re-arm was no longer pending at the deactivate";
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  this->settle(arm, kArmTimeout);
+
+  EXPECT_EQ(this->hal_.op_state(arm), OpState::kFailed) << "a superseded arm did not fail";
+  EXPECT_NE(this->hal_.op_state(d), OpState::kPending) << "the deactivate never ended";
+  EXPECT_NE(this->hal_.arm_state(), ArmState::kArmed);
+  for (const DeviceEvent& e : this->events_) {
+    if (e.at < deactivated) continue;
+    EXPECT_NE(e.kind, DeviceEventKind::kCommitted) << "node " << e.node << " committed";
+    EXPECT_NE(e.kind, DeviceEventKind::kEnabled) << "node " << e.node << " enabled";
+    EXPECT_NE(e.kind, DeviceEventKind::kActuated) << "node " << e.node << " actuated";
+  }
+  const DeviceState final_state = this->fx_.device();
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_LT(std::abs(final_state.velocity[i]), kRestVelocity) << "joint " << i;
+  }
+}
+
+// An activate posted while a deactivate is still stopping the axes supersedes the deactivate.
+// The superseded op fails and latches the inhibit (C17), so neither the activate nor a following
+// arm succeeds.
+// No axis commits or enables after the deactivate, and none actuates after the activate.
+TYPED_TEST_P(Contract, ArmWhileDeactivatePending) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  Ramp ramp = this->ramp_from_here(this->kA);
+  for (int i = 0; i < 15; ++i) ASSERT_EQ(this->ramp_cycle(ramp), HalVerdict::kSend) << i;
+  ASSERT_TRUE(this->moving(this->fx_.device())) << "INCONCLUSIVE: not moving at the deactivate";
+  const runtime_core::MonoTime deactivated = this->now();
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->step(kPeriod);
+  ASSERT_EQ(this->hal_.op_state(d), OpState::kPending)
+      << "INCONCLUSIVE: the deactivate was no longer pending";
+  const runtime_core::MonoTime activated = this->now();
+  const OpHandle a = this->hal_.activate(this->now());
+  this->settle(a, kActivateTimeout);
+  const AuthorityId next{this->kA.manager, this->kA.session, runtime_core::Generation{2}};
+  const OpHandle arm = this->hal_.arm(
+      ArmRequest{next, this->now() + runtime_core::milliseconds(500), 70}, this->now());
+  this->settle(arm, kArmTimeout);
+  this->settle(d, kDeactivateTimeout);
+  this->step(kPeriod);
+
+  EXPECT_EQ(this->hal_.op_state(a), OpState::kFailed) << "an activate ran over a deactivate";
+  EXPECT_EQ(this->hal_.op_state(arm), OpState::kFailed) << "an arm ran over a deactivate";
+  EXPECT_NE(this->hal_.arm_state(), ArmState::kArmed);
+  EXPECT_TRUE(this->feedback_.faults.has(Fault::kInhibited))
+      << "the superseded deactivate did not latch the inhibit";
+  for (const DeviceEvent& e : this->events_) {
+    if (e.at < deactivated) continue;
+    EXPECT_NE(e.kind, DeviceEventKind::kCommitted) << "node " << e.node << " committed";
+    EXPECT_NE(e.kind, DeviceEventKind::kEnabled) << "node " << e.node << " enabled";
+    // A command dispatched before the deactivate took effect may still land; none after the
+    // activate.
+    if (e.at >= activated) {
+      EXPECT_NE(e.kind, DeviceEventKind::kActuated) << "node " << e.node << " actuated";
+    }
+  }
+
+  // A deactivate retried while the latched stops still resolve waits for their outcome.
+  // It never succeeds while a stop is being confirmed or with an unconfirmed stop (C18).
+  const auto stopping = [this] {
+    return std::any_of(this->feedback_.stop.begin(), this->feedback_.stop.end(),
+                       [](StopStatus s) { return s == StopStatus::kStopping; });
+  };
+  ASSERT_TRUE(stopping()) << "INCONCLUSIVE: no stop was still being confirmed at the retry";
+  const OpHandle again = this->hal_.deactivate(this->now());
+  const runtime_core::MonoTime retried = this->now();
+  while (this->hal_.op_state(again) == OpState::kPending &&
+         this->now() - retried < kDeactivateTimeout) {
+    this->step(kW);
+  }
+  this->feedback_ = this->hal_.read(this->now());
+  ASSERT_NE(this->hal_.op_state(again), OpState::kPending) << "the retried deactivate never ended";
+  if (this->hal_.op_state(again) == OpState::kSucceeded) {
+    for (std::size_t i = 0; i < kJoints; ++i) {
+      EXPECT_TRUE(this->feedback_.stop[i] == StopStatus::kConfirmed ||
+                  this->feedback_.stop[i] == StopStatus::kNotEnabled)
+          << "the retried deactivate succeeded with axis " << i << " "
+          << to_string(this->feedback_.stop[i]);
+      EXPECT_LT(std::abs(this->fx_.device().velocity[i]), kRestVelocity)
+          << "the retried deactivate succeeded with axis " << i << " moving";
+    }
+  }
+}
+
+// After a deactivate the next activate starts with no stop result.
+// An axis that is not enabled reports no stop, never the outcome of the previous cycle.
+TYPED_TEST_P(Contract, ActivateAfterDeactivateClearsStopResults) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const OpHandle d = this->hal_.deactivate(this->now());
+  this->settle(d, kDeactivateTimeout);
+  ASSERT_EQ(this->hal_.op_state(d), OpState::kSucceeded) << "INCONCLUSIVE: deactivate failed";
+  this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    ASSERT_EQ(this->feedback_.stop[i], StopStatus::kConfirmed)
+        << "INCONCLUSIVE: axis " << i << " has no confirmed deactivate stop";
+  }
+  const OpHandle a = this->hal_.activate(this->now());
+  this->settle(a, kActivateTimeout);
+  ASSERT_EQ(this->hal_.op_state(a), OpState::kSucceeded) << "INCONCLUSIVE: activate failed";
+  this->step(kW);
+  for (std::size_t i = 0; i < kJoints; ++i) {
+    EXPECT_EQ(this->feedback_.stop[i], StopStatus::kNone)
+        << "axis " << i << " reports the previous cycle's stop";
+  }
+}
+
+// A deactivate posted over a pending deactivate supersedes it.
+// Both ops end: the first fails, and neither stays pending past its deadline.
+TYPED_TEST_P(Contract, DeactivateOverPendingDeactivate) {
+  this->bring_up();
+  this->arm(this->kA, runtime_core::milliseconds(500));
+  const OpHandle first = this->hal_.deactivate(this->now());
+  this->step(kW);
+  ASSERT_EQ(this->hal_.op_state(first), OpState::kPending)
+      << "INCONCLUSIVE: the first deactivate was no longer pending";
+  const runtime_core::MonoTime second_at = this->now();
+  const OpHandle second = this->hal_.deactivate(this->now());
+  while (this->now() - second_at < plus(kDeactivateTimeout, kTBus)) this->step(kW);
+
+  EXPECT_EQ(this->hal_.op_state(first), OpState::kFailed)
+      << "the superseded deactivate did not end as failed";
+  EXPECT_NE(this->hal_.op_state(second), OpState::kPending) << "the second deactivate never ended";
+}
+
 REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             ArmHoldsActualPositionWithoutPermit, ArmHoldEndsAtHoldUntil,
                             TracksApprovedCommandsWithinVmax, ExpiredPermitStopsWithinBound,
@@ -820,6 +1003,9 @@ REGISTER_TYPED_TEST_SUITE_P(Contract, NoCommandBeforeActivation,
                             OldIdentityRefusedAfterReadoption, LostFeedbackTurnsStale,
                             SteadyAcceptanceLatency, SupersededCommandsAreCountedNotAcknowledged,
                             SourceTimeNotReceiveTime, ReArmDisablesBeforeCommit,
-                            InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing);
+                            InhibitStopsEveryAxisAndConfirms, StaleAtRestSampleConfirmsNothing,
+                            ConfigureRefusedWhileAStopIsUnresolved, DeactivateDuringArm,
+                            ArmWhileDeactivatePending, ActivateAfterDeactivateClearsStopResults,
+                            DeactivateOverPendingDeactivate);
 
 }  // namespace hal_contract::testing

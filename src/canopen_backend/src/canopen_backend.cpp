@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "canopen_backend/canopen_backend.hpp"
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -51,6 +52,9 @@ std::unique_ptr<Transport> require(std::unique_ptr<Transport> transport) {
 constexpr const char* kRefusedWhileArmed =
     "configure refused while armed, arming or deactivating: deactivate first (its "
     "Pre-operational would stop enabled drives untracked)";
+constexpr const char* kRefusedWhileStopping =
+    "configure refused while a stop is still being confirmed: it would erase the stop before its "
+    "outcome is known";
 
 }  // namespace
 
@@ -140,6 +144,14 @@ void CanopenBackend::refuse(const hc::OpTicket& ticket, const char* error) {
   refusals_next_ = (refusals_next_ + 1) % kRefusalRing;
 }
 
+bool CanopenBackend::stop_unresolved() const {
+  if (!session_) return false;
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    if (session_->node(i).stop == hc::StopStatus::kStopping) return true;
+  }
+  return false;
+}
+
 bool CanopenBackend::configure_unsafe() const {
   if (!session_ || session_->inhibited()) return false;  // The inhibit tracks every stop (C17).
   switch (session_->phase()) {
@@ -158,6 +170,8 @@ void CanopenBackend::configure(const hc::OpTicket& ticket, rc::MonoTime now) {
     refuse(ticket, config_error_.c_str());
   } else if (configure_unsafe()) {
     refuse(ticket, kRefusedWhileArmed);
+  } else if (stop_unresolved()) {
+    refuse(ticket, kRefusedWhileStopping);
   } else {
     session_->configure(ticket);
   }

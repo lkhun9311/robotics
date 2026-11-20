@@ -444,6 +444,27 @@ def test_n7_activation_not_refused_fails():
     expect(obs, "FAIL", "activation was not refused")
 
 
+def test_n7_master_that_activates_fails():
+    """A master that activates anyway ends activate_hal with scenario_done and exit 0: that is a
+    FAIL of the row, not a missing precondition."""
+    obs = load("N7")
+    done = activate_done(obs)
+    done["ok"] = True
+    done.pop("error", None)
+    done.pop("missing", None)
+    failed = cli(obs, "scenario_failed", scenario="activate_hal")[0]
+    failed["event"] = "scenario_done"
+    failed.pop("reason", None)
+    obs["harness"]["cli_rc"] = 0
+    expect(obs, "FAIL", "")
+
+
+def test_n7_cli_exit_0_fails():
+    obs = load("N7")
+    obs["harness"]["cli_rc"] = 0
+    expect(obs, "FAIL", "the CLI exited 0")
+
+
 @pytest.mark.parametrize("capability", list(judges.CN_GENERIC_MISSING))
 def test_n7_capability_missing_from_the_refusal_fails(capability):
     obs = load("N7")
@@ -799,10 +820,6 @@ def _n7_five_nodes(o):
     o["canopend"] = o["canopend"][:5]
 
 
-def _n7_cli_exit_0(o):
-    o["harness"]["cli_rc"] = 0
-
-
 def _n7_configure_failed(o):
     n = [e for e in cli(o, "cmd") if e["line"] == "configure"][0]["n"]
     cli(o, "cmd_done", n=n)[0]["ok"] = False
@@ -829,7 +846,6 @@ PRECONDITION_EDITS = {
     "N5 a sync event lost": ("N5", _drop_sync_event, "sync_index does not count"),
     "N6 no error reset": ("N6", _n6_no_reset_emcy, "EMCY codes on vcan_host"),
     "N7 five nodes": ("N7", _n7_five_nodes, "canopend nodes"),
-    "N7 CLI exit 0": ("N7", _n7_cli_exit_0, "the CLI exited 0"),
     "N7 configure failed": ("N7", _n7_configure_failed, "configure failed"),
     "N7 short tail": ("N7", _n7_short_tail, "observed after the refusal"),
 }

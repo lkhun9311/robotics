@@ -325,7 +325,9 @@ def test_master_pdo_bytes_and_lengths(rig):
     to 16 bits of 0x1280:01 (2 bytes, type 255) with the CiA 301 dynamic mapping sequence (the
     only mappable objects of the example OD, Task 0). In Operational every TPDO1 on vcan_host has
     DLC 8 and the bytes of the values our master read back by SDO, and our master's pdo event of
-    the same SYNC decodes the same values; our 2-byte RPDO1 reaches vcan_device with DLC 2 and is
+    the same SYNC decodes the same values; a 2-byte RPDO1 the harness composes (a raw frame
+    through the console's `send`: our master has no generic RPDO producer) reaches vcan_device
+    with DLC 2 and is
     applied (SDO and the next TPDOs show it); a DLC 1 RPDO1 makes canopend send its PDO-length
     EMCY 0x8210 (pinned frame) without leaving Operational."""
     judge(run_pdo_rows(rig("N4")))
@@ -395,7 +397,9 @@ def test_master_sync_order_judge_rejects_type_255(rig):
     obs = run_sync_order(rig("N5"), 255)
     record(obs, "n5_type255")
     status, text = judges.verdict(obs)
-    print(f"N5 (type 255) {status}: {text}")
+    # The negative control: FAIL is the expected verdict, so a log reader must not take it for a
+    # failing row.
+    print(f"N5 (type 255) negative control, verdict {status} (expected FAIL): {text}")
     if status == "INCONCLUSIVE":
         inconclusive(text)
     assert status == "FAIL" and "visible by SDO before" in text, f"{status}: {text}"

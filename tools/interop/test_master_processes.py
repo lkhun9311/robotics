@@ -188,9 +188,32 @@ def test_fresh_master_over_operational_drives_fails_configure(start_bank, proxy,
     configure = step_done(second, "configure")
     assert configure is not None, f"configure never ended: {end}"
     assert not configure["ok"], f"configure passed over drives left Operational: {configure}"
-    assert "unexpected event latched the inhibit" in configure.get("error", ""), configure
+    assert "already Operational" in configure.get("error", ""), configure
+    assert "reset the drives" in configure.get("error", ""), configure
     assert rc == 1 and end["event"] == "scenario_failed", (rc, end)
     late = [r for r in bank.trace.poll() if r.get("event") == "drive" and
             r.get("kind") == "actuated" and r["t_ns"] > t_second["t_ns"]]
     assert not late, f"a drive actuated under the second master: {late[:3]}"
     print(f"second master's configure failed: {configure['error']}")
+
+
+def test_targeted_stream_past_the_bring_up_deadline_deactivates(start_bank, proxy, procs):
+    """The bring-up of `stream` has its own 15 s deadline; a targeted stream that outlasts it
+    must still end with its controlled deactivate, which keeps its own op deadline."""
+    stream_ms = 15500  # The ramp to the target takes about 0.5 s; the rest holds it.
+    target = (0.05, -0.05, 0.05, -0.05, 0.05, -0.05)
+    bank = start_bank()
+    bank.trace.wait_for(lambda r: r.get("event") == "start", 2, "bank start record")
+    cli = start_cli(procs, "stream", "--duration-ms", str(stream_ms),
+                    "--target", ",".join(str(q) for q in target))
+    rc, end = run_to_end(cli, stream_ms / 1000 + 20)
+    for step in ("configure", "activate", "arm"):
+        done = step_done(cli, step)
+        if done is None or not done["ok"]:
+            inconclusive(f"the master's step {step} did not complete: {done}; {end}")
+    if not cli.of("stream_end"):
+        inconclusive(f"the stream never reached its end: {end}")
+    deactivated = step_done(cli, "deactivate")
+    assert deactivated is not None, f"the deactivate never ended: {end}"
+    assert deactivated["ok"], deactivated
+    assert rc == 0 and end["event"] == "scenario_done", (rc, end)

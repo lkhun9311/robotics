@@ -440,6 +440,34 @@ TEST(Worker, UnackedCancelLatchesTheInhibit) {
   EXPECT_TRUE(w.shutdown(rc::milliseconds(1000)));
 }
 
+// An op that ends after its table slot went to a newer op (kOpTable = 16 ids later) must leave
+// the newer op's error alone.
+TEST(Worker, StaleOpKeepsTheNewerOpsError) {
+  rc::MonoTime now = kT0;
+  FakeBus bus([&] { return now; });  // Nobody answers: a configure stays in its probe.
+  cb::Worker w(config(), bus.transport());
+  const auto wake = [&] {
+    now = now + kW;
+    w.run_once(now);
+  };
+  // Op 5 takes the first in-flight entry; op 1 supersedes it and takes the second.
+  w.configure(hc::OpTicket{5, now + hc::kConfigureTimeout}, now);
+  wake();
+  w.configure(hc::OpTicket{1, now + hc::kConfigureTimeout}, now);
+  wake();
+  ASSERT_EQ(w.op_state(5), hc::OpState::kFailed) << "INCONCLUSIVE: op 5 was not superseded";
+  ASSERT_EQ(w.op_state(1), hc::OpState::kPending) << "INCONCLUSIVE: op 1 is not in flight";
+  // Op 17 shares op 1's table slot and the first in-flight entry, so it is published first.
+  // It supersedes op 1, which ends in the same wake.
+  w.activate(hc::OpTicket{17, now + hc::kActivateTimeout}, now);
+  wake();
+  ASSERT_EQ(w.op_state(17), hc::OpState::kFailed) << "INCONCLUSIVE: op 17 did not end";
+  const std::optional<hc::OpResult> r = w.wait(17, rc::Duration{});
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(r->error.find("superseded"), std::string::npos)
+      << "op 17 reports the error of the op it superseded: " << r->error;
+}
+
 TEST(Worker, SocketWriteErrorsAreCounted) {
   rc::MonoTime now = kT0;
   FakeBus bus([&] { return now; });

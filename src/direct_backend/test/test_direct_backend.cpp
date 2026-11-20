@@ -205,3 +205,115 @@ TEST(DirectBackend, StartPositionIsExactAndOutOfRangeIsRejected) {
   bad.start_position[2] = std::nan("");
   EXPECT_THROW(db::DirectBackend{bad}, std::invalid_argument);
 }
+
+// C17: a timed-out op latches the group inhibit, as on CANopen.
+TEST(DirectBackend, DeactivateTimeoutLatchesTheInhibit) {
+  Rig rig;
+  for (std::uint64_t k = 1; k <= 20; ++k) {  // 40 ms at v_max: braking takes 100 ms
+    rig.command(k, rig.t + rc::milliseconds(500));
+    rig.tick();
+  }
+  ASSERT_GT(std::abs(rig.backend.joint_velocity()[0]), 0.5) << "INCONCLUSIVE: not moving";
+  ASSERT_FALSE(rig.backend.inhibited()) << "INCONCLUSIVE: latched before the deactivate";
+  rig.backend.deactivate({++rig.ids, rig.t + rc::milliseconds(10)}, rig.t);
+  const std::uint64_t op = rig.ids;
+  for (int i = 0; i < 10; ++i) rig.tick();
+  ASSERT_EQ(rig.backend.op_state(op), hc::OpState::kFailed) << "INCONCLUSIVE: no timeout";
+  EXPECT_TRUE(rig.backend.inhibited()) << "a timed-out deactivate left the inhibit clear";
+  EXPECT_TRUE(rig.backend.poll(rig.t).faults.has(hc::Fault::kInhibited));
+}
+
+// A configure supersedes a pending arm: the arm ends instead of staying pending for good.
+TEST(DirectBackend, ConfigureEndsAPendingArm) {
+  Rig rig;
+  for (std::uint64_t k = 1; k <= 20; ++k) {
+    rig.command(k, rig.t + rc::milliseconds(500));
+    rig.tick();
+  }
+  ASSERT_FALSE(rig.backend.inhibited()) << "INCONCLUSIVE: latched before the re-arm";
+  rig.backend.arm({++rig.ids, rig.t + rc::milliseconds(1000)},
+                  hc::ArmRequest{kId, rig.t + rc::milliseconds(500), 2}, rig.t);
+  const std::uint64_t arm = rig.ids;
+  rig.tick();
+  ASSERT_EQ(rig.backend.op_state(arm), hc::OpState::kPending) << "INCONCLUSIVE: arm not pending";
+  rig.backend.configure({++rig.ids, rig.t + rc::milliseconds(3000)}, rig.t);
+  ASSERT_EQ(rig.backend.op_state(rig.ids), hc::OpState::kSucceeded) << "INCONCLUSIVE";
+  EXPECT_EQ(rig.backend.op_state(arm), hc::OpState::kFailed);
+  const std::optional<hc::OpResult> r = rig.backend.wait(arm, rc::Duration{});
+  ASSERT_TRUE(r.has_value()) << "the superseded arm reads as still pending";
+  EXPECT_FALSE(r->ok);
+}
+
+// C18: deactivate confirms each stop from fresh samples before it succeeds.
+TEST(DirectBackend, DeactivateConfirmsEveryStop) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  rig.backend.deactivate({++rig.ids, rig.t + rc::milliseconds(1000)}, rig.t);
+  const std::uint64_t op = rig.ids;
+  int steps = 0;
+  while (rig.backend.op_state(op) == hc::OpState::kPending && steps < 500) {
+    rig.tick();
+    ++steps;
+  }
+  ASSERT_EQ(rig.backend.op_state(op), hc::OpState::kSucceeded);
+  EXPECT_GE(steps, db::kConfirmSamples) << "succeeded before 5 distinct samples";
+  const hc::Feedback fb = rig.backend.poll(rig.t);
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    EXPECT_EQ(fb.stop[i], hc::StopStatus::kConfirmed) << i;
+  }
+  EXPECT_FALSE(rig.backend.inhibited());
+}
+
+// C18: with the feedback stalled nothing confirms a stop, so deactivate cannot succeed.
+TEST(DirectBackend, DeactivateWithStalledFeedbackFails) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  rig.backend.stall_feedback(true);
+  rig.backend.deactivate({++rig.ids, rig.t + rc::milliseconds(1000)}, rig.t);
+  const std::uint64_t op = rig.ids;
+  for (int i = 0; i < 200; ++i) rig.tick();  // 400 ms: past the 172 ms confirmation deadline
+  EXPECT_EQ(rig.backend.op_state(op), hc::OpState::kFailed) << "succeeded without any sample";
+  const hc::Feedback fb = rig.backend.poll(rig.t);
+  EXPECT_TRUE(fb.faults.has(hc::Fault::kStopUnconfirmed));
+  for (std::size_t i = 0; i < hc::kJoints; ++i) {
+    EXPECT_EQ(fb.stop[i], hc::StopStatus::kUnconfirmed) << i;
+  }
+}
+
+// C18: a drive that reports itself unavailable leaves its stop unconfirmed, and deactivate fails.
+TEST(DirectBackend, DeactivateWithAnUnavailableDriveFails) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  rig.backend.set_drive_available(4, false);
+  rig.backend.deactivate({++rig.ids, rig.t + rc::milliseconds(1000)}, rig.t);
+  const std::uint64_t op = rig.ids;
+  for (int i = 0; i < 100; ++i) rig.tick();
+  EXPECT_EQ(rig.backend.op_state(op), hc::OpState::kFailed);
+  const hc::Feedback fb = rig.backend.poll(rig.t);
+  EXPECT_EQ(fb.stop[4], hc::StopStatus::kUnconfirmed);
+  EXPECT_TRUE(fb.faults.has(hc::Fault::kStopUnconfirmed));
+  EXPECT_TRUE(rig.backend.inhibited());
+}
+
+// A command whose identity is not the armed one never reaches the joints.
+// The Hal checks identity first; the backend checks it again, as the CANopen session does.
+TEST(DirectBackend, SubmitDropsACommandOfAnotherIdentity) {
+  Rig rig;
+  ASSERT_EQ(rig.backend.op_state(3), hc::OpState::kSucceeded) << "INCONCLUSIVE: arm did not finish";
+  hc::ApprovedCommand c{};
+  c.id = hc::AuthorityId{rc::ManagerInstance{2}, kId.session, kId.generation};
+  c.source_seq = 1;
+  c.position = rig.backend.joint_position();
+  c.position[0] += 0.5;
+  c.approved_at = rig.t;
+  c.valid_until = rig.t + rc::milliseconds(40);
+  rig.backend.submit(c, rig.t);
+  rig.events.clear();
+  for (int i = 0; i < 5; ++i) rig.tick();
+  for (const db::Event& e : rig.events) {
+    if (e.kind == db::EventKind::kActuated) {
+      EXPECT_FALSE(e.source_seq.has_value()) << "a command of another identity was applied";
+    }
+  }
+  EXPECT_EQ(rig.backend.poll(rig.t).group_applied_source_seq, std::nullopt);
+}
