@@ -420,6 +420,8 @@ class VdriveSession {
   std::optional<hal_contract::AuthorityId> armed_id_;
 
   bool inhibited_{false};
+  // While set, the error a latch gives the op it ends (static storage); else the generic one.
+  const char* latch_reason_{nullptr};
   hal_contract::FaultSet faults_{};
   hal_contract::CommandCounters counters_{};
   SessionCounts counts_{};

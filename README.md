@@ -744,7 +744,8 @@ script writes.
    CANopenNode example OD's, so what tells the two apart in N7 is the extension probe (0x2012
    aborts), not the identity.
 3. A new master process (a fresh session) that meets drives a previous master left Operational
-   fails configure: their Quick Stop Active TPDOs under the old tag latch its inhibit
+   fails configure: their Quick Stop Active TPDOs under the old tag latch its inhibit, and the
+   configure error says a node was already Operational and the drives must be reset
    (`test_fresh_master_over_operational_drives_fails_configure`), and a drive that stopped on
    expiry or timeout keeps its D11 policy latch until a policy reset. The arm_hw plugin makes every
    configure a fresh session, so it starts only over drives a master deactivated. Recovery from

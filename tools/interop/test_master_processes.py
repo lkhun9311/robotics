@@ -188,7 +188,8 @@ def test_fresh_master_over_operational_drives_fails_configure(start_bank, proxy,
     configure = step_done(second, "configure")
     assert configure is not None, f"configure never ended: {end}"
     assert not configure["ok"], f"configure passed over drives left Operational: {configure}"
-    assert "unexpected event latched the inhibit" in configure.get("error", ""), configure
+    assert "already Operational" in configure.get("error", ""), configure
+    assert "reset the drives" in configure.get("error", ""), configure
     assert rc == 1 and end["event"] == "scenario_failed", (rc, end)
     late = [r for r in bank.trace.poll() if r.get("event") == "drive" and
             r.get("kind") == "actuated" and r["t_ns"] > t_second["t_ns"]]
