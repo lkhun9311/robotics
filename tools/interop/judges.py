@@ -1416,7 +1416,8 @@ def cn_line(obs, n):
 def cn_complete(obs, scenario="console", ending="scenario_done"):
     """The CLI ran to its scenario's end (`ending`, or one of a tuple of them), the proxy forwarded
     with no rules and complete counts, both captures saw traffic, and every canopend reported
-    running. Inconclusive otherwise."""
+    running.
+    Inconclusive otherwise."""
     cli = obs.get("cli") or []
     need(len(cn_events(obs, "start")) == 1, "canopen_master_cli printed no single start line")
     need(cli and cli[-1].get("event") == "exit", f"the CLI's last line is not exit: {cli[-1:]}")
