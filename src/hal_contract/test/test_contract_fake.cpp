@@ -81,6 +81,12 @@ class ReferenceBackend final : public hc::Backend {
   // ---- Backend ----
 
   void configure(const hc::OpTicket& t, rc::MonoTime /*now*/) override {
+    // A stop still being confirmed keeps its tracking: configure would erase it, so it is refused.
+    if (std::any_of(nodes_.begin(), nodes_.end(),
+                    [](const Node& n) { return n.stop == hc::StopStatus::kStopping; })) {
+      ops_[t.op_id] = hc::OpState::kFailed;
+      return;
+    }
     inhibited_ = false;
     faults_ = hc::FaultSet{};
     active_ = false;
@@ -137,7 +143,13 @@ class ReferenceBackend final : public hc::Backend {
     fb.counters = counters_;
     return fb;
   }
-  void deactivate(const hc::OpTicket& t, rc::MonoTime /*now*/) override {
+  void deactivate(const hc::OpTicket& t, rc::MonoTime now) override {
+    // A pending arm is superseded: it fails and never enables, and the failed op latches (C17).
+    if (arm_op_.has_value()) {
+      ops_[arm_op_->ticket.op_id] = hc::OpState::kFailed;
+      arm_op_.reset();
+      latch(now);
+    }
     deactivate_op_ = t;
     ops_[t.op_id] = hc::OpState::kPending;
     armed_.reset();
