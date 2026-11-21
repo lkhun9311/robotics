@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-// The plugin library and a detached worker (C13 teardown, carried from Task 6). This executable
-// does not link the plugin: it loads it through class_loader as pluginlib does, destroys a
-// CanopenArmHw whose worker is stalled (the destructor detaches it after 1 s), unloads the library
-// and only then lets the worker go on; the worker must end cleanly and the process must not crash.
+// The plugin library and a detached worker (C13 teardown, carried from Task 6).
+// This executable does not link the plugin: it loads it through class_loader as pluginlib does,
+// destroys a CanopenArmHw whose worker is stalled (the destructor detaches it after 1 s), unloads
+// the library and only then lets the worker go on; the worker must end cleanly and the process must
+// not crash.
 //
-// What this can and cannot show. In this stack the unload never unmaps the library, whatever the
-// plugin does: GCC gives it STB_GNU_UNIQUE symbols (inline and template statics), which glibc
-// never unloads, and class_loader refuses every unload once a "non-pure" plugin library was opened
-// in the process (hardware_interface's initialization opens the urdf parser plugins). So this
-// test cannot fail for a missing pin; the plugin pins itself (RTLD_NODELETE) for a stack where the
-// unload would be real, and ArmSystem.DestructorWithStalledWorkerDoesNotCrash checks that the pin
-// is taken. Here the whole pluginlib path is exercised end to end.
+// What this can and cannot show.
+// In this stack the unload never unmaps the library, whatever the plugin does: GCC gives it
+// STB_GNU_UNIQUE symbols (inline and template statics), which glibc never unloads, and class_loader
+// refuses every unload once a "non-pure" plugin library was opened in the process
+// (hardware_interface's initialization opens the urdf parser plugins).
+// So this test cannot fail for a missing pin; the plugin pins itself (RTLD_NODELETE) for a stack
+// where the unload would be real, and ArmSystem.DestructorWithStalledWorkerDoesNotCrash checks that
+// the pin is taken.
+// Here the whole pluginlib path is exercised end to end.
 #include <dlfcn.h>
 #include <gtest/gtest.h>
 

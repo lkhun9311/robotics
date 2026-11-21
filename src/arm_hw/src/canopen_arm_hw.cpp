@@ -28,7 +28,8 @@ std::atomic<bool> g_pinned{false};
 // Any object of this library: dladdr names the library that holds it.
 const char g_anchor = 0;
 
-// Marks this library RTLD_NODELETE: a later dlclose leaves it mapped. The handle is never closed.
+// Marks this library RTLD_NODELETE: a later dlclose leaves it mapped.
+// The handle is never closed.
 void pin_this_library() {
   Dl_info info{};
   if (::dladdr(&g_anchor, &info) == 0 || info.dli_fname == nullptr) return;

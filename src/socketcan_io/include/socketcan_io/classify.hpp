@@ -8,8 +8,9 @@
 
 #include "canopen_codec/codec.hpp"
 
-// Which received frames may reach the CANopen codec. Only a classic, standard-identifier data
-// frame of up to 8 bytes does; everything else is counted by class and dropped (codec.hpp).
+// Which received frames may reach the CANopen codec.
+// Only a classic, standard-identifier data frame of up to 8 bytes does; everything else is counted
+// by class and dropped (codec.hpp).
 namespace socketcan_io {
 
 enum class RxClass { kData, kRtr, kError, kFd, kExtendedId, kBadLength };

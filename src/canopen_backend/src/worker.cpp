@@ -31,8 +31,8 @@ namespace rc = runtime_core;
 
 namespace {
 
-// A single-writer single-reader box holding the newest value (a triple buffer). Lock-free; the
-// writer never waits for the reader.
+// A single-writer single-reader box holding the newest value (a triple buffer).
+// Lock-free; the writer never waits for the reader.
 template <class T>
 class LatestBox {
  public:
@@ -105,8 +105,9 @@ struct PostedOp {
   hc::ArmRequest request{};
 };
 
-// The op table: slot op_id % kOpTable, word = op_id << 2 | state. The control side writes a
-// pending word when it posts; only the worker ends one (compare-exchange from pending).
+// The op table: slot op_id % kOpTable, word = op_id << 2 | state.
+// The control side writes a pending word when it posts; only the worker ends one (compare-exchange
+// from pending).
 constexpr std::size_t kOpTable = 16;
 constexpr std::uint64_t kStatePending = 0;
 constexpr std::uint64_t kStateSucceeded = 1;
@@ -536,8 +537,9 @@ struct WorkerState {
     bool timer_seen = false;
     while (!s->finished) {
       // Until the first timer expiry only the timer and the wake: the first step, and with it
-      // the SYNC grid, lands on the timer grid. A transport that failed is no longer polled
-      // (its pending error would make ppoll return at once forever); the timer still wakes.
+      // the SYNC grid, lands on the timer grid.
+      // A transport that failed is no longer polled (its pending error would make ppoll return at
+      // once forever); the timer still wakes.
       const int bus_fd = timer_seen && !s->lost ? s->transport->wait_fd() : -1;
       std::array<pollfd, 3> fds{
           {{s->timer_fd, POLLIN, 0}, {s->event_fd, POLLIN, 0}, {bus_fd, POLLIN, 0}}};

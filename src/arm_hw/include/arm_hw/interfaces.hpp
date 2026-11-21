@@ -16,7 +16,8 @@
 // types: names, the 32-bit halves of 64-bit values, the state codes and the parameter parsers.
 //
 // Per joint: state `position`, `velocity`; command `position` (double, with `min`/`max`, which are
-// the guard's position limits). GPIOs, every integer interface uint32 unless noted:
+// the guard's position limits).
+// GPIOs, every integer interface uint32 unless noted:
 //   arm      (command)  manager_lo/hi session_lo/hi generation_lo/hi hold_until_ns_lo/hi
 //                       request_id_lo/hi
 //   permit   (command)  manager_lo/hi session_lo/hi generation_lo/hi expires_ns_lo/hi
@@ -26,9 +27,10 @@
 //                       armed_request_id_lo/hi applied_seq_lo/hi faults (FaultSet bits)
 //                       stop_status_1..6 (uint8, StopCode, joint order)
 // HANDLE_DATATYPE of hardware_interface 4.48.1 has no 64-bit integer, so 64-bit values travel as
-// exact 32-bit halves (a double would lose 2^53 + 1). Every GPIO command interface must have an
-// explicit initial_value of 0 in the URDF: ros2_control would otherwise start an integer handle
-// at its maximum, which would read as a request id or a permit.
+// exact 32-bit halves (a double would lose 2^53 + 1).
+// Every GPIO command interface must have an explicit initial_value of 0 in the URDF: ros2_control
+// would otherwise start an integer handle at its maximum, which would read as a request id or a
+// permit.
 namespace arm_hw {
 
 struct Halves {
@@ -79,13 +81,15 @@ StopCode stop_code(hal_contract::StopStatus status);
 inline constexpr std::uint8_t kPresent = 1;
 
 // Faults that make read() return ERROR (once per configure cycle): the loss of the transport or of
-// a drive (spec §8.2). Policy events (expiry, refusals, policy stops, the inhibit) never do.
+// a drive (spec §8.2).
+// Policy events (expiry, refusals, policy stops, the inhibit) never do.
 bool is_loss(hal_contract::FaultSet faults);
 
 // ---- parameters ----
 
 // The C20 timing profile: bus_period_ms = 10, lease_ms in (0, 48], max_feedback_age_ms in
-// [20, 30]. Outside it on_configure fails with kTimingProfileAllowed in its message.
+// [20, 30].
+// Outside it on_configure fails with kTimingProfileAllowed in its message.
 inline constexpr std::string_view kTimingProfileAllowed =
     "allowed: bus_period_ms = 10, lease_ms in (0, 48], max_feedback_age_ms in [20, 30] (C20)";
 

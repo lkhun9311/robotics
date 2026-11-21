@@ -27,8 +27,8 @@
 // The logic-time rig of the canopen backend tests: the backend over an in-memory transport to the
 // shared DriveBus (six drive_core::Drive), stepped every W. Frames cross the transport at the
 // instant they are sent, unless a fault hook says otherwise; the drives tick before the backend
-// steps at the same instant. What the drives did is translated into the contract suite's
-// backend-neutral device events.
+// steps at the same instant.
+// What the drives did is translated into the contract suite's backend-neutral device events.
 namespace canopen_backend::testing {
 
 namespace cc = canopen_codec;
@@ -330,8 +330,8 @@ class Rig {
           break;
         }
         case drive_core::DriveEventKind::kQuickStop:
-          // The drive's own stops (expiry, timeout, SYNC loss, integrity, comm state). A stop by
-          // controlword emits no drive event; it is seen as the transition below.
+          // The drive's own stops (expiry, timeout, SYNC loss, integrity, comm state).
+          // A stop by controlword emits no drive event; it is seen as the transition below.
           push(i, e.reason == drive_core::QuickStopReason::kControlword ? RigEventKind::kQuickStop
                                                                         : RigEventKind::kLocalStop);
           break;

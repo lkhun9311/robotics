@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The I/O worker (C10): the boxes and queues between the control and worker threads, the rx
-// budget per wake (B1), op deadlines and cancellation, and the socket's write errors. The
-// logic-time cases call run_once on the test thread; the others run the real worker thread and
+// budget per wake (B1), op deadlines and cancellation, and the socket's write errors.
+// The logic-time cases call run_once on the test thread; the others run the real worker thread and
 // synchronize through Worker::await and the fake bus's condition variable, never by sleeping.
 #include <gtest/gtest.h>
 #include <linux/can.h>
@@ -48,7 +48,8 @@ struct Sent {
 };
 
 // A CAN bus behind the fake system calls of socketcan_io: frames the test delivers are read by
-// the worker; frames the worker writes are recorded. Safe to use from both threads.
+// the worker; frames the worker writes are recorded.
+// Safe to use from both threads.
 class FakeBus {
  public:
   explicit FakeBus(std::function<rc::MonoTime()> clock) : clock_(std::move(clock)) {}
@@ -291,8 +292,8 @@ TEST(Worker, EventQueueOverflowIsAFault) {
 }
 
 TEST(Worker, RxBudgetPerWake) {
-  // The socket is always readable and every read costs 10 us of logic time. Bounded at
-  // kRxBudget frames per wake, the worker still produces SYNC every T_bus +- 1 ms.
+  // The socket is always readable and every read costs 10 us of logic time.
+  // Bounded at kRxBudget frames per wake, the worker still produces SYNC every T_bus +- 1 ms.
   constexpr rc::Duration kReadCost{10'000};
   rc::MonoTime clock = kT0;
   socketcan_io::SysOps ops;
@@ -373,8 +374,8 @@ TEST(Worker, TimedOutOpCannotActLater) {
   std::string error;
   ASSERT_TRUE(w.start(&error)) << error;
   // The wake that starts configure is held inside its step, at the first probe upload, while
-  // the caller's wait times out; it is let go 5 ms after the timeout. Whatever that wake still
-  // sends must leave before wait() returns, and nothing of the op after.
+  // the caller's wait times out; it is let go 5 ms after the timeout.
+  // Whatever that wake still sends must leave before wait() returns, and nothing of the op after.
   bus.close_gate(is_sdo_request);
   w.configure(hc::OpTicket{1, system_now() + hc::kConfigureTimeout}, system_now());
   ASSERT_TRUE(bus.wait_blocked(std::chrono::milliseconds(1000)))
@@ -394,8 +395,9 @@ TEST(Worker, TimedOutOpCannotActLater) {
     if (is_sdo_request(s.frame)) requests.push_back(s.frame);
   }
   ASSERT_EQ(requests.size(), 6U) << "INCONCLUSIVE: expected one request per node";
-  // The answers to the requests on the wire arrive after the cancel. A live op would send each
-  // node's next probe (0x1018:01) in reply; a cancelled one sends nothing.
+  // The answers to the requests on the wire arrive after the cancel.
+  // A live op would send each node's next probe (0x1018:01) in reply; a cancelled one sends
+  // nothing.
   for (const cc::Frame& req : requests) bus.deliver(upload_answer(req, 0x00020192));
   const std::uint64_t rx_before = w.stats().rx_frames;
   ASSERT_TRUE(w.await([&] { return w.stats().rx_frames >= rx_before + 6; }, rc::milliseconds(1000)))

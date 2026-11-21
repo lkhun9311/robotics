@@ -113,9 +113,9 @@ inline hardware_interface::HardwareComponentParams component_params(const UrdfOp
   return p;
 }
 
-// Runs `f` on its own thread; true when it returned within `limit`. A call still blocked when the
-// watchdog fires is a failure the caller reports; the process then ends (the thread cannot be
-// joined), so a blocking call can never pass by hanging the suite.
+// Runs `f` on its own thread; true when it returned within `limit`.
+// A call still blocked when the watchdog fires is a failure the caller reports; the process then
+// ends (the thread cannot be joined), so a blocking call can never pass by hanging the suite.
 template <class F>
 bool returns_within(std::chrono::milliseconds limit, F f) {
   auto task = std::make_shared<std::packaged_task<void()>>(std::move(f));

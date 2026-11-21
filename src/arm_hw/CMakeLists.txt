@@ -16,8 +16,9 @@ find_package(canopen_master REQUIRED)
 find_package(canopen_backend REQUIRED)
 find_package(socketcan_io REQUIRED)
 
-# The plugin library: both SystemInterface plugins. The pure libraries are linked in statically and
-# their symbols kept local (--exclude-libs), so nothing in a host process binds to them.
+# The plugin library: both SystemInterface plugins.
+# The pure libraries are linked in statically and their symbols kept local (--exclude-libs), so
+# nothing in a host process binds to them.
 file(GLOB ARM_HW_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 add_library(arm_hw SHARED ${ARM_HW_SOURCES})
 robotics_apply_flags(arm_hw)

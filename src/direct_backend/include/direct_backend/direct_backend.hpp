@@ -34,13 +34,14 @@ inline constexpr std::size_t kOpRing = 16;
 struct DirectConfig {
   // Where the six joints rest before time starts.
   hal_contract::Joints start_position{};
-  // The feedback age beyond which an armed backend latches the group inhibit (C17). Outside
-  // [20, 30] ms configure() fails (C20).
+  // The feedback age beyond which an armed backend latches the group inhibit (C17).
+  // Outside [20, 30] ms configure() fails (C20).
   runtime_core::Duration max_feedback_age{kMinFeedbackAge};
 };
 
-// What a joint did, as the joint saw it. An observer (a test, a trace) receives these through
-// an optional sink; the backend never allocates for one.
+// What a joint did, as the joint saw it.
+// An observer (a test, a trace) receives these through an optional sink; the backend never
+// allocates for one.
 enum class EventKind : std::uint8_t {
   kActuated,   // a position target was applied this step (approved command or arm hold)
   kDisabled,   // operation disabled (re-arm phase 2, deactivate)
@@ -66,8 +67,9 @@ struct Event {
 using EventSink = void (*)(void* context, const Event& event);
 
 // The in-process backend (C11): six drive_core::JointModel behind the hal_contract Backend
-// interface, run in logic time. The caller advances it with step(t), once per W; nothing here
-// reads a clock. Acceptance of a command takes one W; arming from rest takes one W.
+// interface, run in logic time.
+// The caller advances it with step(t), once per W; nothing here reads a clock.
+// Acceptance of a command takes one W; arming from rest takes one W.
 //
 // Semantics are the drive's: arm holds the actual position until hold_until; a command tracks
 // while now < valid_until; expiry, 30 ms without a new command, or the end of the hold brakes at
@@ -77,12 +79,13 @@ using EventSink = void (*)(void* context, const Event& event);
 // Deactivate disables every enabled joint and confirms each stop the same way, at rest and
 // Switched On; it fails, and latches the inhibit, on an unconfirmed stop or at its deadline.
 //
-// Not thread-safe. The control path (submit, poll, step, op_state, inhibited, can_apply) does not
-// allocate: every buffer is fixed. wait() builds an OpResult and may allocate.
+// Not thread-safe.
+// The control path (submit, poll, step, op_state, inhibited, can_apply) does not allocate: every
+// buffer is fixed. wait() builds an OpResult and may allocate.
 class DirectBackend final : public hal_contract::Backend {
  public:
-  // Places every joint at config.start_position at rest. Throws std::invalid_argument on a
-  // non-finite or out-of-range start position (|x| > 100 rad).
+  // Places every joint at config.start_position at rest.
+  // Throws std::invalid_argument on a non-finite or out-of-range start position (|x| > 100 rad).
   explicit DirectBackend(const DirectConfig& config);
 
   // One device period W at time t: arm and deactivate phases, command intake, the stop decisions,
