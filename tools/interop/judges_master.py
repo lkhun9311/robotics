@@ -125,27 +125,115 @@ def replay(obs, rules, tol):
     return matched
 
 
+def edge_dispositions(sent, arrived, frame, delay_s):
+    """What the wire allows for the frame sent at `frame`: a subset of {"on time", "held",
+    "dropped"}.
+    `sent` and `arrived` are the times of every frame with its identifier and bytes on the source
+    and the destination capture.
+    Each arrival is the copy of one transmission, and a transmission has at most one copy.
+    A copy belongs to a transmission when it arrived on time (up to EDGE_S before it and
+    HELD_SLACK_S after it) or, for a delay rule, one delay later (within HELD_SLACK_S).
+    A disposition is allowed when some assignment of every arrival to a transmission gives the
+    frame that disposition.
+    Arrivals are told apart by position, so two entries with one timestamp are two copies.
+    Returns (the allowed dispositions, the times of the arrivals no transmission can claim from
+    EDGE_S before the frame on).
+    The proxy forwards a frame at once or, for a delay rule, one delay later.
+    An arrival that fits neither is no proof of a drop.
+    The horizon is the rest of the capture, because a bound would pass what lies beyond it."""
+    slack = judges.HELD_SLACK_S
+
+    def kinds(s, a):
+        hop = a - s
+        return ({"on time"} if -EDGE_S <= hop <= slack else set()) | \
+               ({"held"} if delay_s is not None and abs(hop - delay_s) <= slack else set())
+
+    owners = {k: [i for i, s in enumerate(sent) if kinds(s, a)] for k, a in enumerate(arrived)}
+    unexplained = [arrived[k] for k, o in owners.items() if not o and arrived[k] >= frame - EDGE_S]
+    owners = {k: o for k, o in owners.items() if o}
+    me = min(range(len(sent)), key=lambda i: abs(sent[i] - frame))
+    owner_of = {}
+
+    def place(k, banned, seen):
+        for i in owners[k]:
+            if i == banned or i in seen:
+                continue
+            seen.add(i)
+            if i not in owner_of or place(owner_of[i], banned, seen):
+                owner_of[i] = k
+                return True
+        return False
+
+    def all_placed(banned, skip):
+        owner_of.clear()
+        return all(place(k, banned, set()) for k in owners if k != skip)
+
+    allowed = set()
+    if all_placed(me, None):
+        allowed.add("dropped")
+    for k in owners:
+        for kind in kinds(sent[me], arrived[k]) if me in owners[k] else ():
+            if kind not in allowed and all_placed(me, k):
+                allowed.add(kind)
+    return allowed, unexplained
+
+
+def acted_at_edge(obs, rule, frame):
+    """Whether the proxy acted on a frame that lies within EDGE_S of its rule's window edge, read
+    from the capture the rule forwards to: vcan_device for h2d, vcan_host for d2h.
+    The master resends identical frames, so each frame on that capture is the copy of one
+    transmission at most (edge_dispositions), and the verdict is not reached when the wire allows
+    more than one reading.
+    A drop rule acted when the frame has no copy on time.
+    A delay rule acted when the frame's copy arrived one delay later."""
+    t, cob, data = frame
+    side = "device" if rule["dir"] == "h2d" else "host"
+    delay_s = int(rule["args"][0]) / 1000 if rule["action"] == "delay" else None
+    where = (f"{rule['dir']} edge frame {cob:#x} {data.hex()} {t - epoch(obs):.6f} s after the "
+             f"proxy's start")
+    need(rule["action"] in ("drop", "delay"),
+         f"{where}: a {rule['action']} rule is not resolved at the edge")
+    sent = [f[0] for f in judges.source_frames(obs, rule["dir"]) if f[1] == cob and f[2] == data]
+    arrived = [f[0] for f in judges.frames(obs, side, cob) if f[2] == data]
+    allowed, unexplained = edge_dispositions(sent, arrived, t, delay_s)
+    if unexplained:
+        raise judges.Inconclusive(
+            f"{where}: a copy on vcan_{side} {(unexplained[0] - t) * 1000:.3f} ms after it that "
+            f"no transmission can claim, neither on time nor one delay later")
+    need(len(allowed) == 1, f"{where}: its copies on vcan_{side} allow {sorted(allowed) or 'none'}"
+                            f", so the wire does not say what the proxy did")
+    if rule["action"] == "drop":
+        return allowed == {"dropped"}
+    need(allowed != {"dropped"}, f"{where}: it has no copy on vcan_{side}, neither on time nor "
+                                 f"one delay later")
+    return allowed == {"held"}
+
+
 def fault_rules(obs):
-    """(rules, the frames each acted on): the proxy's own match counts must lie between what the
-    captures select with the window shrunk and grown by EDGE_S (the two clocks differ by a few
-    hundred microseconds), every rule must have matched something, and the proxy must have
-    sent everything."""
+    """(rules, the frames each acted on): a frame inside the window shrunk by EDGE_S is certain
+    (the proxy's clock and the captures' differ by a few hundred microseconds); a frame within
+    EDGE_S of an edge is resolved from the capture of its rule's destination (acted_at_edge).
+    The proxy's own match counts must equal what that resolves, every rule must have matched
+    something, and the proxy must have sent everything."""
     # Every x row starts here, before complete(), and a stall that overloads the bank also delays
     # the proxy, so the overload is named before the rule checks.
     bank_not_overloaded(obs.get("bank") or [])
     rules = parse_rules(obs["harness"]["rules"])
     need(rules and all(r["from_s"] is not None for r in rules), "a rule without a window")
-    inner, outer = replay(obs, rules, EDGE_S), replay(obs, rules, -EDGE_S)
+    t0 = epoch(obs)
+    outer = replay(obs, rules, -EDGE_S)
+    matched = [[f for f in frames if r["from_s"] + EDGE_S <= f[0] - t0 < r["to_s"] - EDGE_S or
+                acted_at_edge(obs, r, f)]
+               for r, frames in zip(rules, outer)]
     got = [r["matched"] for r in obs["proxy_exit"]["rules"]]
-    need(len(got) == len(rules) and all(len(a) <= g <= len(b)
-                                        for a, g, b in zip(inner, got, outer)),
-         f"proxy rule match counts {got}, the captures of the source interfaces select "
-         f"{[len(a) for a in inner]}..{[len(b) for b in outer]}")
+    need(len(got) == len(rules) and all(g == len(m) for g, m in zip(got, matched)),
+         f"proxy rule match counts {got}, the captures select {[len(m) for m in matched]} "
+         f"(the frames within {EDGE_S * 1000:.0f} ms of a window edge resolved from the "
+         f"destination capture)")
     need(all(got), f"the window matched nothing: proxy match counts {got}")
     need(obs["proxy_exit"].get("send_failed") == {"h2d": 0, "d2h": 0},
          f"the proxy failed to send: {obs['proxy_exit'].get('send_failed')}")
-    # The frames the proxy acted on, inside both bounds: certain.
-    return rules, inner
+    return rules, matched
 
 
 # ---- preconditions shared by every row ----
@@ -472,10 +560,12 @@ def judge_x3(obs):
     no_dispatch_after(obs, t_stopping)
     no_motion_after_stop(obs, t_onset)
     t_confirmed = group_confirmed(obs)
+    # Node 3 may not actuate at all after the onset when the first dropped seq is the next one due.
+    last_act = f"last actuated seq {max(act)}" if act else "no actuation after the onset"
     return [f"{len(matched[0])} RPDO2 of node 3 dropped from {t_onset - epoch(obs):.3f} s (first "
             f"seq {first_dropped}); node 3 stopped on its own "
             f"{judges.QS_NAMES[t_own[0]['reason']]} {(t_node3 - t_onset) * 1000:.0f} ms later "
-            f"({halves} missing-half drops, last actuated seq {max(act)}); the master inhibited "
+            f"({halves} missing-half drops, {last_act}); the master inhibited "
             f"{(t_inhibit - t_node3) * 1000:.0f} ms after that and all six were confirmed "
             f"stopped {(t_confirmed - t_node3) * 1000:.0f} ms after it; no command dispatched "
             f"after the inhibit, no drive actuated after its stop"]

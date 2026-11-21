@@ -5,6 +5,9 @@ tools/interop/recorded/x1..x7.json.gz are observations of passing runs of test_m
 (written with INTEROP_RECORD_DIR). Each recording passes its judge unchanged (the control). Each
 edit below breaks one thing a row asserts, and the judge must say so: a broken pass condition is
 FAIL, a missing precondition INCONCLUSIVE, never PASS.
+
+x7_edge.json.gz is a kept observation of X7 that the judge once got wrong (#38): its last delayed
+RPDO2 left vcan_host 1.847 ms before the window's end, inside the EDGE_S slack.
 """
 import copy
 import gzip
@@ -289,6 +292,16 @@ def test_x3_node3_actuating_a_dropped_seq_fails():
     expect(obs, "FAIL", "whose RPDO2 was dropped")
 
 
+def test_x3_node3_without_an_actuation_after_the_onset_passes():
+    # A live vcan stage on 2026-11-21 had no node-3 actuation after the onset, and the note crashed.
+    obs = load("X3")
+    t = onset(obs)
+    for r in bank(obs, "actuated", 3):
+        if r["t_ns"] >= t * 1e9:
+            obs["bank"].remove(r)
+    expect(obs, "PASS", "no actuation after the onset")
+
+
 def test_x3_node3_without_its_own_stop_fails():
     obs = load("X3")
     for r in bank(obs, "quick_stop", 3):
@@ -451,3 +464,247 @@ def test_x7_group_stop_while_the_stream_ran_fails():
     obs = load("X7")
     obs["cli"].append({"t": onset(obs) + 0.2, "event": "stop", "stop": ["STOPPING"] * 6})
     expect(obs, "FAIL", "stopped or faulted while the stream ran")
+
+
+# ---- frames inside the EDGE_S slack of a window edge (#38) ----
+
+# The rule window takes whole milliseconds and the proxy's clock is not the capture's, so a frame
+# this close to an edge is resolved from the wire, not from the window.
+INSIDE_S = 0.0015
+
+
+def place_at_edge(obs, edge, inside=INSIDE_S):
+    """Moves one edge of the rules' window so the first ("start") or last ("end") frame the rules
+    acted on lies `inside` s inside it, the way a different SYNC phase would.
+    The window text takes whole milliseconds, so the epoch moves by the rest (under 0.5 ms).
+    The captures, the bank and the proxy's counts stay as recorded, and so does the set of frames
+    the rules act on (asserted).
+    Returns that frame (t, cob, data)."""
+    rules = jm.parse_rules(obs["harness"]["rules"])
+    acted = jm.replay(obs, rules, 0)
+    frame = sorted((f for m in acted for f in m), key=lambda f: f[0])[0 if edge == "start" else -1]
+    since = frame[0] - jm.epoch(obs)
+    target = since - inside if edge == "start" else since + inside
+    ms = round(target * 1000)
+    obs["harness"]["epoch_ns"] += round((target - ms / 1000) * 1e9)
+    for r in rules:
+        old = f"window {round(r['from_s'] * 1000)} {round(r['to_s'] * 1000)}"
+        new = (f"window {ms} {round(r['to_s'] * 1000)}" if edge == "start" else
+               f"window {round(r['from_s'] * 1000)} {ms}")
+        obs["harness"]["rules"] = obs["harness"]["rules"].replace(old, new)
+    moved = jm.replay(obs, jm.parse_rules(obs["harness"]["rules"]), 0)
+    assert [len(m) for m in moved] == [len(m) for m in acted], "the move changed the matches"
+    since = frame[0] - jm.epoch(obs)
+    edge_s = jm.parse_rules(obs["harness"]["rules"])[0]["from_s" if edge == "start" else "to_s"]
+    assert abs(abs(since - edge_s) - inside) < 1e-6, f"{since} is not {inside} s from {edge_s}"
+    return frame
+
+
+def destination(obs, frame):
+    """The capture a frame's rule forwards it to: vcan_device for h2d, vcan_host for d2h."""
+    return "host" if [f for f in judges.source_frames(obs, "d2h") if f[0] == frame[0]] else "device"
+
+
+def copies(obs, side, frame):
+    """The raw capture entries on `side` with the frame's identifier and bytes, after it."""
+    return [f for f in obs[side]
+            if f[1] == frame[1] and f[2] == frame[2].hex() and f[0] >= frame[0]]
+
+
+def move(obs, side, entry, t):
+    entry[0] = t
+    obs[side].sort(key=lambda f: f[0])
+
+
+def total_matched(obs):
+    return sum(r["matched"] for r in obs["proxy_exit"]["rules"])
+
+
+@pytest.mark.parametrize("edge", ("start", "end"))
+@pytest.mark.parametrize("row", ROWS)
+def test_frame_inside_the_edge_slack_is_resolved_from_the_wire(row, edge):
+    # The proxy acted on the edge frame (its count says so) and the destination capture agrees.
+    # The verdict is PASS, and the row's note counts every frame the proxy acted on.
+    obs = load(row)
+    place_at_edge(obs, edge)
+    status, why = jm.verdict(obs)
+    assert status == "PASS", f"{status}: {why}"
+    assert why.startswith(f"{total_matched(obs)} "), why
+
+
+def test_x7_delayed_frame_inside_the_edge_slack_passes():
+    obs = load("X7")
+    place_at_edge(obs, "end")
+    expect(obs, "PASS", "18 reached the drive with the tag current = 18 not-valid drops")
+
+
+def test_x7_delayed_frame_inside_the_start_slack_passes():
+    obs = load("X7")
+    place_at_edge(obs, "start")
+    expect(obs, "PASS", "18 reached the drive with the tag current = 18 not-valid drops")
+
+
+def on_time_x7_edge_frame():
+    """X7 with the last frame forwarded on time: its device copy is 20 us after the host one, its
+    not-valid drop is gone, and the proxy counts 17."""
+    obs = load("X7")
+    frame = place_at_edge(obs, "end")
+    held = copies(obs, "device", frame)
+    assert len(held) == 1 and held[0][0] - frame[0] > 0.05, held
+    t_arrival = held[0][0]
+    move(obs, "device", held[0], frame[0] + 20e-6)
+    drop = next(r for r in bank(obs, "dropped", 3) if r["drop"] == judges.DROP_NOT_VALID and
+                0 <= r["t_ns"] / 1e9 - t_arrival < 0.001)
+    assert drop["count"] == 1, drop
+    obs["bank"].remove(drop)
+    obs["proxy_exit"]["rules"][0]["matched"] = 17
+    return obs
+
+
+def test_x7_on_time_frame_inside_the_edge_slack_passes():
+    # The control: the same placement, but the proxy forwarded the last frame on time.
+    expect(on_time_x7_edge_frame(), "PASS",
+           "17 reached the drive with the tag current = 17 not-valid drops")
+
+
+def test_x7_on_time_frame_with_the_device_capture_30_us_early_passes():
+    # The two captures estimate their clock offsets apart, so a correct copy may stamp earlier.
+    obs = on_time_x7_edge_frame()
+    for entry in obs["device"]:
+        entry[0] -= 30e-6
+    expect(obs, "PASS", "17 reached the drive with the tag current = 17 not-valid drops")
+
+
+def test_x7_proxy_count_disagreeing_with_the_wire_is_inconclusive():
+    # The edge frame was held one delay on the wire, but the proxy counts only 17.
+    obs = load("X7")
+    place_at_edge(obs, "end")
+    obs["proxy_exit"]["rules"][0]["matched"] = 17
+    expect(obs, "INCONCLUSIVE", "match counts")
+
+
+def test_x7_edge_frame_neither_on_time_nor_held_is_inconclusive():
+    # A copy 30 ms after the edge frame is neither forwarded on time nor held one delay.
+    obs = load("X7")
+    frame = place_at_edge(obs, "end")
+    move(obs, "device", copies(obs, "device", frame)[0], frame[0] + 0.030)
+    expect(obs, "INCONCLUSIVE", "edge")
+
+
+def test_x7_edge_regression_recording_passes():
+    # The kept observation's last delayed frame lies inside the slack, the proxy delayed it, and
+    # the bank dropped it not-valid: all 18 are counted.
+    obs = load("X7_EDGE")
+    rule = jm.parse_rules(obs["harness"]["rules"])[0]
+    last = jm.replay(obs, [rule], 0)[0][-1][0] - jm.epoch(obs)
+    assert 0 < rule["to_s"] - last < jm.EDGE_S, f"{(rule['to_s'] - last) * 1000:.3f} ms"
+    expect(obs, "PASS", "18 reached the drive with the tag current = 18 not-valid drops")
+
+
+@pytest.mark.parametrize("row", ("X1", "X2", "X3", "X4", "X5"))
+def test_dropped_edge_frame_found_on_the_destination_is_inconclusive(row):
+    # The proxy counts the edge frame as dropped, but its destination capture has it on time.
+    # vcan_device is the destination of h2d rules (X3), vcan_host of d2h rules (X1, X2, X4, X5).
+    obs = load(row)
+    frame = place_at_edge(obs, "end")
+    side = destination(obs, frame)
+    assert not [f for f in copies(obs, side, frame) if f[0] - frame[0] < 0.004]
+    obs[side].append([frame[0] + 20e-6, frame[1], frame[2].hex()])
+    obs[side].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "match counts")
+
+
+# ---- identical frames at a window edge (#38) ----
+# The master resends the same RPDO2 bytes, so a destination frame with the edge frame's bytes may
+# be the copy of another transmission.
+
+EDGE_T = 10.0
+
+
+def synthetic(sent, forwarded):
+    """An observation whose captures hold identical RPDO2 frames: `sent` are the times on
+    vcan_host, `forwarded` the times on vcan_device."""
+    data = bytes(range(8)).hex()
+    return {"harness": {"epoch_ns": 0},
+            "host": [[t, 0x303, data] for t in sent],
+            "device": [[t, 0x303, data] for t in forwarded]}
+
+
+DELAY_60 = {"dir": "h2d", "action": "delay", "args": ["60"]}
+EDGE_FRAME = (EDGE_T, 0x303, bytes(range(8)))
+
+
+def test_edge_frame_delayed_beside_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # One transmission 1.5 ms before the edge frame was forwarded at once.
+    # The edge frame was delayed 60 ms.
+    # The wire fits as well with the two copies swapped.
+    # So it does not say which transmission the proxy delayed.
+    obs = synthetic([EDGE_T - 0.0015, EDGE_T], [EDGE_T - 0.0015 + 20e-6, EDGE_T + 0.060])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
+
+
+def test_edge_frame_delayed_before_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # The same, the identical transmission 3 ms after the edge frame.
+    obs = synthetic([EDGE_T, EDGE_T + 0.003], [EDGE_T + 0.003 + 20e-6, EDGE_T + 0.060])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
+
+
+def test_dropped_edge_frame_beside_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # One copy on the wire for two transmissions 1.5 ms apart: either was the one dropped.
+    obs = synthetic([EDGE_T - 0.0015, EDGE_T], [EDGE_T - 0.0015 + 20e-6])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, {"dir": "h2d", "action": "drop", "args": []}, EDGE_FRAME)
+
+
+def test_edge_frame_delayed_among_identical_frames_far_apart_is_resolved():
+    # The control: resends 10 ms apart, each copy has one transmission it can belong to.
+    sent = [EDGE_T - 0.010, EDGE_T, EDGE_T + 0.010]
+    obs = synthetic(sent, [sent[0] + 20e-6, EDGE_T + 0.060, sent[2] + 20e-6])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is True
+    obs = synthetic(sent, [t + 20e-6 for t in sent])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
+
+
+def test_on_time_edge_frame_beside_an_identical_frame_sent_one_delay_later_is_resolved():
+    # The frame 58 ms later is forwarded at once.
+    # Its copy lies in the edge frame's delayed window too.
+    # Only the edge frame can own the copy right after it.
+    # So the edge frame was not held, and the later one owns the other.
+    obs = synthetic([EDGE_T, EDGE_T + 0.058], [EDGE_T + 20e-6, EDGE_T + 0.058 + 20e-6])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
+
+
+def test_dropped_edge_frame_is_refuted_when_the_other_copies_need_the_other_transmission():
+    # The later transmission has its own copy 3.5 ms after it, and each transmission has one copy
+    # at most, so the copy right after the edge frame is the edge frame's.
+    obs = synthetic([EDGE_T, EDGE_T + 0.001], [EDGE_T + 0.0002, EDGE_T + 0.0045])
+    assert jm.acted_at_edge(obs, {"dir": "h2d", "action": "drop", "args": []}, EDGE_FRAME) is False
+
+
+# ---- arrivals no transmission can claim, and arrivals with one timestamp (#38) ----
+
+@pytest.mark.parametrize("row", ("X1", "X2", "X3", "X4", "X5"))
+def test_edge_frame_with_an_arrival_no_transmission_can_claim_is_inconclusive(row):
+    # A copy of the edge frame 30 ms after it is neither on time nor one delay later.
+    # The proxy did not drop the frame as far as the wire shows, so the row must not pass.
+    # X3 forwards to vcan_device (h2d), X5 and the other rows to vcan_host (d2h).
+    obs = load(row)
+    frame = place_at_edge(obs, "end")
+    side = destination(obs, frame)
+    obs[side].append([frame[0] + 0.030, frame[1], frame[2].hex()])
+    obs[side].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "no transmission")
+
+
+@pytest.mark.parametrize("shift", (0.0, 1e-6))
+def test_x7_edge_frame_copied_twice_on_the_destination_is_inconclusive(shift):
+    # The delayed copy appears twice, with the same timestamp or 1 us apart.
+    # Two copies of one transmission are not one, whatever their timestamps.
+    obs = load("X7")
+    frame = place_at_edge(obs, "end")
+    held = copies(obs, "device", frame)[0]
+    obs["device"].append([held[0] + shift, held[1], held[2]])
+    obs["device"].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "edge frame")

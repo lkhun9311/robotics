@@ -63,6 +63,15 @@ RECORDING_TESTS = {
 }
 
 
+# Observations kept because a judge once got them wrong, judged with the committed rows.
+# A new run does not reproduce their timing, so each names where it came from instead of a command.
+KEPT = {
+    "x7_edge": "kept, not re-recordable: the X7 observation of a local vcan stage on 2026-11-21 "
+               "whose last delayed RPDO2 lay 1.847 ms inside the window's end (issue #38); a new "
+               "run of " + RECORDING_TESTS["x7"] + " lands at another SYNC phase",
+}
+
+
 def recorded_dir(row):
     """Where the committed recording of `row` lives."""
     return RECORDED_MASTER if row.startswith("n") else RECORDED
@@ -74,6 +83,8 @@ VCAN_PREFIX = ("docker compose run --rm -T dev bash -c 'tools/bus/vcan_up.sh && 
 
 def recording_command(row):
     """The command that records `row` again (a new run: new times and values)."""
+    if row in KEPT:
+        return KEPT[row]
     directory = recorded_dir(row).relative_to(ROOT)
     return (f"{VCAN_PREFIX}INTEROP_RECORD_DIR={directory} {PYTEST} "
             f"{RECORDING_TESTS[row]}'")
