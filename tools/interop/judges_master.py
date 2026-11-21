@@ -19,6 +19,8 @@ command-loss row is judged in four phases: the healthy arm (all six armed on the
 the moving baseline (at least 50 dispatched commands actuated on all six), the fault onset (the
 first frame the rule acted on, after the arm completed), and the stop observation.
 """
+import collections
+
 import judges
 from judges import Failure, Inconclusive, bank_not_overloaded, bank_started, check, need
 
@@ -152,29 +154,47 @@ def edge_dispositions(sent, arrived, frame, delay_s):
     unexplained = [arrived[k] for k, o in owners.items() if not o and arrived[k] >= frame - EDGE_S]
     owners = {k: o for k, o in owners.items() if o}
     me = min(range(len(sent)), key=lambda i: abs(sent[i] - frame))
-    owner_of = {}
+    # Every disposition asks whether the arrivals have a perfect matching into the transmissions
+    # other than the frame's: all of them for "dropped", all but the frame's copy otherwise.
+    others = {k: [i for i in o if i != me] for k, o in owners.items()}
 
-    def place(k, banned, seen):
-        for i in owners[k]:
-            if i == banned or i in seen:
-                continue
-            seen.add(i)
-            if i not in owner_of or place(owner_of[i], banned, seen):
-                owner_of[i] = k
-                return True
+    def augment(u, fit, held):
+        """Gives arrival u a transmission along one augmenting path, found breadth first.
+        `fit` maps an arrival to its transmission and `held` the reverse; both change on success.
+        The search is a loop, so a long identical run cannot exceed the recursion limit."""
+        via = {}
+        queue = collections.deque([u])
+        while queue:
+            k = queue.popleft()
+            for i in others[k]:
+                if i in via:
+                    continue
+                via[i] = k
+                if i not in held:
+                    # Flip the path back to u: each arrival on it takes the transmission after it.
+                    while i is not None:
+                        k = via[i]
+                        fit[k], held[i], i = i, k, fit.get(k)
+                    return True
+                queue.append(held[i])
         return False
 
-    def all_placed(banned, skip):
-        owner_of.clear()
-        return all(place(k, banned, set()) for k in owners if k != skip)
+    # A maximum matching, grown one augmenting path at a time (Kuhn's algorithm).
+    # An arrival with no augmenting path keeps none after later augmentations, so `free` is final.
+    fit, held = {}, {}
+    free = [k for k in others if not augment(k, fit, held)]
 
-    allowed = set()
-    if all_placed(me, None):
-        allowed.add("dropped")
+    def perfect_without(skip):
+        """Whether every arrival but `skip` has a transmission other than the frame's."""
+        f, h = dict(fit), dict(held)
+        if skip in f:
+            del h[f.pop(skip)]
+        return all(augment(u, f, h) for u in free if u != skip)
+
+    allowed = set() if free else {"dropped"}
     for k in owners:
-        for kind in kinds(sent[me], arrived[k]) if me in owners[k] else ():
-            if kind not in allowed and all_placed(me, k):
-                allowed.add(kind)
+        if me in owners[k] and not kinds(sent[me], arrived[k]) <= allowed and perfect_without(k):
+            allowed |= kinds(sent[me], arrived[k])
     return allowed, unexplained
 
 
