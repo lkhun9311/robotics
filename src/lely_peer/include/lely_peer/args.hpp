@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Command-line and output helpers shared by lely_peer and probe_slave. No Lely here, so the
-// helpers are unit-tested without a bus.
+// Command-line and output helpers shared by lely_peer and probe_slave.
+// No Lely here, so the helpers are unit-tested without a bus.
 #pragma once
 
 #include <cstddef>
@@ -19,8 +19,8 @@ struct Options {
   std::map<std::string, std::string, std::less<>> values;
 };
 
-// Parses `--key value` pairs. Every key must be in `allowed`; every key in `required` must be
-// present; a key may appear once.
+// Parses `--key value` pairs.
+// Every key must be in `allowed`; every key in `required` must be present; a key may appear once.
 Options parse_options(const std::vector<std::string_view>& args,
                       const std::set<std::string, std::less<>>& allowed,
                       const std::set<std::string, std::less<>>& required);

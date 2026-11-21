@@ -65,7 +65,8 @@ struct GuardInput {
 };
 
 // Decides once per control period whether a setpoint may go out as a normal trajectory
-// command (spec §6.2). Every check must pass; blocking is the default.
+// command (spec §6.2).
+// Every check must pass; blocking is the default.
 // After any blocked cycle, the next send is measured against feedback at rest.
 template <std::size_t N>
 class HalGuard {

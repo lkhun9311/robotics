@@ -23,8 +23,9 @@
 
 // CanopenBackend in logic time against six in-memory drive_core::Drive (the shared DriveBus).
 // The probe and its trust boundary (C2), confirmation by behaviour, the heartbeat fault and the
-// configure-while-armed refusal. Expectations come from the drives and the wire, and from the
-// backend's own reports where those are the subject.
+// configure-while-armed refusal.
+// Expectations come from the drives and the wire, and from the backend's own reports where those
+// are the subject.
 namespace {
 
 namespace cc = canopen_codec;
@@ -218,9 +219,10 @@ TEST(CanopenBackend, NoTpdoAckFailsConfirmation) {
   expect_profile(b->capabilities(), rc::generic_cia402_profile());
 }
 
-// C2: the virtual profile is trusted for the identity. A peer that claims our identity and
-// acknowledges normally but ignores expiry is not detected: this documents the boundary rather
-// than pretending to detect it. The same peer with another identity is generic.
+// C2: the virtual profile is trusted for the identity.
+// A peer that claims our identity and acknowledges normally but ignores expiry is not detected:
+// this documents the boundary rather than pretending to detect it.
+// The same peer with another identity is generic.
 TEST(CanopenBackend, IdentityIsTheTrustBoundary) {
   // Every node rewrites each received deadline to 45 ms after receipt (inside the 48 ms lease, past
   // its own 30 ms command timeout): it never expires a command by its deadline.
@@ -284,9 +286,10 @@ TEST(CanopenBackend, HeartbeatLossIsNodeLostFault) {
                     milliseconds(500));
   const hc::Feedback fb = b->poll(rig.now);
   ASSERT_TRUE(fb.faults.has(hc::Fault::kNodeLost));
-  // C7: lost 250 ms after the last heartbeat. With a 100 ms period the last one came at most
-  // 100 ms before the mute, so the loss is 150 ms after it at the earliest and 250 ms + 100 ms
-  // (a heartbeat due just after the mute is the first one missing) + 1 W of stepping at the latest.
+  // C7: lost 250 ms after the last heartbeat.
+  // With a 100 ms period the last one came at most 100 ms before the mute, so the loss is 150 ms
+  // after it at the earliest and 250 ms + 100 ms (a heartbeat due just after the mute is the first
+  // one missing) + 1 W of stepping at the latest.
   EXPECT_GE((rig.now - muted).ns, milliseconds(150).ns);
   EXPECT_LE((rig.now - muted).ns, milliseconds(352).ns);
   EXPECT_TRUE(fb.faults.has(hc::Fault::kInhibited));
@@ -341,7 +344,8 @@ TEST(CanopenBackend, RefusesConfigureWhileArmed) {
 
 // A configure posted while an arm is running would supersede it and send Enter Pre-operational
 // to drives the arm may already have enabled, with no stop tracked: refused like one posted while
-// armed. Here it is posted after the enable (0x0F) went out, before the arm completed.
+// armed.
+// Here it is posted after the enable (0x0F) went out, before the arm completed.
 TEST(CanopenBackend, RefusesConfigurePostedMidArm) {
   Rig rig;
   std::unique_ptr<CanopenBackend> b = start(rig);
@@ -428,7 +432,8 @@ TEST(CanopenBackend, OutOfProfileTimingFailsConfigure) {
 }
 
 // The TPDOs answering the SYNC a step sends are handled in that same step: poll() after the step
-// already carries that SYNC's sample. The 2 x T_bus acceptance bound (C19) counts on it.
+// already carries that SYNC's sample.
+// The 2 x T_bus acceptance bound (C19) counts on it.
 TEST(CanopenBackend, SyncAnswerSeenInTheSameStep) {
   Rig rig;
   std::unique_ptr<CanopenBackend> b = start(rig);

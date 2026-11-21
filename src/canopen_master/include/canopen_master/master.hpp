@@ -17,8 +17,8 @@
 // The CANopen master core (C5): NMT master, heartbeat consumer (C7), expedited SDO client (C8),
 // SYNC producer, EMCY consumer and received-PDO decoding through registered layouts.
 // Pure logic in the shape of drive_core::Drive: frames in through on_frame, time in through tick,
-// frames to send out as return values, events drained by the caller. No sockets, no threads, no
-// clock reads: every time comes from the caller.
+// frames to send out as return values, events drained by the caller.
+// No sockets, no threads, no clock reads: every time comes from the caller.
 //
 // Commands (nmt, sdo_upload, sdo_download, set_heartbeat_consumer) are queued and take effect at
 // the next on_frame or tick, whose `now` they use and whose returned frames carry them.
@@ -27,13 +27,15 @@
 // state from before any queued command, runs the SDO callbacks, then applies the queued commands:
 // a frame received before the call never answers a request or reset that the call sends.
 // tick applies the queued commands, expires, runs the callbacks, applies what they queued, then
-// produces a SYNC when one is due. If an SDO callback throws, the exception leaves the call and
-// the callbacks not yet called run at the next call.
+// produces a SYNC when one is due.
+// If an SDO callback throws, the exception leaves the call and the callbacks not yet called run at
+// the next call.
 //
 // The master sends an NMT command only when asked through nmt(): a lost heartbeat or a boot
 // timeout is an event, never a reset or a stop (roadmap boot policy).
 //
-// Not thread-safe. The caller serializes every call (in E3c the I/O worker owns the master).
+// Not thread-safe.
+// The caller serializes every call (in E3c the I/O worker owns the master).
 namespace canopen_master {
 
 inline constexpr runtime_core::Duration kDefaultSyncPeriod{10'000'000};         // T_bus
@@ -101,20 +103,23 @@ class Master {
   // Returns the events since the last call, oldest first, and clears them.
   std::vector<MasterEvent> drain_events();
 
-  // Queue an NMT command for a configured node. false for a node not in the config. A Reset
-  // Node or Reset Communication restarts that node's boot window when it is sent.
+  // Queue an NMT command for a configured node. false for a node not in the config.
+  // A Reset Node or Reset Communication restarts that node's boot window when it is sent.
   bool nmt(canopen_codec::NmtCommand command, canopen_codec::NodeId node);
 
   // Queue an expedited SDO request. false (counted in sdo_refused; `done` never called) for a
   // node not in the config, a full queue (SdoClient::kCapacity per node) or a download of other
-  // than 1..4 bytes. `done` may be empty.
+  // than 1..4 bytes.
+  // `done` may be empty.
   // `tag` (nonzero) lets cancel_sdo drop the request while it is still queued.
   bool sdo_upload(canopen_codec::NodeId node, std::uint16_t index, std::uint8_t sub, SdoDone done,
                   std::uint64_t tag = 0);
   bool sdo_download(canopen_codec::NodeId node, std::uint16_t index, std::uint8_t sub,
                     std::span<const std::uint8_t> bytes, SdoDone done, std::uint64_t tag = 0);
   // Drops every request with this nonzero tag that has not been sent yet, on every node; their
-  // `done` is never called. A request already sent is not recalled. Returns how many dropped.
+  // `done` is never called.
+  // A request already sent is not recalled.
+  // Returns how many dropped.
   std::size_t cancel_sdo(std::uint64_t tag);
 
   // Per-node consumer time; zero disables that node's consumer (C7). false for a node not in
@@ -122,10 +127,10 @@ class Master {
   bool set_heartbeat_consumer(canopen_codec::NodeId node, runtime_core::Duration consumer_time);
 
   // Decode PDOs received on `cob` (an 11-bit COB-ID) as `layout` for `node`; registering a
-  // COB-ID again replaces its layout. A frame whose DLC is not the layout's byte length is a
-  // kPdoLengthError and is not decoded. false for a node not in the config, a COB-ID of NMT,
-  // SYNC, EMCY, SDO or heartbeat, or a layout that is empty, has a zero-length field or holds
-  // more than 64 bits.
+  // COB-ID again replaces its layout.
+  // A frame whose DLC is not the layout's byte length is a kPdoLengthError and is not decoded.
+  // false for a node not in the config, a COB-ID of NMT, SYNC, EMCY, SDO or heartbeat, or a layout
+  // that is empty, has a zero-length field or holds more than 64 bits.
   bool register_rx_pdo(canopen_codec::NodeId node, std::uint32_t cob, PdoLayout layout);
 
   // SYNC production (for the N5 interop row): pause, resume or step once. kStep returns false

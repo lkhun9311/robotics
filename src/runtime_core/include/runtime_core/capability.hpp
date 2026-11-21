@@ -5,9 +5,10 @@
 
 namespace runtime_core {
 
-// How a backend stands on one guarantee (spec §4). A HAL cannot create a guarantee the device
-// lacks, so activation must be refused instead of silently weakening the contract. Today
-// missing_capabilities() reports the gap; the refusing activation path arrives in E3.
+// How a backend stands on one guarantee (spec §4).
+// A HAL cannot create a guarantee the device lacks, so activation must be refused instead of
+// silently weakening the contract.
+// Today missing_capabilities() reports the gap; the refusing activation path arrives in E3.
 enum class Support {
   kSupported,       // the device enforces it
   kProvidedByHost,  // same process: the host guard enforces it directly

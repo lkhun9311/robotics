@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Calibration slaves: one Lely BasicSlave per node ID, all on one I/O context, each serving the
-// given EDS. They answer SDO and produce heartbeat as their object dictionary says; nothing else.
+// given EDS.
+// They answer SDO and produce heartbeat as their object dictionary says; nothing else.
 //   probe_slave --if IF --eds PATH --nodes 1-6
 // Prints one JSON line {"event":"ready",...} once every slave has been reset, and exits 0 on
 // SIGTERM or SIGINT.

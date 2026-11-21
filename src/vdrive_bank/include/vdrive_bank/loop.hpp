@@ -13,13 +13,14 @@
 #include "vdrive_bank/bank.hpp"
 #include "vdrive_bank/trace_ring.hpp"
 
-// The control loop of the vdrive_bank process (B1). One thread; the caller waits (ppoll on the
-// release timerfd, the CAN socket and the inject socket) and calls run_once on every wake. Each
-// wake first runs a release that is due, then serves the inject socket (when given) until the
-// next release is due or kInjectBudget datagrams were read, then drains received frames until
-// the next release is due or kRxBudget frames were read. Time comes from `now` only
-// (CLOCK_MONOTONIC in the process); a received frame is dispatched with the instant read right
-// after its recvmsg.
+// The control loop of the vdrive_bank process (B1).
+// One thread; the caller waits (ppoll on the release timerfd, the CAN socket and the inject socket)
+// and calls run_once on every wake.
+// Each wake first runs a release that is due, then serves the inject socket (when given) until the
+// next release is due or kInjectBudget datagrams were read, then drains received frames until the
+// next release is due or kRxBudget frames were read.
+// Time comes from `now` only (CLOCK_MONOTONIC in the process); a received frame is dispatched with
+// the instant read right after its recvmsg.
 namespace vdrive_bank {
 
 inline constexpr runtime_core::Duration kReleasePeriod = drive_core::kTickPeriod;  // W
@@ -50,10 +51,12 @@ class BankLoop {
   Bank::InjectResult inject(std::string_view command);
   // The datagrams waiting on the non-blocking UNIX datagram socket `fd`, applied in order
   // (inject) and each answered to its sender with "ok" or "err <reason>": at most kInjectBudget,
-  // and after the first none once the next release is due. The rest stay queued, in order, for
-  // a later call. Failures of the socket itself are counted and traced (note_inject_io): a
-  // receive error, a reply that cannot be sent, and a datagram longer than the buffer, which is
-  // rejected rather than applied cut short. Returns the number of datagrams read.
+  // and after the first none once the next release is due.
+  // The rest stay queued, in order, for a later call.
+  // Failures of the socket itself are counted and traced (note_inject_io): a receive error, a reply
+  // that cannot be sent, and a datagram longer than the buffer, which is rejected rather than
+  // applied cut short.
+  // Returns the number of datagrams read.
   int serve_inject(int fd);
 
   runtime_core::MonoTime next_release() const;

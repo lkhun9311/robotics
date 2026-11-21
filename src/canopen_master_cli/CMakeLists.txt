@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # canopen_master_cli: our master (the canopen backend's I/O worker) as a process for the interop
-# harness on vcan. Not a library: nothing is exported.
+# harness on vcan.
+# Not a library: nothing is exported.
 cmake_minimum_required(VERSION 3.22)
 project(canopen_master_cli LANGUAGES CXX)
 

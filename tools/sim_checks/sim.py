@@ -26,12 +26,12 @@ IMAGE_TOPIC = "/overview/image_raw"
 MUJOCO_STATES = "/mujoco_actuators_states"
 # Queue depth of the subscriptions on the recorded topics: more than 10 s of 500 Hz messages, so
 # a test process that falls behind during a recording queues messages instead of dropping them; a
-# drop that still happens shows up as a gap between consecutive header stamps. Each topic has one
-# subscription, shared by queries and recordings: a second subscription per topic added to the
-# messages this process deserialises, and on a 2-vCPU runner the executor fell 10 s behind the
-# recorded topics. A deep queue cannot make `sample()` stale: it waits for a message published
-# after the call, judged by the publisher's source timestamp, not for the next message taken off
-# the queue.
+# drop that still happens shows up as a gap between consecutive header stamps.
+# Each topic has one subscription, shared by queries and recordings: a second subscription per topic
+# added to the messages this process deserialises, and on a 2-vCPU runner the executor fell 10 s
+# behind the recorded topics.
+# A deep queue cannot make `sample()` stale: it waits for a message published after the call, judged
+# by the publisher's source timestamp, not for the next message taken off the queue.
 RECORD_QUEUE_DEPTH = 5000
 LAUNCH = ["ros2", "launch", "robot_bringup", "ur5e_baseline.launch.py", "headless:=true"]
 # Time from SIGINT to SIGKILL for the launch process group in `stop()`.
@@ -380,9 +380,10 @@ class Sim:
         self._list = self._node.create_client(ListControllers, "/controller_manager/list_controllers")
         self._follow = ActionClient(self._node, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory")
         # Single-threaded: every callback here is short, and under the GIL a thread pool only
-        # adds per-message overhead. With two cores shared with the simulator and two busy
-        # loops, the multi-threaded executor fell up to 0.9 s behind the 500 Hz topics (and
-        # sample() timed out at 5 s); this one stayed within 4 ms (measured 2026-11-14).
+        # adds per-message overhead.
+        # With two cores shared with the simulator and two busy loops, the multi-threaded executor
+        # fell up to 0.9 s behind the 500 Hz topics (and sample() timed out at 5 s); this one stayed
+        # within 4 ms (measured 2026-11-14).
         self._executor = SingleThreadedExecutor(context=self._ctx)
         self._executor.add_node(self._node)
         self._stopping = threading.Event()

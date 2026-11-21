@@ -10,9 +10,10 @@
 #include "drive_core/exec_tag.hpp"
 #include "drive_core/validity.hpp"
 
-// Two-fragment command assembly (contract D4, D6, D7, D8). Works on decoded RPDO1/RPDO2; the
-// dispatcher decodes frames. Holds no CiA 402 state: it reports an integrity violation and the
-// drive logic decides what to do (quick stop, reason `integrity`).
+// Two-fragment command assembly (contract D4, D6, D7, D8).
+// Works on decoded RPDO1/RPDO2; the dispatcher decodes frames.
+// Holds no CiA 402 state: it reports an integrity violation and the drive logic decides what to do
+// (quick stop, reason `integrity`).
 namespace drive_core {
 
 // One actuatable command: an RPDO1 and an RPDO2 of the same tag and seq.
@@ -58,13 +59,15 @@ struct AssemblyResult {
 // - A fragment whose seq is not newer than the last actuated seq is dropped (seq16_newer), except
 //   that a fragment with the last actuated seq and a payload different from the actuated one is
 //   an integrity violation (two payloads with the same seq), while an identical one is stale.
-// - Fragments pair only on equal tag and seq. A window may hold halves of several seqs (after a
-//   lost SYNC, D7); that is not a violation. Two different payloads of the same half and seq in
-//   one window are an integrity violation.
-// - The window holds at most kWindowSlots seqs. When a new seq arrives and every slot is used,
-//   the oldest seq (the new one included) is dropped and counted as superseded. The RPDO1 target
-//   of a seq dropped this way (evicted or arriving) stays bound to it like a dropped candidate's
-//   (below).
+// - Fragments pair only on equal tag and seq.
+// A window may hold halves of several seqs (after a
+//   lost SYNC, D7); that is not a violation.
+//   Two different payloads of the same half and seq in one window are an integrity violation.
+// - The window holds at most kWindowSlots seqs.
+// When a new seq arrives and every slot is used,
+//   the oldest seq (the new one included) is dropped and counted as superseded.
+//   The RPDO1 target of a seq dropped this way (evicted or arriving) stays bound to it like a
+//   dropped candidate's (below).
 // - An integrity violation latches: no command is produced and current-tag fragments are
 //   blocked until the tag changes (issuer epoch) or reset() is called.
 // - Separately, every violation stays pending until an on_sync reports it or the owner
@@ -72,18 +75,23 @@ struct AssemblyResult {
 //   (a revoke or a lifetime expiry at the W tick must not erase a violation nobody has acted on).
 //   on_sync reports a violation while it is latched or pending: an unacknowledged violation is
 //   reported by at least one on_sync, and by exactly one if the latch was cleared before any
-//   on_sync ran. An acknowledged one is reported only while it is still latched.
+//   on_sync ran.
+//   An acknowledged one is reported only while it is still latched.
 // - At SYNC (on_sync) the newest complete pair (seq16_newer) is the candidate if
 //   validity_open(until, now, lease), otherwise it is dropped as not_valid; older complete pairs
-//   are dropped as superseded. A lone half is an ordinary gap. The window then clears.
+//   are dropped as superseded.
+//   A lone half is an ordinary gap.
+//   The window then clears.
 // - The last actuated seq advances only through mark_actuated, which the owner calls when it
 //   actually actuates the candidate: a candidate the owner drops (e.g. not Operation Enabled)
 //   is recorded through mark_dropped instead: its seq may be sent again with a new deadline, but
 //   its target stays bound to the seq, so an RPDO1 of that seq with another target is an
-//   integrity violation. At most kWindowSlots dropped seqs are remembered; when an older one is
-//   evicted, every seq not newer than it is dropped as stale from then on.
+//   integrity violation.
+//   At most kWindowSlots dropped seqs are remembered; when an older one is evicted, every seq not
+//   newer than it is dropped as stale from then on.
 // Any change of the issuer's epoch (commit, revoke, expiry, reset communication, boot) clears
-// the window and the last actuated seq. The issuer must outlive the assembler.
+// the window and the last actuated seq.
+// The issuer must outlive the assembler.
 class CommandAssembler {
  public:
   // Three lost SYNC periods (D7's watchdog bound) hold about three commands; the rest is margin.
@@ -96,10 +104,12 @@ class CommandAssembler {
   AssemblyResult on_sync(std::uint32_t now_us);
 
   // The owner actuated `command` (a candidate of the latest on_sync): its seq and payload become
-  // the last actuated. Ignored when `command` is not of the current tag.
+  // the last actuated.
+  // Ignored when `command` is not of the current tag.
   void mark_actuated(const Command& command);
   // The owner dropped `command` (a candidate of the latest on_sync) without actuating it, e.g.
-  // not Operation Enabled: its target stays bound to its seq. Ignored for another tag.
+  // not Operation Enabled: its target stays bound to its seq.
+  // Ignored for another tag.
   void mark_dropped(const Command& command);
   // The owner has acted on every violation detected so far; they are no longer pending.
   void acknowledge_violation() { violation_pending_ = false; }

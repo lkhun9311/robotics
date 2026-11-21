@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Every repository check. CI and local runs use this same script inside the dev image.
+# Every repository check.
+# CI and local runs use this same script inside the dev image.
 set -eo pipefail
 cd "$(dirname "$0")/../.."
 # ROS setup scripts read unset variables, so `set -u` comes only after sourcing.
@@ -39,8 +40,9 @@ find src -name '*.hpp' -o -name '*.cpp' | xargs --no-run-if-empty clang-format -
 REL=(--build-base build/release --install-base install/release)
 ASAN=(--build-base build/asan --install-base install/asan)
 
-# Minimum discovered test counts. A run that finds fewer tests than this is red: tests went
-# missing (discovery, a filter, a skipped file), and green would only mean "nothing failed".
+# Minimum discovered test counts.
+# A run that finds fewer tests than this is red: tests went missing (discovery, a filter, a skipped
+# file), and green would only mean "nothing failed".
 # Raise these when adding tests.
 GTEST_FLOOR=504
 PYTEST_FLOOR=253
@@ -63,8 +65,9 @@ require_at_least() {
   echo "$label: $found tests (floor $floor)"
 }
 
-# Pure C++ packages: every directory under src/ whose src/ holds .cpp files. Computed here,
-# apart from the loops below, so a loop that silently skips a package is caught by its count.
+# Pure C++ packages: every directory under src/ whose src/ holds .cpp files.
+# Computed here, apart from the loops below, so a loop that silently skips a package is caught by
+# its count.
 mapfile -t CPP_PACKAGES < <(find src -path 'src/*/src/*' -name '*.cpp' | cut -d/ -f2 | sort -u)
 if [ "${#CPP_PACKAGES[@]}" -eq 0 ]; then
   echo "FAIL: found no C++ package under src/ (expected at least runtime_core)" >&2
@@ -91,8 +94,9 @@ print(sum(int(s.get("tests", 0)) - int(s.get("skipped", 0)) for s in suites))' "
 }
 
 # Every production source of a package (its src/ directory) must be compiled with the sanitizer
-# flags: one sanitized test file must not stand in for an unsanitized library. Fails naming each
-# file without them, and fails when the database has no entry under the directory at all.
+# flags: one sanitized test file must not stand in for an unsanitized library.
+# Fails naming each file without them, and fails when the database has no entry under the directory
+# at all.
 # Third argument: the flag (default the ASan + UBSan one).
 require_sanitized() {
   python3 - "$1" "$2" "${3:--fsanitize=address,undefined}" <<'EOF'
@@ -124,8 +128,9 @@ print(f"sanitizer flags: {checked} sources under {sys.argv[1]}")
 EOF
 }
 
-# Runs the tests, prints per-test results, then fails. Printing first matters: under
-# `set -e` a failing `colcon test` would end the script before the failing test is named.
+# Runs the tests, prints per-test results, then fails.
+# Printing first matters: under `set -e` a failing `colcon test` would end the script before the
+# failing test is named.
 run_tests() {
   local base=$1
   local rc=0 found
@@ -133,8 +138,8 @@ run_tests() {
     --return-code-on-test-failure || rc=$?
   colcon test-result --test-result-base "$base" --verbose | tee "$base/test-result.txt"
   [ "$rc" -eq 0 ] || return "$rc"
-  # "Summary: N tests, E errors, F failures, S skipped". A skipped test did not run: any skip is
-  # a failure, and the floor counts only the tests that ran.
+  # "Summary: N tests, E errors, F failures, S skipped".
+  # A skipped test did not run: any skip is a failure, and the floor counts only the tests that ran.
   local summary total skipped
   summary=$(grep '^Summary: ' "$base/test-result.txt" | tail -1)
   total=$(sed -n 's/^Summary: \([0-9]*\) tests.*/\1/p' <<<"$summary")
@@ -156,10 +161,10 @@ colcon build --base-paths src "${REL[@]}" \
   --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 echo "== exported targets (an outside consumer at the compiler's default C++ standard) =="
 # The consumer sets no standard of its own: whatever its headers need must come from the
-# imported targets (INTERFACE_COMPILE_FEATURES). One executable per package includes every
-# installed public header of that package and links only that package's target, so a header that
-# needs a package its Config does not find_dependency fails here instead of passing because the
-# consumer happened to link it too.
+# imported targets (INTERFACE_COMPILE_FEATURES).
+# One executable per package includes every installed public header of that package and links only
+# that package's target, so a header that needs a package its Config does not find_dependency fails
+# here instead of passing because the consumer happened to link it too.
 # Test utilities are not library headers and are not included: hal_contract/testing/ (the gtest
 # contract suite) and canopen_master/testing/ (the in-memory drive bus, which needs drive_core,
 # a test dependency of canopen_master only).
@@ -204,7 +209,8 @@ run_tests build/release
 
 echo "== simulation checks (release install, headless) =="
 # The colcon setup script reads unset variables (COLCON_TRACE), so it cannot be sourced
-# under `set -u` (reproduced 2026-11-14). Run the stage in a subshell with nounset off.
+# under `set -u` (reproduced 2026-11-14).
+# Run the stage in a subshell with nounset off.
 (
   set +u
   # shellcheck disable=SC1091
@@ -273,8 +279,9 @@ done
 echo "== python tests (release harness; traces kept in artifacts/traces/release) =="
 # tools/interop needs vcan and NET_ADMIN; it is not collected here (B13).
 # launch_testing's pytest plugin answers pytest_ignore_collect with False ahead of pytest's own
-# hook, which silently defeats --ignore (seen 2026-11-14). No test here is a launch test, and
-# launch_ros (launch_testing_ros) only registers hooks that launch_testing declares, so both go.
+# hook, which silently defeats --ignore (seen 2026-11-14).
+# No test here is a launch test, and launch_ros (launch_testing_ros) only registers hooks that
+# launch_testing declares, so both go.
 LOGIC_SIM_BIN="$PWD/install/release/runtime_core/lib/runtime_core/logic_sim" \
 ORACLE_TRACE_DIR="$PWD/artifacts/traces/release" \
   python3 -m pytest -p no:cacheprovider -p no:launch_testing -p no:launch_ros -q \
@@ -289,9 +296,11 @@ ORACLE_TRACE_DIR="$PWD/artifacts/traces/asan" \
 require_at_least "oracle x harness" "$(junit_count artifacts/pytest-asan.xml)" "$INTEGRATION_FLOOR"
 
 echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) =="
-# Needs NET_ADMIN (and the vcan module on the host). The status file is written by a trap that
-# covers the whole stage: OK, NOT_RUN: <reason> (the stage could not run, which fails the check;
-# never a skip), or FAIL: <what>. The subshell keeps the trap to this stage.
+# Needs NET_ADMIN (and the vcan module on the host).
+# The status file is written by a trap that covers the whole stage: OK, NOT_RUN: <reason> (the stage
+# could not run, which fails the check;
+# never a skip), or FAIL: <what>.
+# The subshell keeps the trap to this stage.
 (
   verdict="FAIL: the vcan stage ended before a verdict"
   trap 'echo "$verdict" > artifacts/vcan-status.txt; echo "vcan status: $verdict"' EXIT
@@ -323,8 +332,9 @@ echo "== vcan integration (tools/interop: processes on vcan_host/vcan_device) ==
 echo "== thread sanitizer (vdrive_bank threads; the HAL: worker, boxes, op epochs, teardown) =="
 # vdrive_bank: control thread, trace ring and writer thread. hal_contract, direct_backend,
 # canopen_backend and arm_hw: the I/O worker and the control thread sharing the C10 boxes, the
-# op epochs, and worker teardown in the plugin. Every package the stage builds must have its
-# production sources compiled with -fsanitize=thread (the worker runs canopen_master code).
+# op epochs, and worker teardown in the plugin.
+# Every package the stage builds must have its production sources compiled with -fsanitize=thread
+# (the worker runs canopen_master code).
 TSAN=(--build-base build/tsan --install-base install/tsan)
 TSAN_TESTED=(vdrive_bank hal_contract direct_backend canopen_backend arm_hw)
 colcon build --base-paths src "${TSAN[@]}" --packages-up-to "${TSAN_TESTED[@]}" \

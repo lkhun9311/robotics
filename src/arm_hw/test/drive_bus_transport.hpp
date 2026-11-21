@@ -17,9 +17,11 @@
 
 // A wall-clock in-memory bus for the worker thread of CanopenArmHw: the six drive_core drives of
 // canopen_master's DriveBus, ticked every W up to CLOCK_MONOTONIC whenever the worker sends or
-// polls. One bus outlives the transports of several configure cycles. Hooks: hold() blocks the
-// worker inside its next poll until released (a stalled worker), lose() makes the transport report
-// a receive error (the worker's transport loss), and the bus counts releases and destructions.
+// polls.
+// One bus outlives the transports of several configure cycles.
+// Hooks: hold() blocks the worker inside its next poll until released (a stalled worker), lose()
+// makes the transport report a receive error (the worker's transport loss), and the bus counts
+// releases and destructions.
 namespace arm_hw::test {
 
 namespace cc = canopen_codec;
@@ -136,7 +138,8 @@ class DriveBusSim {
   }
 
  private:
-  // Ticks the drives every W up to now; returns now. Caller holds mu_.
+  // Ticks the drives every W up to now; returns now.
+  // Caller holds mu_.
   rc::MonoTime catch_up() {
     const rc::MonoTime t = clock();
     while (last_tick_ + drive_core::kTickPeriod <= t) {

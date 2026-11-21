@@ -15,8 +15,8 @@ U8, U16, U32 = 0x0005, 0x0006, 0x0007
 I8, I16, I32 = 0x0002, 0x0003, 0x0004
 NODE = "node"  # marks a default written relative to $NODEID
 
-# (index, sub) -> (data type, access, default, PDO-mappable). A default (value, NODE) means
-# `$NODEID+value`.
+# (index, sub) -> (data type, access, default, PDO-mappable).
+# A default (value, NODE) means `$NODEID+value`.
 EXPECTED = {
     0x1000: {0: (U32, "ro", 0x00020192, False)},
     0x1001: {0: (U8, "ro", 0, False)},
@@ -110,7 +110,8 @@ EXPECTED = {
 }
 
 # Value limits (LowLimit, HighLimit) the drive enforces on SDO writes; every other entry has
-# none. 0x6060: cyclic synchronous position is the only mode; 0x2015: policy_reset is 0 or 1.
+# none.
+# 0x6060: cyclic synchronous position is the only mode; 0x2015: policy_reset is 0 or 1.
 LIMITS = {
     (0x6060, 0): (8, 8),
     (0x2015, 0): (0, 1),

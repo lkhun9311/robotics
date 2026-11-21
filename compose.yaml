@@ -11,8 +11,9 @@ x-dev-build: &dev-build
 
 services:
   # Owns the network namespace of the bus (B12): vcan_host and vcan_device live here, and dev and
-  # peer join it. It stays up even when vcan_up.sh cannot make the links (exit 3, NOT_RUN), so the
-  # vcan stage in dev runs vcan_up.sh again and reports NOT_RUN itself instead of not starting.
+  # peer join it.
+  # It stays up even when vcan_up.sh cannot make the links (exit 3, NOT_RUN), so the vcan stage in
+  # dev runs vcan_up.sh again and reports NOT_RUN itself instead of not starting.
   robot:
     build: *dev-build
     image: robotics-dev:local
@@ -46,8 +47,8 @@ services:
       memlock:
         soft: -1
         hard: -1
-  # The Lely master side of the interop tests, in the same namespace as robot and dev. Started
-  # on demand: docker compose --profile peer run --rm peer <command>.
+  # The Lely master side of the interop tests, in the same namespace as robot and dev.
+  # Started on demand: docker compose --profile peer run --rm peer <command>.
   peer:
     image: robotics-dev:local
     profiles: [peer]

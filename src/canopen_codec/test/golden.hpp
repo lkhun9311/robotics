@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// Loader for the golden frame vectors written by tools/od/make_golden.py. The files are
-// machine-generated JSON: an array of objects with string, integer, integer-array and flat
-// object values. This parser accepts exactly that subset and throws on anything else, so a
-// malformed file fails the test instead of yielding fewer vectors.
+// Loader for the golden frame vectors written by tools/od/make_golden.py.
+// The files are machine-generated JSON: an array of objects with string, integer, integer-array and
+// flat object values.
+// This parser accepts exactly that subset and throws on anything else, so a malformed file fails
+// the test instead of yielding fewer vectors.
 
 #include <cctype>
 #include <cstddef>

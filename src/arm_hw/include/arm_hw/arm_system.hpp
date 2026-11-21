@@ -60,8 +60,8 @@ class DirectBackend;
 //            nothing); then Hal::write with the permit (only when permit/present == 1) and the
 //            setpoint; hal/verdict is the Hal's verdict, except that without a permit it is
 //            kNoPermit unless the group inhibit is latched (kInhibited): the Hal itself answers
-//            kNotArmed first, and the operator-facing reason is the missing permit. Always OK
-//            (spec §8.2: a refusal is a verdict, never an error).
+//            kNotArmed first, and the operator-facing reason is the missing permit.
+//            Always OK (spec §8.2: a refusal is a verdict, never an error).
 namespace arm_hw {
 
 struct Params {
@@ -178,15 +178,15 @@ class ArmSystem : public hardware_interface::SystemInterface {
 };
 
 // The arm over the CANopen backend on its socket I/O worker (canopen_backend::Worker), one Worker
-// per configure cycle (a Worker cannot be restarted after its shutdown). Parameters besides the
-// common ones: can_interface, node_ids.
+// per configure cycle (a Worker cannot be restarted after its shutdown).
+// Parameters besides the common ones: can_interface, node_ids.
 //
 // PLUGIN LIBRARY AND A DETACHED WORKER: the worker's code is linked into this plugin library, so
-// the library must not be unmapped while a worker thread runs. The destructor ends the worker if
-// it can (Worker::~Worker joins within 1 s); if a worker still runs when the destructor starts, it
-// first marks this library RTLD_NODELETE, so a later dlclose (class_loader unloading the plugin)
-// leaves it mapped and the detached thread can finish. The library then stays loaded until the
-// process exits.
+// the library must not be unmapped while a worker thread runs.
+// The destructor ends the worker if it can (Worker::~Worker joins within 1 s); if a worker still
+// runs when the destructor starts, it first marks this library RTLD_NODELETE, so a later dlclose
+// (class_loader unloading the plugin) leaves it mapped and the detached thread can finish.
+// The library then stays loaded until the process exits.
 class CanopenArmHw : public ArmSystem {
  public:
   CanopenArmHw() = default;
@@ -207,11 +207,12 @@ class CanopenArmHw : public ArmSystem {
   canopen_backend::Worker* worker_{nullptr};  // Owned by hal_.
 };
 
-// The arm over the in-process DirectBackend. No real-time worker drives it: read() steps it in
-// W (2 ms) steps up to the read instant (CLOCK_MONOTONIC), so it advances at the controller rate
-// in whole device periods, and a lifecycle op is stepped the same way while it is awaited. A gap
-// longer than kMaxCatchUp (a stalled controller) is not replayed: the backend jumps to the grid
-// point before the read, so its feedback ages as the hardware's would.
+// The arm over the in-process DirectBackend.
+// No real-time worker drives it: read() steps it in W (2 ms) steps up to the read instant
+// (CLOCK_MONOTONIC), so it advances at the controller rate in whole device periods, and a lifecycle
+// op is stepped the same way while it is awaited.
+// A gap longer than kMaxCatchUp (a stalled controller) is not replayed: the backend jumps to the
+// grid point before the read, so its feedback ages as the hardware's would.
 class DirectArmHw : public ArmSystem {
  public:
   static constexpr int kMaxCatchUp = 500;  // steps, 1 s
@@ -240,8 +241,8 @@ class DirectArmHw : public ArmSystem {
 // ---- test seam (CanopenArmHw) ----
 namespace arm_hw::testing {
 // Builds the transport of a configure cycle instead of a SocketCAN socket on can_interface;
-// nullptr (the default) restores SocketCAN. A factory returning nullptr fails the configure with
-// `error`.
+// nullptr (the default) restores SocketCAN.
+// A factory returning nullptr fails the configure with `error`.
 using TransportFactory = std::unique_ptr<canopen_backend::Transport> (*)(
     const std::string& can_interface, std::string* error);
 void set_transport_factory(TransportFactory factory);

@@ -13,8 +13,9 @@ namespace canopen_backend {
 
 // The backend's transport on a SocketCAN raw socket (socketcan_io::CanSocket, non-blocking).
 // A send that fails (ENOBUFS, EAGAIN, other) is counted by the socket and not retried: a late
-// CANopen frame is worse than a lost one. Rejected frames (RTR, extended, error, FD) are counted
-// and never reach the backend (B11). Single-threaded: only the I/O worker calls it.
+// CANopen frame is worse than a lost one.
+// Rejected frames (RTR, extended, error, FD) are counted and never reach the backend (B11).
+// Single-threaded: only the I/O worker calls it.
 class SocketTransport final : public Transport {
  public:
   // Frames one poll() reads at most; the worker's per-wake budget is a multiple of it.

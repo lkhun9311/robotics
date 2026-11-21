@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Independent CANopen peer for the interoperability tests (dev image only; the runtime image
-# skips this package). Links the Lely CANopen libraries shipped by ros-jazzy-lely-core-libraries.
+# skips this package).
+# Links the Lely CANopen libraries shipped by ros-jazzy-lely-core-libraries.
 cmake_minimum_required(VERSION 3.22)
 project(lely_peer LANGUAGES CXX)
 

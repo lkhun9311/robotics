@@ -2,8 +2,9 @@
 // The arm_hw plugins as components (C12, C13): each test parses the test URDF (fixture.hpp) into a
 // HardwareInfo, exports the handles, sets command handles and calls the lifecycle callbacks and
 // read()/write() directly (no controller), or goes through hardware_interface::ResourceManager
-// where ros2_control's own sequencing matters (on_error from read()). CanopenArmHw runs its real
-// worker thread over the wall-clock in-memory drive bus (drive_bus_transport.hpp).
+// where ros2_control's own sequencing matters (on_error from read()).
+// CanopenArmHw runs its real worker thread over the wall-clock in-memory drive bus
+// (drive_bus_transport.hpp).
 #include <gtest/gtest.h>
 
 #include <algorithm>

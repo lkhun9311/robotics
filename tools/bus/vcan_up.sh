@@ -3,9 +3,10 @@
 # Creates and raises the two virtual CAN links of the bus topology, idempotently:
 #   vcan_host    the side the master (Lely peer) sits on
 #   vcan_device  the side the drives sit on
-# Exit 0: both links exist and are up. Exit 3 with "NOT_RUN: <reason>" on stdout when the links
-# cannot be made here (no vcan module, no NET_ADMIN): a test that needs them must then fail as
-# NOT_RUN, never skip. VCAN_UP_FORCE_FAIL=1 takes the NOT_RUN path on purpose.
+# Exit 0: both links exist and are up.
+# Exit 3 with "NOT_RUN: <reason>" on stdout when the links cannot be made here (no vcan module, no
+# NET_ADMIN): a test that needs them must then fail as NOT_RUN, never skip.
+# VCAN_UP_FORCE_FAIL=1 takes the NOT_RUN path on purpose.
 set -uo pipefail
 
 not_run() {

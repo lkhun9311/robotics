@@ -7,9 +7,10 @@
 #include "canopen_codec/codec.hpp"
 
 // Expedited SDO server (CiA 301) built from the generated object dictionary (od::kEntries, which
-// tools/od/gen_header.py generates from config/od/vdrive_arm.eds). The server owns everything
-// the EDS states: whether an object and sub-index exist, access rights, size and the value
-// limits. What a value means is the drive's: it answers through ObjectAccess.
+// tools/od/gen_header.py generates from config/od/vdrive_arm.eds).
+// The server owns everything the EDS states: whether an object and sub-index exist, access rights,
+// size and the value limits.
+// What a value means is the drive's: it answers through ObjectAccess.
 namespace drive_core {
 
 // SDO abort codes (CiA 301) used by this drive.
@@ -26,8 +27,9 @@ inline constexpr std::uint32_t kTransfer = 0x0800'0020;           // Cannot be s
 inline constexpr std::uint32_t kDeviceState = 0x0800'0022;        // Not in this device state.
 }  // namespace sdo_abort
 
-// The drive's side of the object dictionary. The server calls it only for an entry that exists
-// and only with a request that passed the access, size and limit checks.
+// The drive's side of the object dictionary.
+// The server calls it only for an entry that exists and only with a request that passed the access,
+// size and limit checks.
 class ObjectAccess {
  public:
   // The raw value of `entry` (two's complement for signed types, the low `entry.size` bytes
@@ -37,8 +39,9 @@ class ObjectAccess {
     std::uint32_t abort{};  // 0: no abort.
   };
   virtual ReadResult read(const canopen_codec::od::EntryInfo& entry) = 0;
-  // Applies a write; returns 0 or an abort code. A write that aborts changes nothing unless its
-  // object documents otherwise (0x2011 clears the staging, D17).
+  // Applies a write; returns 0 or an abort code.
+  // A write that aborts changes nothing unless its object documents otherwise (0x2011 clears the
+  // staging, D17).
   virtual std::uint32_t write(const canopen_codec::od::EntryInfo& entry, std::uint32_t value) = 0;
 
  protected:
@@ -56,10 +59,11 @@ class SdoServer {
   static bool has_index(std::uint16_t index);
 
   // Serves one decoded SDO request addressed to this node and returns the response, or nullopt
-  // for a request that gets none (a client abort). Checks, in order: object (0x06020000), sub
-  // (0x06090011), access (0x06010001 / 0x06010002), size (0x06070010; a download of size 0,
-  // size unspecified, takes the entry's size if the bytes beyond it are zero), limits
-  // (0x06090030); then the drive's ObjectAccess. Never throws.
+  // for a request that gets none (a client abort).
+  // Checks, in order: object (0x06020000), sub (0x06090011), access (0x06010001 / 0x06010002), size
+  // (0x06070010; a download of size 0, size unspecified, takes the entry's size if the bytes beyond
+  // it are zero), limits (0x06090030); then the drive's ObjectAccess.
+  // Never throws.
   static std::optional<canopen_codec::Sdo> handle(const canopen_codec::Sdo& request,
                                                   ObjectAccess& objects);
 };

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Command line and console parsing of canopen_master_cli. No bus here, so these are unit-tested
-// on their own.
+// Command line and console parsing of canopen_master_cli.
+// No bus here, so these are unit-tested on their own.
 #pragma once
 
 #include <array>
@@ -22,7 +22,8 @@ struct Options {
   std::map<std::string, std::string, std::less<>> values;
 };
 
-// `--key value` pairs. Every key must be in `allowed`; every key in `required` must be present;
+// `--key value` pairs.
+// Every key must be in `allowed`; every key in `required` must be present;
 // a key may appear once.
 Options parse_options(const std::vector<std::string_view>& args,
                       const std::set<std::string, std::less<>>& allowed,

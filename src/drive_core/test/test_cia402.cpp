@@ -72,7 +72,8 @@ const std::vector<Row> kTransitions = {
 };
 
 // The same commands with the standard's don't-care bits ("x") set: a command is a bit pattern
-// over bits 7, 3, 2, 1, 0, not one controlword value. Bit 8 (halt) and up are not part of it.
+// over bits 7, 3, 2, 1, 0, not one controlword value.
+// Bit 8 (halt) and up are not part of it.
 const std::vector<Row> kMasked = {
     {S::kOperationEnabled, 0x0D, S::kSwitchOnDisabled, "9 (0xxx xx0x)"},
     {S::kOperationEnabled, 0x04, S::kSwitchOnDisabled, "9 (0xxx xx0x)"},

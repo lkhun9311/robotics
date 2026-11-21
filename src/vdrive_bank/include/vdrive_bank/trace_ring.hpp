@@ -20,10 +20,11 @@
 #include "socketcan_io/socket.hpp"
 #include "vdrive_bank/bank.hpp"
 
-// The trace of the vdrive_bank process (B7). The control thread pushes fixed-size records into a
-// bounded single-producer single-consumer ring and never waits; a writer thread serializes them
-// as JSON lines. A full ring drops the record and counts it in trace_overflow, and a trace with
-// overflow is incomplete.
+// The trace of the vdrive_bank process (B7).
+// The control thread pushes fixed-size records into a bounded single-producer single-consumer ring
+// and never waits; a writer thread serializes them as JSON lines.
+// A full ring drops the record and counts it in trace_overflow, and a trace with overflow is
+// incomplete.
 namespace vdrive_bank {
 
 // Loop counters of B1.
@@ -94,8 +95,9 @@ struct InjectIo {
 };
 
 // A start that failed after the trace was opened (the loop never ran): the reason, cut to fit
-// and NUL-terminated. Written once, before the final snapshots and the exit record, so such a
-// trace never reads as a run that ended normally.
+// and NUL-terminated.
+// Written once, before the final snapshots and the exit record, so such a trace never reads as a
+// run that ended normally.
 struct StartFailed {
   runtime_core::MonoTime at;
   std::array<char, 64> reason;
@@ -119,7 +121,8 @@ using TraceRecord = std::variant<BankRecord, trace::Start, trace::Overload, trac
 static_assert(std::is_trivially_copyable_v<TraceRecord>);
 static_assert(sizeof(TraceRecord) <= 128);
 
-// One JSON object without a trailing newline. Every record has "event" and "t_ns".
+// One JSON object without a trailing newline.
+// Every record has "event" and "t_ns".
 std::string to_json(const TraceRecord& record);
 
 // Bounded SPSC ring. push is called by one thread (the control thread) and pop by one other
@@ -144,8 +147,9 @@ class TraceRing {
   alignas(64) std::atomic<std::uint64_t> overflow_{0};
 };
 
-// The consumer of a ring on its own thread. `sink` gets every record in order; `flush` runs after
-// each batch, so a reader of the file sees records within one idle period.
+// The consumer of a ring on its own thread.
+// `sink` gets every record in order; `flush` runs after each batch, so a reader of the file sees
+// records within one idle period.
 class TraceWriter {
  public:
   using Sink = std::function<void(const TraceRecord&)>;
@@ -158,7 +162,8 @@ class TraceWriter {
   ~TraceWriter();
 
   void start();
-  // Writes every record still in the ring, then joins the thread. Idempotent.
+  // Writes every record still in the ring, then joins the thread.
+  // Idempotent.
   void stop();
   std::uint64_t written() const { return written_.load(std::memory_order_relaxed); }
 

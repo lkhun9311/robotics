@@ -11,7 +11,8 @@ namespace runtime_core {
 MonoTime SystemMonotonicClock::now() const {
   timespec ts{};
   // CLOCK_MONOTONIC does not fail on Linux in practice, but a zeroed timespec would read as
-  // time 0 and make every deadline look expired or far away. Fail loudly instead.
+  // time 0 and make every deadline look expired or far away.
+  // Fail loudly instead.
   if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
     throw std::system_error(errno, std::generic_category(), "clock_gettime(CLOCK_MONOTONIC)");
   }

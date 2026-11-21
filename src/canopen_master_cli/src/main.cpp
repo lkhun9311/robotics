@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Our CANopen master as a process for the interop harness: the canopen backend's I/O worker
-// (C10) on a SocketCAN interface, driven by a scenario or by console lines on stdin. Reports
-// JSON lines on stdout (and, with --trace, the same lines to a file), one object per line, each
-// with "t" (CLOCK_MONOTONIC seconds when written) and "event"; master events also carry "at_ns",
-// the worker's instant of the event:
+// (C10) on a SocketCAN interface, driven by a scenario or by console lines on stdin.
+// Reports JSON lines on stdout (and, with --trace, the same lines to a file), one object per line,
+// each with "t" (CLOCK_MONOTONIC seconds when written) and "event"; master events also carry
+// "at_ns", the worker's instant of the event:
 //   start {ifname, nodes, scenario}             the worker is running
 //   state {node, state}                         a heartbeat reported a new NMT state (byte)
 //   boot / boot_timeout / hb_lost / hb_resumed {node}   heartbeat consumer events (C7)
@@ -289,8 +289,9 @@ struct Run {
 
 // ---- console (master-only worker) ----
 
-// `duration` zero: no deadline. A plain time and flag, not an optional MonoTime: GCC 13's
-// Release build reports a false maybe-uninitialized on an optional passed across this call.
+// `duration` zero: no deadline.
+// A plain time and flag, not an optional MonoTime: GCC 13's Release build reports a false
+// maybe-uninitialized on an optional passed across this call.
 int run_console(cb::Worker& worker, Run& run, Out& out, rc::Duration duration) {
   const bool timed = duration.ns > 0;
   const rc::MonoTime deadline = now() + duration;

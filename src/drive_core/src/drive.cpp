@@ -17,9 +17,9 @@ constexpr std::uint16_t kCobSdoRequestBase = 0x600;
 constexpr std::uint16_t kNodeMask = 0x07F;
 constexpr std::uint16_t kFunctionMask = 0x780;
 
-// The boot_id of the boot after a reset node. The process draws the first boot_id at start; a
-// reset node within the process derives the next one (MurmurHash3 finalizer of the previous id
-// plus one), which is never equal to the previous id.
+// The boot_id of the boot after a reset node.
+// The process draws the first boot_id at start; a reset node within the process derives the next
+// one (MurmurHash3 finalizer of the previous id plus one), which is never equal to the previous id.
 std::uint32_t next_boot_id(std::uint32_t previous) {
   std::uint32_t h = previous + 1U;
   h ^= h >> 16U;
@@ -48,8 +48,8 @@ constexpr std::int64_t eds_default(cc::od::Address a) {
   return -1;
 }
 
-// The EDS states these values; the drive implements them. A change on either side alone fails
-// the build.
+// The EDS states these values; the drive implements them.
+// A change on either side alone fails the build.
 constexpr std::int64_t kNsPerMs = 1'000'000;
 constexpr std::int64_t kNradPerUrad = 1'000;
 static_assert(eds_default(cc::od::addr::command_timeout_ms) == kCommandTimeout.ns / kNsPerMs);
@@ -98,8 +98,9 @@ cc::Frame Drive::boot_up_frame() const {
 }
 
 std::vector<cc::Frame> Drive::power_on(runtime_core::MonoTime now) {
-  // D3: the boot quarantine counts from boot-up, not from constructing the Drive. Only the first
-  // power-on of this boot rearms it: a repeated call must not restart the tag allocator.
+  // D3: the boot quarantine counts from boot-up, not from constructing the Drive.
+  // Only the first power-on of this boot rearms it: a repeated call must not restart the tag
+  // allocator.
   if (nmt_.state() == cc::NmtState::kBootUp) {
     issuer_.boot(issuer_.boot_id(), now);
   }
@@ -177,8 +178,8 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       return {};
     case NmtAction::kResetCommunication:
       // D12: the tag dies, session and generation clear, per-command state clears; boot_id and
-      // the tag allocator stay. The CiA 402 state is application state and stays too, and so
-      // does the policy latch (D11).
+      // the tag allocator stay.
+      // The CiA 402 state is application state and stays too, and so does the policy latch (D11).
       issuer_.reset_communication();
       staging_.reset_communication();  // The highest committed attempt_id stays (D17).
       last_commit_.reset();
@@ -189,10 +190,10 @@ std::vector<cc::Frame> Drive::on_nmt(const cc::Frame& frame, runtime_core::MonoT
       last_sync_.reset();  // The next SYNC is not judged against one from before the reset.
       break;
     case NmtAction::kResetNode: {
-      // D3: a new boot with a new boot_id, a new tag start and a new quarantine. The policy
-      // latch survives (D11): the re-initialised CiA 402 machine gets the inhibit again, and a
-      // lost drive authority puts it straight back into Fault (after_transition). The joint is
-      // physical and keeps its motion.
+      // D3: a new boot with a new boot_id, a new tag start and a new quarantine.
+      // The policy latch survives (D11): the re-initialised CiA 402 machine gets the inhibit again,
+      // and a lost drive authority puts it straight back into Fault (after_transition).
+      // The joint is physical and keeps its motion.
       const Cia402State before = cia402_.state();
       issuer_.boot(next_boot_id(issuer_.boot_id()), now);
       staging_.new_boot();  // attempt_ids start over only with a new boot (D17).
@@ -222,9 +223,11 @@ void Drive::on_pdo(const cc::Frame& frame, runtime_core::MonoTime now) {
   } else if (const auto rpdo2 = cc::unpack_rpdo2(node_, frame)) {
     ++counts_.pdo;
     // D5: a deadline that is not open when the fragment is received (expired, or farther ahead
-    // than the lease) drops the fragment here. Held in the window, a too-far deadline would come
-    // inside the lease by the next SYNC. The SYNC-time check stays. The tag is classified first
-    // (D8): a fragment of another (or no) tag is left to the assembler's other-tag drop.
+    // than the lease) drops the fragment here.
+    // Held in the window, a too-far deadline would come inside the lease by the next SYNC.
+    // The SYNC-time check stays.
+    // The tag is classified first (D8): a fragment of another (or no) tag is left to the
+    // assembler's other-tag drop.
     const std::uint16_t tag = issuer_.current();
     if (tag != 0 && rpdo2->exec_tag == tag &&
         !validity_open(rpdo2->valid_until_us, to_wire_us(now), kLeaseUs)) {
@@ -291,9 +294,9 @@ void Drive::apply_inhibit() {
 
 void Drive::start_stop_monitor(runtime_core::MonoTime now) {
   if (drive_unavailable_) {
-    // D11: without drive authority nothing is a controlled stop. A stop that becomes due later
-    // (a pending integrity stop, a policy stop) starts no monitor: a slow coast must never be
-    // reported as a confirmed stop, and stop_unconfirmed stays.
+    // D11: without drive authority nothing is a controlled stop.
+    // A stop that becomes due later (a pending integrity stop, a policy stop) starts no monitor: a
+    // slow coast must never be reported as a confirmed stop, and stop_unconfirmed stays.
     return;
   }
   stop_active_ = true;
@@ -318,8 +321,8 @@ void Drive::after_transition(Cia402State before, runtime_core::MonoTime now) {
     return;
   }
   if (before == Cia402State::kOperationEnabled) {
-    // Disable, stop or fault: nothing actuates any more and the tag dies (D11). A stop by
-    // controlword revokes it too, so transition 16 cannot resume the old command stream.
+    // Disable, stop or fault: nothing actuates any more and the tag dies (D11).
+    // A stop by controlword revokes it too, so transition 16 cannot resume the old command stream.
     actuated_.reset();
     issuer_.revoke();
   }
@@ -538,8 +541,9 @@ void Drive::inject_fault(std::uint16_t error_code, runtime_core::MonoTime now) {
 void Drive::inject_torque_loss(runtime_core::MonoTime now) {
   const Cia402State before = cia402_.state();
   drive_unavailable_ = true;
-  // No reaction: there is no actuator to run one. The torque-loss code replaces a fault that was
-  // already being handled (Fault Reaction Active or Fault): the authority loss supersedes it.
+  // No reaction: there is no actuator to run one.
+  // The torque-loss code replaces a fault that was already being handled (Fault Reaction Active or
+  // Fault): the authority loss supersedes it.
   cia402_.fault_without_reaction(kErrorTorqueLoss);
   actuated_.reset();
   issuer_.revoke();
@@ -615,8 +619,8 @@ class Drive::Objects final : public ObjectAccess {
       return d_.write_exec_commit(v, now_);
     }
     if (at(e, addr::policy_reset)) {
-      // D11: 1 asks for the reset; it is refused until the latest stop is confirmed. The EDS
-      // limits (0..1) already refused anything else; 0 asks for nothing.
+      // D11: 1 asks for the reset; it is refused until the latest stop is confirmed.
+      // The EDS limits (0..1) already refused anything else; 0 asks for nothing.
       return v == 0U || d_.policy_reset(now_) ? 0U : sdo_abort::kDeviceState;
     }
     if (at(e, addr::modes_of_operation)) {
@@ -627,8 +631,9 @@ class Drive::Objects final : public ObjectAccess {
       return sdo_abort::kUnsupportedAccess;
     }
     // Every writable object of the EDS is handled above; values this drive never changes are
-    // `const` there and never reach this point. A writable object added to the EDS without a
-    // handler here is refused rather than silently accepted.
+    // `const` there and never reach this point.
+    // A writable object added to the EDS without a handler here is refused rather than silently
+    // accepted.
     return sdo_abort::kUnsupportedAccess;
   }
 
@@ -727,10 +732,11 @@ std::vector<cc::Frame> Drive::on_sdo(const cc::Frame& frame, runtime_core::MonoT
 
 std::vector<cc::Frame> Drive::on_unsupported_sdo(const cc::Frame& frame) {
   // CiA 301: a request with a client command specifier this server does not serve (segmented or
-  // block transfer, or reserved bits set) is answered with abort 0x05040001. The multiplexer is
-  // echoed for the specifiers that carry one (initiate download 1, initiate upload 2, block
-  // upload 5, block download 6) and is zero for segments (0, 3) and the invalid specifier 7. A
-  // client abort (4) is never answered; a frame whose DLC is not 8 is not an SDO request.
+  // block transfer, or reserved bits set) is answered with abort 0x05040001.
+  // The multiplexer is echoed for the specifiers that carry one (initiate download 1, initiate
+  // upload 2, block upload 5, block download 6) and is zero for segments (0, 3) and the invalid
+  // specifier 7.
+  // A client abort (4) is never answered; a frame whose DLC is not 8 is not an SDO request.
   constexpr unsigned kCcsShift = 5U;
   constexpr unsigned kCcsAbort = 4U;
   const unsigned ccs = static_cast<unsigned>(frame.data[0]) >> kCcsShift;
@@ -781,7 +787,8 @@ std::uint32_t Drive::write_exec_commit(std::uint32_t crc, runtime_core::MonoTime
   }
   // D17 idempotent repeat, decided before any allocation (ExecTagIssuer::commit always allocates):
   // the value of the latest successful commit again, while its tag is still the current one,
-  // answers success with that same tag. Staging in progress for a newer attempt is untouched.
+  // answers success with that same tag.
+  // Staging in progress for a newer attempt is untouched.
   if (last_commit_ && crc == last_commit_->request.crc() &&
       issuer_.epoch() == last_commit_->epoch && issuer_.current() == last_commit_->tag) {
     exec_commit_written_ = crc;

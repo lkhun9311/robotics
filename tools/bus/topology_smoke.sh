@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Topology smoke of the compose bus (B12), run on the host: the `robot` service owns the network
-# namespace with vcan_host and vcan_device, and `dev` joins it. Proves both containers share one
-# namespace and that a frame sent in `dev` is received in `robot`. Exit 0 on success.
+# namespace with vcan_host and vcan_device, and `dev` joins it.
+# Proves both containers share one namespace and that a frame sent in `dev` is received in `robot`.
+# Exit 0 on success.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 compose=(docker compose)

@@ -17,16 +17,19 @@
 #include "drive_core/sdo_server.hpp"
 #include "runtime_core/time.hpp"
 
-// The virtual drive: frame dispatcher and drive loop. Every received frame is classified, passed
-// through the NMT service matrix (D12) and only then handed to its service. The drive loop runs
-// the SYNC timeline (D7), assembly and integrity (D8), guards (D9), the quick-stop ramp (D10),
-// the stop and fault layers with the policy latch (D11) and the TPDO feedback (D13). The SDO
-// server (sdo_server.hpp) serves the object dictionary, including the execution commit
+// The virtual drive: frame dispatcher and drive loop.
+// Every received frame is classified, passed through the NMT service matrix (D12) and only then
+// handed to its service.
+// The drive loop runs the SYNC timeline (D7), assembly and integrity (D8), guards (D9), the
+// quick-stop ramp (D10), the stop and fault layers with the policy latch (D11) and the TPDO
+// feedback (D13).
+// The SDO server (sdo_server.hpp) serves the object dictionary, including the execution commit
 // transaction (D17).
 namespace drive_core {
 
-// 0x2030:05 drive_flags (D11, D14): the one definition of its bit layout. The EDS comment at
-// [2030sub5] lists the same four bits; DriveFlags.BitValuesArePinned pins the literals.
+// 0x2030:05 drive_flags (D11, D14): the one definition of its bit layout.
+// The EDS comment at [2030sub5] lists the same four bits; DriveFlags.BitValuesArePinned pins the
+// literals.
 namespace drive_flag {
 inline constexpr std::uint16_t kPolicyLatched = 1U << 0U;     // D11 policy latch is set.
 inline constexpr std::uint16_t kDriveUnavailable = 1U << 1U;  // Torque loss: no drive authority.
@@ -44,8 +47,8 @@ inline constexpr runtime_core::Duration kSyncMinInterval{5'000'000};  // T_bus /
 // stop_confirmed: |v| below this for kQuietTicks consecutive W ticks (D10).
 inline constexpr std::int64_t kQuietVelocityNradS = 10'000'000;  // 0.01 rad/s
 inline constexpr int kQuietTicks = 5;
-// v_max / a_stop + 6 W = 0.112 s; a stop not confirmed by then is stop_unconfirmed (D10). A fault
-// reaction that is not confirmed by then ends there too: the drive enters Fault.
+// v_max / a_stop + 6 W = 0.112 s; a stop not confirmed by then is stop_unconfirmed (D10).
+// A fault reaction that is not confirmed by then ends there too: the drive enters Fault.
 inline constexpr runtime_core::Duration kStopDeadline{112'000'000};
 
 // Behaviour this drive implements, stated in the EDS as fixed values; drive.cpp checks at compile
@@ -56,7 +59,8 @@ inline constexpr std::int16_t kFaultReactionOptionCode = 2;  // 605Eh (D11)
 // this period (E3b).
 inline constexpr std::uint16_t kProducerHeartbeatMs = 100;
 
-// Error codes (603Fh / EMCY) of the injected faults. 0x8611 is CiA 402 "following error";
+// Error codes (603Fh / EMCY) of the injected faults.
+// 0x8611 is CiA 402 "following error";
 // 0xFF01 is in the CiA 301 device-specific range, chosen by this project for torque loss.
 inline constexpr std::uint16_t kErrorFollowing = 0x8611;
 inline constexpr std::uint16_t kErrorTorqueLoss = 0xFF01;
@@ -83,7 +87,8 @@ enum class DriveEventKind : std::uint8_t {
   kIntegrity,  // An integrity violation was detected (D8).
 };
 
-// One drive event. Only the fields named next to the kind above are meaningful.
+// One drive event.
+// Only the fields named next to the kind above are meaningful.
 struct DriveEvent {
   DriveEventKind kind{};
   runtime_core::MonoTime at{};
@@ -95,7 +100,8 @@ struct DriveEvent {
   std::uint16_t fault_code{};
 };
 
-// Receives drive events synchronously. It must not throw and must not call back into the drive.
+// Receives drive events synchronously.
+// It must not throw and must not call back into the drive.
 using EventSink = std::function<void(const DriveEvent&)>;
 
 // Frames handed to a service after the NMT gate, and frames dropped before it.
@@ -127,37 +133,43 @@ class Drive {
   Drive(const Drive&) = delete;
   Drive& operator=(const Drive&) = delete;
 
-  // Power on at `now`: CiA 402 initialisation, NMT boot-up. Returns the boot-up message. The
-  // node stays in Pre-operational until an NMT Start. The boot quarantine (D3) counts from here.
+  // Power on at `now`: CiA 402 initialisation, NMT boot-up.
+  // Returns the boot-up message.
+  // The node stays in Pre-operational until an NMT Start.
+  // The boot quarantine (D3) counts from here.
   std::vector<canopen_codec::Frame> power_on(runtime_core::MonoTime now);
 
   // Handles one received frame and returns the frames to send in reply (TPDO1-3 after an
-  // accepted SYNC in Operational, D7/D13). Never throws for any frame content; the only throw is
-  // runtime_core's checked time arithmetic, reachable only with times near +/-292 years. The tag
-  // lifetime is enforced first (ExecTagIssuer::tick), so a frame never sees a dead tag.
+  // accepted SYNC in Operational, D7/D13).
+  // Never throws for any frame content; the only throw is runtime_core's checked time arithmetic,
+  // reachable only with times near +/-292 years.
+  // The tag lifetime is enforced first (ExecTagIssuer::tick), so a frame never sees a dead tag.
   std::vector<canopen_codec::Frame> on_frame(const canopen_codec::Frame& frame,
                                              runtime_core::MonoTime now);
 
-  // The W tick. Call it every kTickPeriod, and before on_frame for frames of the same instant;
+  // The W tick.
+  // Call it every kTickPeriod, and before on_frame for frames of the same instant;
   // each call advances the joint model by exactly one W. Order: tag lifetime, pending integrity
   // stop, guards (expiry, SYNC loss, command timeout; only while Operation Enabled), joint step,
   // stop monitor (stop_confirmed / stop_unconfirmed, end of a fault reaction).
   void tick(runtime_core::MonoTime now);
 
-  // Test seam: a commit without the D17 staging and CRC, for tests of the drive loop. It skips
-  // the SDO path's CiA 402 state check and idempotent repeat; it is refused (nullopt, the current
-  // tag untouched) while the policy latch is set or an integrity stop is pending. Production
-  // commits go through 0x2011 only.
+  // Test seam: a commit without the D17 staging and CRC, for tests of the drive loop.
+  // It skips the SDO path's CiA 402 state check and idempotent repeat; it is refused (nullopt, the
+  // current tag untouched) while the policy latch is set or an integrity stop is pending.
+  // Production commits go through 0x2011 only.
   std::optional<std::uint16_t> commit_for_test(std::uint64_t generation, std::uint32_t session,
                                                runtime_core::MonoTime now);
-  // 0x2015 policy_reset = 1 (D11; the SDO write calls this). Accepted only while latched and
-  // after the latest stop is confirmed; then the latch clears and the drive goes to Switch On
-  // Disabled. Returns whether it was accepted.
+  // 0x2015 policy_reset = 1 (D11; the SDO write calls this).
+  // Accepted only while latched and after the latest stop is confirmed; then the latch clears and
+  // the drive goes to Switch On Disabled.
+  // Returns whether it was accepted.
   bool policy_reset(runtime_core::MonoTime now);
 
-  // Injected faults (D11). A recoverable fault ramps in Fault Reaction Active and enters Fault
-  // once the stop is confirmed. Torque loss enters Fault at once with no ramp: the joint keeps
-  // its velocity, stop_unconfirmed is reported and drive_unavailable stays set for the process.
+  // Injected faults (D11).
+  // A recoverable fault ramps in Fault Reaction Active and enters Fault once the stop is confirmed.
+  // Torque loss enters Fault at once with no ramp: the joint keeps its velocity, stop_unconfirmed
+  // is reported and drive_unavailable stays set for the process.
   // inject_fault emits kFault only when the fault was accepted (transition 13): a fault while one
   // is already being handled keeps the first code and emits nothing.
   void inject_fault(std::uint16_t error_code, runtime_core::MonoTime now);

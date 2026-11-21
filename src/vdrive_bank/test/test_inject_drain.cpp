@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The inject socket drain of the bank loop (B1, B6) on a real UNIX datagram socket pair: a
-// client that keeps the socket full must not hold the control thread. The CAN socket is a fake
-// that is never readable; the clock is the test's.
+// client that keeps the socket full must not hold the control thread.
+// The CAN socket is a fake that is never readable; the clock is the test's.
 #include <gtest/gtest.h>
 #include <linux/can.h>
 #include <sys/socket.h>

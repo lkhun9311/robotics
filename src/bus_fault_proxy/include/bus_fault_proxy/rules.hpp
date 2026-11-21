@@ -9,11 +9,13 @@
 // Fault rules of the bus fault proxy, one per line:
 //   <dir> <id>/<mask> [every <N> [offset <K>]] [window <from_ms> <to_ms>] <action> [args]
 // dir is h2d or d2h; id and mask are decimal or 0x-hex, at most 0x7FF; a frame matches when
-// (cob_id & mask) == (id & mask). `every` keeps the matching frames whose 0-based occurrence
-// number n (per rule, counted over the frames of its direction and identifier) has n mod N == K.
-// `window` keeps frames received in [from, to) milliseconds after the proxy's start. Both
-// predicates apply to every action. Actions: delay <ms> (0..80), drop, dup,
-// dup_corrupt <byte> <xor>, corrupt <byte> <xor>, reorder. '#' starts a comment.
+// (cob_id & mask) == (id & mask).
+// `every` keeps the matching frames whose 0-based occurrence number n (per rule, counted over the
+// frames of its direction and identifier) has n mod N == K.
+// `window` keeps frames received in [from, to) milliseconds after the proxy's start.
+// Both predicates apply to every action.
+// Actions: delay <ms> (0..80), drop, dup, dup_corrupt <byte> <xor>, corrupt <byte> <xor>, reorder.
+// '#' starts a comment.
 namespace bus_fault_proxy {
 
 enum class Dir : std::uint8_t { kH2D, kD2H };

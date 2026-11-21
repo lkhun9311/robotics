@@ -5,9 +5,9 @@
 
 #include "runtime_core/time.hpp"
 
-// The heartbeat consumer of one node (C7). It only observes: whatever it detects is reported to
-// the caller, and nothing here sends a frame. A window is open while now < deadline; at the
-// deadline it has expired.
+// The heartbeat consumer of one node (C7).
+// It only observes: whatever it detects is reported to the caller, and nothing here sends a frame.
+// A window is open while now < deadline; at the deadline it has expired.
 namespace canopen_master {
 
 enum class HeartbeatStatus : std::uint8_t {
@@ -33,14 +33,17 @@ class HeartbeatConsumer {
   HeartbeatConsumer(runtime_core::Duration consumer_time, runtime_core::Duration boot_timeout);
 
   // Starts (or restarts, after an NMT reset sent by the master) the wait for a first heartbeat:
-  // the boot deadline is now + boot_timeout. No effect while disabled.
+  // the boot deadline is now + boot_timeout.
+  // No effect while disabled.
   void start(runtime_core::MonoTime now);
 
-  // Zero or less disables. Enabling a disabled consumer starts it at `now`; changing the time of
-  // an enabled one moves the running deadline to last heartbeat + the new time.
+  // Zero or less disables.
+  // Enabling a disabled consumer starts it at `now`; changing the time of an enabled one moves the
+  // running deadline to last heartbeat + the new time.
   void set_consumer_time(runtime_core::Duration consumer_time, runtime_core::MonoTime now);
 
-  // A heartbeat (any state byte, boot-up included) received at `now`. Call expire(now) first.
+  // A heartbeat (any state byte, boot-up included) received at `now`.
+  // Call expire(now) first.
   HeartbeatChange on_heartbeat(runtime_core::MonoTime now);
 
   // Reports a deadline that has passed at `now`, once.

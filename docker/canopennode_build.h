@@ -2,7 +2,8 @@
 /* Force-included into every translation unit of the pinned CANopenLinux build (cc -include).
  * Two changes to the shipped canopend, nothing else:
  *  1. NMT_CONTROL without CO_NMT_STARTUP_TO_OPERATIONAL: the node stays Pre-operational after
- *     boot-up until a master starts it. The other bits are the shipped default.
+ *     boot-up until a master starts it.
+ *     The other bits are the shipped default.
  *  2. Log lines go to stderr instead of syslog (the dev image runs no syslog daemon, so the
  *     shipped build would drop its NMT and emergency log lines).
  */

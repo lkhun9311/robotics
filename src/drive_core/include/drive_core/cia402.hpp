@@ -5,9 +5,9 @@
 #include <optional>
 
 // CiA 402 power drive system state machine (device control, 6040h/6041h) for the virtual drive,
-// with quick stop option code 605Ah = 6 (contract D10) and the fault reaction of D11. It holds
-// state only: the ramp, the joint model and the tag revocation that go with a transition belong
-// to the drive loop, which reads state() and the reasons recorded here.
+// with quick stop option code 605Ah = 6 (contract D10) and the fault reaction of D11.
+// It holds state only: the ramp, the joint model and the tag revocation that go with a transition
+// belong to the drive loop, which reads state() and the reasons recorded here.
 namespace drive_core {
 
 enum class Cia402State : std::uint8_t {
@@ -43,17 +43,19 @@ class Cia402 {
   // Transition 1 (automatic after initialisation): Not Ready to Switch On -> Switch On Disabled.
   void complete_initialisation();
 
-  // Applies a controlword (6040h). Commands that have no transition in the current state are
-  // ignored. Bit 7 is tracked on every call, so Fault Reset acts only on a 0 -> 1 edge.
+  // Applies a controlword (6040h).
+  // Commands that have no transition in the current state are ignored.
+  // Bit 7 is tracked on every call, so Fault Reset acts only on a 0 -> 1 edge.
   void on_controlword(std::uint16_t controlword);
 
-  // Policy stop (D11): Operation Enabled -> Quick Stop Active (transition 11). Returns false and
-  // changes nothing in any other state.
+  // Policy stop (D11): Operation Enabled -> Quick Stop Active (transition 11).
+  // Returns false and changes nothing in any other state.
   bool quick_stop(QuickStopReason reason);
 
   // Fault occurrence (transition 13): any state but Fault Reaction Active and Fault -> Fault
-  // Reaction Active. A fault while one is already being handled keeps the first code and changes
-  // nothing. Returns whether the transition happened.
+  // Reaction Active.
+  // A fault while one is already being handled keeps the first code and changes nothing.
+  // Returns whether the transition happened.
   bool drive_fault(std::uint16_t error_code);
   // Transition 14: Fault Reaction Active -> Fault once the reaction (ramp or none) is done.
   void fault_reaction_done();
@@ -63,12 +65,14 @@ class Cia402 {
   void fault_without_reaction(std::uint16_t error_code);
 
   // While inhibited, every entry into Operation Enabled is refused: transitions 4, 3+4 and 16
-  // (16 exists with option 6). The command is ignored and the state stays where it is. The D11
-  // policy latch sets this.
+  // (16 exists with option 6).
+  // The command is ignored and the state stays where it is.
+  // The D11 policy latch sets this.
   void set_operation_enable_inhibited(bool inhibited) { enable_inhibited_ = inhibited; }
   bool operation_enable_inhibited() const { return enable_inhibited_; }
 
-  // Mode request (6060h). Only kModeCsp is accepted; any other value changes nothing.
+  // Mode request (6060h).
+  // Only kModeCsp is accepted; any other value changes nothing.
   bool request_mode(std::int8_t mode);
   // Mode display (6061h).
   std::int8_t mode_display() const { return mode_; }

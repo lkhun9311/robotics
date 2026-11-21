@@ -29,8 +29,9 @@ STATE_STOPPED = 0x04
 STATE_OPERATIONAL = 0x05
 STATE_PRE_OPERATIONAL = 0x7F
 
-# NMT state machine: the state a node is in after each command. After a reset the node
-# runs Initialisation, sends the boot-up message and enters Pre-operational by itself.
+# NMT state machine: the state a node is in after each command.
+# After a reset the node runs Initialisation, sends the boot-up message and enters Pre-operational
+# by itself.
 STATE_AFTER = {
     NMT_START: STATE_OPERATIONAL,
     NMT_STOP: STATE_STOPPED,
@@ -63,7 +64,8 @@ ABORT_VALUE_TOO_HIGH = 0x06090031  # Value of parameter written too high (downlo
 ABORT_INVALID_VALUE = 0x06090030  # Invalid value for parameter (download only)
 
 # EMCY write: 8 bytes = emergency error code (UNSIGNED16), error register (1001h,
-# UNSIGNED8), 5 bytes manufacturer-specific. Code 0000h = error reset or no error.
+# UNSIGNED8), 5 bytes manufacturer-specific.
+# Code 0000h = error reset or no error.
 # Error register (1001h): bit 0 = generic error, set whenever any error is present.
 EMCY_ERROR_RESET = 0x0000
 ERROR_REGISTER_NONE = 0x00

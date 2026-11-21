@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // DirectBackend on its own, without the Hal: the drive's stop semantics and its capability
-// profile. The contract suite (test_contract_direct.cpp) covers the same backend through the Hal.
+// profile.
+// The contract suite (test_contract_direct.cpp) covers the same backend through the Hal.
 #include <gtest/gtest.h>
 
 #include <cmath>

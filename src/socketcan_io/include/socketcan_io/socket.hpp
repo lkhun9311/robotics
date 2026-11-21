@@ -18,9 +18,10 @@
 
 namespace socketcan_io {
 
-// A frame that passed classification. `rx_mono` is CLOCK_MONOTONIC read right after recvmsg
-// returned and is the only time a Drive may be given; `kernel_rt_ns` (CLOCK_REALTIME, from
-// SO_TIMESTAMPNS) is a diagnostic and is never mixed with it.
+// A frame that passed classification.
+// `rx_mono` is CLOCK_MONOTONIC read right after recvmsg returned and is the only time a Drive may
+// be given; `kernel_rt_ns` (CLOCK_REALTIME, from SO_TIMESTAMPNS) is a diagnostic and is never mixed
+// with it.
 struct RxFrame {
   canopen_codec::Frame frame;
   runtime_core::MonoTime rx_mono;
@@ -48,8 +49,9 @@ struct IoCounts {
   std::uint64_t tx_other_error{};
 };
 
-// One non-blocking raw CAN socket. Receives classic and FD frames and error frames so that
-// they are counted rather than silently filtered by the kernel (B11).
+// One non-blocking raw CAN socket.
+// Receives classic and FD frames and error frames so that they are counted rather than silently
+// filtered by the kernel (B11).
 class CanSocket {
  public:
   static std::optional<CanSocket> open(std::string_view ifname, std::string* error);

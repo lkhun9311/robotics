@@ -18,9 +18,10 @@
 #include "canopen_master/sdo_client.hpp"
 #include "runtime_core/time.hpp"
 
-// The master core driven only through frames and logic time. Every expected frame is written
-// here as CiA 301 bytes, never produced by canopen_codec's encoders (the code under test uses
-// them). Ticks come before the frames of the same instant.
+// The master core driven only through frames and logic time.
+// Every expected frame is written here as CiA 301 bytes, never produced by canopen_codec's encoders
+// (the code under test uses them).
+// Ticks come before the frames of the same instant.
 namespace {
 
 namespace cc = canopen_codec;
@@ -365,7 +366,8 @@ TEST(Master, SegmentedInitiateRefused) {
   Recorder rec;
   ASSERT_TRUE(m.sdo_upload(kNode2, 0x1008, 0x00, rec.done()));
   m.tick(at(0));
-  // Initiate upload response, segmented (e = 0, s = 1), 26 bytes announced. Expedited only:
+  // Initiate upload response, segmented (e = 0, s = 1), 26 bytes announced.
+  // Expedited only:
   // the request fails and the server is aborted with 0x05040001.
   EXPECT_EQ(m.on_frame(frame(0x582, {0x41, 0x08, 0x10, 0x00, 0x1A, 0x00, 0x00, 0x00}), at(2)),
             std::vector<cc::Frame>{frame(0x602, {0x80, 0x08, 0x10, 0x00, 0x01, 0x00, 0x04, 0x05})});

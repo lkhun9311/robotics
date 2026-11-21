@@ -5,9 +5,9 @@
 
 #include "runtime_core/time.hpp"
 
-// The virtual drive's one-joint model (contract D10, Global Constraints). Integer nanoradians
-// and nanoradians per second, so the quick-stop ramp is achieved exactly: with the project
-// values every step is an exact integer and no rounding accumulates over a stop.
+// The virtual drive's one-joint model (contract D10, Global Constraints).
+// Integer nanoradians and nanoradians per second, so the quick-stop ramp is achieved exactly: with
+// the project values every step is an exact integer and no rounding accumulates over a stop.
 namespace drive_core {
 
 // Project-declared values (E1; not industry values).
@@ -22,8 +22,9 @@ struct JointState {
   friend bool operator==(const JointState&, const JointState&) = default;
 };
 
-// One call is one W step. Every step sets the velocity first and then integrates the position
-// with the new velocity (semi-implicit), so braking travel stays <= v^2 / (2 a_stop).
+// One call is one W step.
+// Every step sets the velocity first and then integrates the position with the new velocity
+// (semi-implicit), so braking travel stays <= v^2 / (2 a_stop).
 class JointModel {
  public:
   explicit JointModel(runtime_core::Duration step = kTickPeriod, std::int64_t v_max = kVMaxNradS,

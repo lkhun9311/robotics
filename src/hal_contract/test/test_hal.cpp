@@ -383,9 +383,9 @@ TEST(Hal, InhibitRefusesEveryWrite) {
 }
 
 TEST(Hal, WriteSubmitsOnlyOnSend) {
-  // Each case brings a fresh Hal to the refusal and expects no submit. The guard's own
-  // manager/session/generation verdicts cannot be reached through Hal: identity is refused
-  // first as kIdentityMismatch.
+  // Each case brings a fresh Hal to the refusal and expects no submit.
+  // The guard's own manager/session/generation verdicts cannot be reached through Hal: identity is
+  // refused first as kIdentityMismatch.
   struct Case {
     V expected;
     std::function<V(Rig&)> run;

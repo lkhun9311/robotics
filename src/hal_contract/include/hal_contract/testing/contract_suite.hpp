@@ -2,15 +2,16 @@
 #pragma once
 
 // The backend contract suite: one gtest typed suite every hal_contract::Backend runs through
-// the Hal, in logic time. A backend's test instantiates it with its own fixture:
+// the Hal, in logic time.
+// A backend's test instantiates it with its own fixture:
 //
 //   using Fixtures = ::testing::Types<MyFixture>;
 //   INSTANTIATE_TYPED_TEST_SUITE_P(MyBackend, Contract, Fixtures);
 //
 // The cases judge what the device does (its own state and events, through the fixture) and
-// what the Hal reports, never the backend's internals. Numbers are the E3a/E3b project values
-// (W = 2 ms, T_bus = 10 ms, lease 48 ms, command timeout 30 ms, v_max 1 rad/s, a_stop 10 rad/s^2)
-// and the bounds derived from them in the E3c plan (C17-C19).
+// what the Hal reports, never the backend's internals.
+// Numbers are the E3a/E3b project values (W = 2 ms, T_bus = 10 ms, lease 48 ms, command timeout 30
+// ms, v_max 1 rad/s, a_stop 10 rad/s^2) and the bounds derived from them in the E3c plan (C17-C19).
 
 #include <gtest/gtest.h>
 
@@ -60,11 +61,11 @@ inline constexpr double kMaxTravelAfterApproval = 0.100;  // rad
 // C18 host deadline for stop confirmation, from the inhibit.
 inline constexpr runtime_core::Duration kStopConfirmDeadline = runtime_core::milliseconds(172);
 // Every axis gets its stop within 2 x T_bus of the injected single-axis stop (C17; plan Task 4
-// Session.OneNodeStopInhibitsGroup: "Quick Stop to the other five within 2 x T_bus"). Measured
-// from the injection, so it includes the backend's time to notice the stop and latch.
+// Session.OneNodeStopInhibitsGroup: "Quick Stop to the other five within 2 x T_bus").
+// Measured from the injection, so it includes the backend's time to notice the stop and latch.
 inline constexpr runtime_core::Duration kGroupStopLatency = runtime_core::milliseconds(20);
-// C19's widest steady-state acceptance bound (CANopen: 2 x T_bus). A fixture may declare a
-// tighter one (Direct: 1 W), never a looser one.
+// C19's widest steady-state acceptance bound (CANopen: 2 x T_bus).
+// A fixture may declare a tighter one (Direct: 1 W), never a looser one.
 inline constexpr runtime_core::Duration kMaxAcceptanceLatency = runtime_core::milliseconds(20);
 // Distinct, non-zero joint positions: a backend that reports zeros or swaps joints is caught.
 inline constexpr Joints kStartPosition{0.1, -0.2, 0.3, -0.4, 0.5, -0.6};
@@ -100,11 +101,13 @@ struct DeviceState {
   Joints velocity{};
 };
 
-// What a backend's test supplies. Every hook is backend-neutral: it names an effect on the
-// device or the path between host and device, not a mechanism of one backend.
+// What a backend's test supplies.
+// Every hook is backend-neutral: it names an effect on the device or the path between host and
+// device, not a mechanism of one backend.
 //
 //   make()                    the backend, once per test, with the device at rest at
-//                             kStartPosition, unconfigured. The fixture keeps a way to step it.
+//                             kStartPosition, unconfigured.
+//                             The fixture keeps a way to step it.
 //   now()                     the current logic time.
 //   advance(d)                moves logic time by d, stepping the device and the backend.
 //   stall_feedback(b)         while true, no new device sample reaches the backend (the samples
@@ -275,8 +278,8 @@ class Contract : public ::testing::Test {
   }
 
   // A measured value of this case, as a property of the gtest XML report (the README's backend
-  // table is generated from it, tools/evidence/backend_table.py). Logic time: the values are
-  // the same on every run.
+  // table is generated from it, tools/evidence/backend_table.py).
+  // Logic time: the values are the same on every run.
   static void measure(const char* key, double value) {
     std::ostringstream text;
     text << std::fixed << std::setprecision(3) << value;
@@ -486,8 +489,9 @@ TYPED_TEST_P(Contract, ExpiredPermitStopsWithinBound) {
   EXPECT_TRUE(this->feedback_.faults.has(Fault::kPolicyStop));
 }
 
-// Commands keep being approved but stop reaching the device. A fresh fixture: recovery after a
-// latched device policy stop (policy reset) is E4, so this never re-arms a stopped device.
+// Commands keep being approved but stop reaching the device.
+// A fresh fixture: recovery after a latched device policy stop (policy reset) is E4, so this never
+// re-arms a stopped device.
 TYPED_TEST_P(Contract, LostCommandsStopWithinBound) {
   this->bring_up();
   const AuthorityId b{runtime_core::ManagerInstance{1}, runtime_core::SessionId{1},
@@ -779,9 +783,9 @@ TYPED_TEST_P(Contract, InhibitStopsEveryAxisAndConfirms) {
   this->expect_stopped_within_bound(injected);
 }
 
-// C18: a stop is confirmed only by 5 distinct fresh samples. With the axes already at rest and
-// feedback stalled, the last sample says "at rest" forever; counting it again must never
-// confirm anything.
+// C18: a stop is confirmed only by 5 distinct fresh samples.
+// With the axes already at rest and feedback stalled, the last sample says "at rest" forever;
+// counting it again must never confirm anything.
 TYPED_TEST_P(Contract, StaleAtRestSampleConfirmsNothing) {
   this->bring_up();
   this->arm(this->kA, runtime_core::milliseconds(500));

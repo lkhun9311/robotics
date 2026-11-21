@@ -18,27 +18,30 @@
 #include "runtime_core/time.hpp"
 
 // The CANopen backend (C1, C2, C9): the vdrive session of canopen_master behind the
-// hal_contract Backend interface, over a frame Transport. Lifecycle ops are posted to the session
-// and progress as step() runs; the control-path calls (submit, poll, inhibited, can_apply,
-// op_state) only read or write the session's fixed state and never touch the transport.
+// hal_contract Backend interface, over a frame Transport.
+// Lifecycle ops are posted to the session and progress as step() runs; the control-path calls
+// (submit, poll, inhibited, can_apply, op_state) only read or write the session's fixed state and
+// never touch the transport.
 //
 // Capabilities are probed by configure (C2): six vdrive nodes give the virtual CANopen profile,
 // provisional until the first arm confirms it by behaviour; anything else gives the generic
-// CiA 402 profile. A configured profile limit (the backend_profile_limit parameter) can only
-// lower the probed profile, per capability.
+// CiA 402 profile.
+// A configured profile limit (the backend_profile_limit parameter) can only lower the probed
+// profile, per capability.
 //
 // configure is refused (the op fails at once, nothing is sent) while an arm is running, the group
 // is armed or a deactivate is running, unless the inhibit is latched: any of those may have
 // drives Operation Enabled, and the configure's Enter Pre-operational would stop them without the
-// stop being tracked (a configure posted mid-arm would also supersede the arm). Deactivate first,
-// or let an inhibit stop the group.
+// stop being tracked (a configure posted mid-arm would also supersede the arm).
+// Deactivate first, or let an inhibit stop the group.
 //
 // A configuration outside the C20 timing profile (or one the master or session refuses: duplicate
 // or unknown nodes, non-positive timeouts) does not throw: the backend is built without a session
 // and every lifecycle op fails at once with the reason, which for C20 lists the allowed values.
 //
-// Not thread-safe; one caller serializes every call. In logic time the caller is the test, which
-// calls step() every W; in E3c Task 6 it is the I/O worker.
+// Not thread-safe; one caller serializes every call.
+// In logic time the caller is the test, which calls step() every W; in E3c Task 6 it is the I/O
+// worker.
 namespace canopen_backend {
 
 struct CanopenConfig {
@@ -69,10 +72,11 @@ class CanopenBackend final : public hal_contract::Backend {
 
   // Time passes to `now`: every received frame to the session, then the session's tick, then
   // what arrived in reply (the TPDOs answering this tick's SYNC included), until nothing more
-  // arrives. `max_frames` (kMaxFramesPerStep by default; the I/O worker passes its per-wake
-  // budget, B1) is a soft bound over both drains, checked between poll() batches: a step stops
-  // polling once that many frames were handled, but a batch already taken is handled whole; the
-  // tick runs either way. Returns the number of frames handled.
+  // arrives.
+  // `max_frames` (kMaxFramesPerStep by default; the I/O worker passes its per-wake budget, B1) is a
+  // soft bound over both drains, checked between poll() batches: a step stops polling once that
+  // many frames were handled, but a batch already taken is handled whole; the tick runs either way.
+  // Returns the number of frames handled.
   std::size_t step(runtime_core::MonoTime now, std::size_t max_frames = kMaxFramesPerStep);
 
   // ---- hal_contract::Backend ----
@@ -121,9 +125,9 @@ class CanopenBackend final : public hal_contract::Backend {
   std::optional<hal_contract::ArmRequest> last_arm() const { return last_arm_; }
 
   static constexpr std::size_t kMaxFramesPerStep = 4096;
-  // Refused ops are remembered in a ring this long. An id pushed out by later refusals reads as
-  // kUnknown ("unknown operation" from wait), not as its refusal; the Hal keeps fewer ops
-  // (Hal::kOpSlots = 8), so it never asks for one.
+  // Refused ops are remembered in a ring this long.
+  // An id pushed out by later refusals reads as kUnknown ("unknown operation" from wait), not as
+  // its refusal; the Hal keeps fewer ops (Hal::kOpSlots = 8), so it never asks for one.
   static constexpr std::size_t kRefusalRing = 8;
 
  private:

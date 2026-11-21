@@ -15,18 +15,20 @@
 #include "runtime_core/time.hpp"
 #include "vdrive_bank/entropy.hpp"
 
-// Six virtual drives (node IDs 1..6) behind one CAN interface, in logic time. The bank routes
-// received frames by COB-ID (B2), produces each node's heartbeat (B3) and EMCY (B4), and applies
-// injected faults (B6). It does no I/O: the caller passes every frame and a CLOCK_MONOTONIC
-// instant, sends what comes back, and receives fixed-size records through the sink.
+// Six virtual drives (node IDs 1..6) behind one CAN interface, in logic time.
+// The bank routes received frames by COB-ID (B2), produces each node's heartbeat (B3) and EMCY
+// (B4), and applies injected faults (B6).
+// It does no I/O: the caller passes every frame and a CLOCK_MONOTONIC instant, sends what comes
+// back, and receives fixed-size records through the sink.
 namespace vdrive_bank {
 
 // 0x1017 producer heartbeat time.
 inline constexpr runtime_core::Duration kHeartbeatPeriod{
     static_cast<std::int64_t>(drive_core::kProducerHeartbeatMs) * 1'000'000};
 
-// One traced fact. Only the fields named next to the kind are meaningful; `node` is 0 for a
-// record that belongs to no node.
+// One traced fact.
+// Only the fields named next to the kind are meaningful; `node` is 0 for a record that belongs to
+// no node.
 struct BankRecord {
   enum class Kind : std::uint8_t {
     kDrive,           // drive: an event of the node's Drive.
@@ -72,8 +74,8 @@ class Bank {
     std::vector<canopen_codec::Frame> frames;
   };
 
-  // boot_ids: the first boot_id of nodes 1..6 (draw_boot_ids). Throws std::invalid_argument
-  // unless they are nonzero and distinct.
+  // boot_ids: the first boot_id of nodes 1..6 (draw_boot_ids).
+  // Throws std::invalid_argument unless they are nonzero and distinct.
   Bank(std::array<std::uint32_t, kNodeCount> boot_ids, runtime_core::MonoTime now);
   // Each Drive and its event sink refer to the bank, so it stays where it was made.
   Bank(const Bank&) = delete;
@@ -94,7 +96,8 @@ class Bank {
   std::vector<canopen_codec::Frame> on_frame(const canopen_codec::Frame& frame,
                                              runtime_core::MonoTime now);
   // B6: `fault <node> <hex>`, `torque_loss <node>`, `stuck <node> 0|1`, `hb_mute <node> 0|1`
-  // with node 1..6 and hex 1..4 hex digits. A rejected command changes nothing.
+  // with node 1..6 and hex 1..4 hex digits.
+  // A rejected command changes nothing.
   InjectResult inject(std::string_view command, runtime_core::MonoTime now);
 
   void set_sink(RecordSink sink) { sink_ = std::move(sink); }

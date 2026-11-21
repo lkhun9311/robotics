@@ -30,8 +30,9 @@ inline constexpr runtime_core::Duration kActivateTimeout = runtime_core::millise
 inline constexpr runtime_core::Duration kArmTimeout = runtime_core::milliseconds(1000);
 inline constexpr runtime_core::Duration kDeactivateTimeout = runtime_core::milliseconds(1000);
 
-// The three fields that name who may move the arm (C1). All three are compared, always: a
-// restarted manager may reuse the numbers of session and generation, never its instance.
+// The three fields that name who may move the arm (C1).
+// All three are compared, always: a restarted manager may reuse the numbers of session and
+// generation, never its instance.
 struct AuthorityId {
   runtime_core::ManagerInstance manager{};
   runtime_core::SessionId session{};
@@ -101,14 +102,16 @@ enum class StopStatus : std::uint8_t {
 
 const char* to_string(StopStatus status);
 
-// Counters of commands that never became device commands (C6, C19). They are reported, not
-// acknowledged: a superseded command never appears in group_applied_source_seq.
+// Counters of commands that never became device commands (C6, C19).
+// They are reported, not acknowledged: a superseded command never appears in
+// group_applied_source_seq.
 struct CommandCounters {
   std::uint64_t superseded{0};               // overwritten by a newer one before dispatch
   std::uint64_t expired_before_dispatch{0};  // no longer open when it could have been sent
 };
 
-// The robot-level feedback snapshot (C4). Times are source times, never receive times.
+// The robot-level feedback snapshot (C4).
+// Times are source times, never receive times.
 struct Feedback {
   Joints position{};
   Joints velocity{};

@@ -23,9 +23,9 @@
 //
 // THREAD OWNERSHIP
 //   worker thread  The only thread that touches the Transport (the CAN socket), the Master and
-//                  the VdriveSession (inside CanopenBackend). It is the thread start() creates,
-//                  or, in logic-time tests, the caller of run_once() (never both: run_once
-//                  throws once start() succeeded).
+//                  the VdriveSession (inside CanopenBackend).
+//                  It is the thread start() creates, or, in logic-time tests, the caller of
+//                  run_once() (never both: run_once throws once start() succeeded).
 //   control thread Every other public member, and only one thread at a time (like any Backend).
 //                  It touches only the channels below, never the bus or the session.
 //   channels       control -> worker: the one-slot command box (an overwrite before the worker
@@ -33,13 +33,13 @@
 //                  kOpQueueCapacity), the cancel queue, the raw command queue (master-only) and
 //                  the inhibit and shutdown requests. worker -> control: the one-slot feedback,
 //                  capability and stats boxes, the op table, the last SYNC instant and the event
-//                  queue (bounded kEventQueueCapacity; full is the fault kEventOverflow). Every
-//                  channel is single-producer single-consumer and lock-free; only wait() and
+//                  queue (bounded kEventQueueCapacity; full is the fault kEventOverflow).
+//                  Every channel is single-producer single-consumer and lock-free; only wait() and
 //                  await() block, on a condition variable the worker signals after each wake.
 //
 // EACH WAKE of the worker (ppoll on an absolute timerfd, the socket and a wake eventfd; the
-// first step waits for the first timer expiry, so the SYNC grid lies on the timer grid). The
-// timer period is W (2 ms), not T_bus as C10 states: the master still produces SYNC every T_bus
+// first step waits for the first timer expiry, so the SYNC grid lies on the timer grid).
+// The timer period is W (2 ms), not T_bus as C10 states: the master still produces SYNC every T_bus
 // (the grid is a multiple of W), and W is the drive's own granularity for op deadlines, retries,
 // stop polling and the dispatch margin, so none of them waits up to a whole T_bus. the inhibit and
 // shutdown requests, the queued ops, the cancels, the raw commands, the newest command from the
@@ -47,26 +47,30 @@
 // the op table, feedback, capabilities and stats are published.
 //
 // OPS (C10): every op carries its id and absolute deadline from the OpTicket the caller made
-// when it posted it. The session fails an op whose deadline passed whether or not anyone waits;
+// when it posted it.
+// The session fails an op whose deadline passed whether or not anyone waits;
 // a wait() that times out fails it too: wait() posts the cancel and blocks (at most
 // cancel_ack_timeout, 3 W) until a wake has put it into the session (the epoch moves on, so that
 // wake and every later one send nothing of the op; a cancelled arm fences); only then does it
-// return. If no wake takes it in time, the inhibit is latched instead. An op the worker had already
-// completed when the cancel arrived latches the inhibit (counted as late_completions): the caller
-// was told it failed.
+// return.
+// If no wake takes it in time, the inhibit is latched instead.
+// An op the worker had already completed when the cancel arrived latches the inhibit (counted as
+// late_completions): the caller was told it failed.
 //
 // TEARDOWN (C13): the Worker owns everything the thread touches through one shared state that
 // the thread also holds. shutdown() posts the shutdown (a group stop when arming, armed or
 // deactivating, then exit once no stop is pending or kShutdownStopLimit passed), wakes the
-// worker and joins within a timeout; false (retryable) while it still runs. The destructor does
-// the same with a 1 s timeout and otherwise detaches the thread, which keeps the shared state
-// alive until it exits. The worker releases the transport (closes the socket) when it exits.
+// worker and joins within a timeout; false (retryable) while it still runs.
+// The destructor does the same with a 1 s timeout and otherwise detaches the thread, which keeps
+// the shared state alive until it exits.
+// The worker releases the transport (closes the socket) when it exits.
 // Ops still queued, or posted, once the shutdown is seen fail without starting.
 //
 // FAULTS of the worker itself latch for the Worker's lifetime (a configure does not clear them;
 // a new configure cycle uses a new Worker): a full event queue (kEventOverflow) and the loss of
 // the transport (kTransportLost: a receive error, or a write error other than EAGAIN or
-// ENOBUFS, which are a full queue and only counted, spec §4 IPC policy). Both inhibit.
+// ENOBUFS, which are a full queue and only counted, spec §4 IPC policy).
+// Both inhibit.
 // on_error_nonblocking() requests the inhibit and the shutdown without waiting.
 //
 // A master-only worker (the console of canopen_master_cli) runs a bare Master over the
@@ -164,8 +168,9 @@ std::string stats_json(const WorkerStats& stats);
 
 struct WorkerOptions {
   std::size_t rx_budget{kRxBudget};
-  // Forward master events and dispatch records to the event queue. Off by default: a worker
-  // with no reader would fill the queue, and a full queue is a fault. A reader turns it on.
+  // Forward master events and dispatch records to the event queue.
+  // Off by default: a worker with no reader would fill the queue, and a full queue is a fault.
+  // A reader turns it on.
   bool forward_events{false};
   // How long a timed-out wait() blocks for the worker to take its cancel (C10); past it the
   // inhibit is requested instead.
@@ -180,11 +185,12 @@ struct WorkerState;  // The channels and everything the thread owns (worker.cpp)
 
 class Worker final : public hal_contract::Backend {
  public:
-  // The backend on `transport`. Throws std::invalid_argument for a null transport; a refused
-  // configuration is reported by every op, as by CanopenBackend.
+  // The backend on `transport`.
+  // Throws std::invalid_argument for a null transport; a refused configuration is reported by every
+  // op, as by CanopenBackend.
   Worker(CanopenConfig config, std::unique_ptr<Transport> transport, WorkerOptions options = {});
-  // A master-only worker. Throws what Master throws, and std::invalid_argument for a null
-  // transport.
+  // A master-only worker.
+  // Throws what Master throws, and std::invalid_argument for a null transport.
   Worker(canopen_master::MasterConfig config, std::unique_ptr<Transport> transport,
          WorkerOptions options = {});
   Worker(const Worker&) = delete;
@@ -196,12 +202,12 @@ class Worker final : public hal_contract::Backend {
   // Creates the worker thread; false with `error` if it cannot (timerfd, thread), or if a thread
   // was already started on this Worker (a worker is never created while another exists).
   bool start(std::string* error);
-  // Posts the shutdown, wakes the worker and joins within `timeout`. True once the thread has
-  // ended (or none was started); false while it still runs (retryable).
+  // Posts the shutdown, wakes the worker and joins within `timeout`.
+  // True once the thread has ended (or none was started); false while it still runs (retryable).
   bool shutdown(runtime_core::Duration timeout);
   bool running() const;
-  // Logic-time test seam: one wake at `now` on the calling thread. Throws std::logic_error once
-  // start() succeeded.
+  // Logic-time test seam: one wake at `now` on the calling thread.
+  // Throws std::logic_error once start() succeeded.
   void run_once(runtime_core::MonoTime now);
 
   // ---- hal_contract::Backend (control thread) ----
@@ -230,7 +236,8 @@ class Worker final : public hal_contract::Backend {
   std::optional<WorkerEvent> pop_event();
   WorkerStats stats() const;
   // Blocks until `predicate` holds, re-evaluating it after every wake the worker publishes (and
-  // once at the start); false when `timeout` passed first. For tests and the CLI's steps.
+  // once at the start); false when `timeout` passed first.
+  // For tests and the CLI's steps.
   bool await(const std::function<bool()>& predicate, runtime_core::Duration timeout);
   bool master_only() const;
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Every golden vector (computed by tools/od/wire.py, independently of the C++ generator) must
-// decode to its stated fields and re-encode to its exact bytes. Each failure names the vector.
+// decode to its stated fields and re-encode to its exact bytes.
+// Each failure names the vector.
 #include <gtest/gtest.h>
 
 #include <cstddef>
@@ -136,9 +137,9 @@ void check_pdo(const golden::Vector& v, Pack pack, Unpack unpack) {
 }  // namespace
 
 TEST(Golden, FamilyCountsArePinned) {
-  // tools/od/make_golden.py writes exactly this many vectors per family. A regeneration that
-  // silently yields fewer (or more) vectors fails here; change these numbers only together with
-  // the generator.
+  // tools/od/make_golden.py writes exactly this many vectors per family.
+  // A regeneration that silently yields fewer (or more) vectors fails here; change these numbers
+  // only together with the generator.
   const std::map<std::string, std::size_t> expected{
       {"nmt", 12}, {"heartbeat", 9}, {"sync", 1}, {"emcy", 7}, {"sdo", 60}, {"pdo", 182},
   };

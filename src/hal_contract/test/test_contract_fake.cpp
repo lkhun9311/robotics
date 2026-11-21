@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Runs the backend contract suite against a reference fake, so the suite is proven before any
-// real backend exists. The fake is deliberately simple but an honest model of the contract:
+// real backend exists.
+// The fake is deliberately simple but an honest model of the contract:
 // it holds on arm, tracks approved commands while they are valid, brakes at a_stop on expiry or
 // 30 ms without a new command and latches, inhibits the group on any unexpected stop (C17), and
 // confirms each node's stop from fresh samples (C18).
