@@ -125,30 +125,77 @@ def replay(obs, rules, tol):
     return matched
 
 
+def edge_dispositions(sent, arrived, frame, delay_s):
+    """What the wire allows for the frame sent at `frame`: a subset of {"on time", "held",
+    "dropped"}.
+    `sent` and `arrived` are the times of every frame with its identifier and bytes on the source
+    and the destination capture.
+    Each arrival is the copy of one transmission, and a transmission has at most one copy.
+    A copy belongs to a transmission when it arrived on time (up to EDGE_S before it and
+    HELD_SLACK_S after it) or, for a delay rule, one delay later (within HELD_SLACK_S).
+    A disposition is allowed when some assignment of every arrival to a transmission gives the
+    frame that disposition."""
+    slack = judges.HELD_SLACK_S
+
+    def kinds(s, a):
+        hop = a - s
+        return ({"on time"} if -EDGE_S <= hop <= slack else set()) | \
+               ({"held"} if delay_s is not None and abs(hop - delay_s) <= slack else set())
+
+    owners = {a: [i for i, s in enumerate(sent) if kinds(s, a)] for a in arrived}
+    owners = {a: o for a, o in owners.items() if o}
+    me = min(range(len(sent)), key=lambda i: abs(sent[i] - frame))
+    owner_of = {}
+
+    def place(a, banned, seen):
+        for i in owners[a]:
+            if i == banned or i in seen:
+                continue
+            seen.add(i)
+            if i not in owner_of or place(owner_of[i], banned, seen):
+                owner_of[i] = a
+                return True
+        return False
+
+    def all_placed(banned, skip):
+        owner_of.clear()
+        return all(place(a, banned, set()) for a in owners if a != skip)
+
+    allowed = set()
+    if all_placed(me, None):
+        allowed.add("dropped")
+    for a in owners:
+        for kind in kinds(sent[me], a) if me in owners[a] else ():
+            if kind not in allowed and all_placed(me, a):
+                allowed.add(kind)
+    return allowed
+
+
 def acted_at_edge(obs, rule, frame):
     """Whether the proxy acted on a frame that lies within EDGE_S of its rule's window edge, read
     from the capture the rule forwards to: vcan_device for h2d, vcan_host for d2h.
-    A copy is on time when it arrived within HELD_SLACK_S after the frame, or up to EDGE_S before
-    it (the two captures estimate their clock offsets apart, and that is the bound the repo gives
-    their difference).
-    A drop rule acted when no copy of the frame arrived on time.
-    A delay rule acted when a copy arrived one delay later and none on time.
-    Anything else is a frame the wire cannot place, and the verdict is not reached."""
+    The master resends identical frames, so each frame on that capture is the copy of one
+    transmission at most (edge_dispositions), and the verdict is not reached when the wire allows
+    more than one reading.
+    A drop rule acted when the frame has no copy on time.
+    A delay rule acted when the frame's copy arrived one delay later."""
     t, cob, data = frame
     side = "device" if rule["dir"] == "h2d" else "host"
-    slack = judges.HELD_SLACK_S
-    hops = [c[0] - t for c in judges.frames(obs, side, cob, t - EDGE_S) if c[2] == data]
-    on_time = any(-EDGE_S <= hop <= slack for hop in hops)
+    delay_s = int(rule["args"][0]) / 1000 if rule["action"] == "delay" else None
     where = (f"{rule['dir']} edge frame {cob:#x} {data.hex()} {t - epoch(obs):.6f} s after the "
              f"proxy's start")
+    need(rule["action"] in ("drop", "delay"),
+         f"{where}: a {rule['action']} rule is not resolved at the edge")
+    sent = [f[0] for f in judges.source_frames(obs, rule["dir"]) if f[1] == cob and f[2] == data]
+    arrived = [f[0] for f in judges.frames(obs, side, cob) if f[2] == data]
+    allowed = edge_dispositions(sent, arrived, t, delay_s)
+    need(len(allowed) == 1, f"{where}: its copies on vcan_{side} allow {sorted(allowed) or 'none'}"
+                            f", so the wire does not say what the proxy did")
     if rule["action"] == "drop":
-        return not on_time
-    need(rule["action"] == "delay", f"{where}: a {rule['action']} rule is not resolved at the edge")
-    delay_s = int(rule["args"][0]) / 1000
-    held = any(abs(hop - delay_s) <= slack for hop in hops)
-    copies = "both on time and one delay later" if held else "neither on time nor one delay later"
-    need(on_time != held, f"{where}: its copies on vcan_{side} are {copies}")
-    return held
+        return allowed == {"dropped"}
+    need(allowed != {"dropped"}, f"{where}: it has no copy on vcan_{side}, neither on time nor "
+                                 f"one delay later")
+    return allowed == {"held"}
 
 
 def fault_rules(obs):

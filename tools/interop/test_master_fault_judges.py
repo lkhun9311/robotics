@@ -603,3 +603,70 @@ def test_dropped_edge_frame_found_on_the_destination_is_inconclusive(row):
     obs[side].sort(key=lambda f: f[0])
     expect(obs, "INCONCLUSIVE", "match counts")
 
+
+
+# ---- identical frames at a window edge (#38) ----
+# The master resends the same RPDO2 bytes, so a destination frame with the edge frame's bytes may
+# be the copy of another transmission.
+
+EDGE_T = 10.0
+
+
+def synthetic(sent, forwarded):
+    """An observation whose captures hold identical RPDO2 frames: `sent` are the times on
+    vcan_host, `forwarded` the times on vcan_device."""
+    data = bytes(range(8)).hex()
+    return {"harness": {"epoch_ns": 0},
+            "host": [[t, 0x303, data] for t in sent],
+            "device": [[t, 0x303, data] for t in forwarded]}
+
+
+DELAY_60 = {"dir": "h2d", "action": "delay", "args": ["60"]}
+EDGE_FRAME = (EDGE_T, 0x303, bytes(range(8)))
+
+
+def test_edge_frame_delayed_beside_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # One transmission 1.5 ms before the edge frame was forwarded at once, the edge frame was
+    # delayed 60 ms. The wire fits as well with the two copies swapped, so it does not say which
+    # transmission the proxy delayed.
+    obs = synthetic([EDGE_T - 0.0015, EDGE_T], [EDGE_T - 0.0015 + 20e-6, EDGE_T + 0.060])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
+
+
+def test_edge_frame_delayed_before_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # The same, the identical transmission 3 ms after the edge frame.
+    obs = synthetic([EDGE_T, EDGE_T + 0.003], [EDGE_T + 0.003 + 20e-6, EDGE_T + 0.060])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
+
+
+def test_dropped_edge_frame_beside_an_identical_frame_forwarded_at_once_is_inconclusive():
+    # One copy on the wire for two transmissions 1.5 ms apart: either was the one dropped.
+    obs = synthetic([EDGE_T - 0.0015, EDGE_T], [EDGE_T - 0.0015 + 20e-6])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, {"dir": "h2d", "action": "drop", "args": []}, EDGE_FRAME)
+
+
+def test_edge_frame_delayed_among_identical_frames_far_apart_is_resolved():
+    # The control: resends 10 ms apart, each copy has one transmission it can belong to.
+    sent = [EDGE_T - 0.010, EDGE_T, EDGE_T + 0.010]
+    obs = synthetic(sent, [sent[0] + 20e-6, EDGE_T + 0.060, sent[2] + 20e-6])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is True
+    obs = synthetic(sent, [t + 20e-6 for t in sent])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
+
+
+def test_on_time_edge_frame_beside_an_identical_frame_sent_one_delay_later_is_resolved():
+    # The frame 58 ms later is forwarded at once, and its copy lies in the edge frame's delayed
+    # window too. Only the edge frame can own the copy right after it, so the edge frame was not
+    # held, and the later one owns the other.
+    obs = synthetic([EDGE_T, EDGE_T + 0.058], [EDGE_T + 20e-6, EDGE_T + 0.058 + 20e-6])
+    assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
+
+
+def test_dropped_edge_frame_is_refuted_when_the_other_copies_need_the_other_transmission():
+    # The later transmission has its own copy 3.5 ms after it, and each transmission has one copy
+    # at most, so the copy right after the edge frame is the edge frame's.
+    obs = synthetic([EDGE_T, EDGE_T + 0.001], [EDGE_T + 0.0002, EDGE_T + 0.0045])
+    assert jm.acted_at_edge(obs, {"dir": "h2d", "action": "drop", "args": []}, EDGE_FRAME) is False
