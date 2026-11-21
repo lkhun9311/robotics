@@ -626,9 +626,10 @@ EDGE_FRAME = (EDGE_T, 0x303, bytes(range(8)))
 
 
 def test_edge_frame_delayed_beside_an_identical_frame_forwarded_at_once_is_inconclusive():
-    # One transmission 1.5 ms before the edge frame was forwarded at once, the edge frame was
-    # delayed 60 ms. The wire fits as well with the two copies swapped, so it does not say which
-    # transmission the proxy delayed.
+    # One transmission 1.5 ms before the edge frame was forwarded at once.
+    # The edge frame was delayed 60 ms.
+    # The wire fits as well with the two copies swapped.
+    # So it does not say which transmission the proxy delayed.
     obs = synthetic([EDGE_T - 0.0015, EDGE_T], [EDGE_T - 0.0015 + 20e-6, EDGE_T + 0.060])
     with pytest.raises(judges.Inconclusive, match="edge frame"):
         jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
@@ -658,9 +659,10 @@ def test_edge_frame_delayed_among_identical_frames_far_apart_is_resolved():
 
 
 def test_on_time_edge_frame_beside_an_identical_frame_sent_one_delay_later_is_resolved():
-    # The frame 58 ms later is forwarded at once, and its copy lies in the edge frame's delayed
-    # window too. Only the edge frame can own the copy right after it, so the edge frame was not
-    # held, and the later one owns the other.
+    # The frame 58 ms later is forwarded at once.
+    # Its copy lies in the edge frame's delayed window too.
+    # Only the edge frame can own the copy right after it.
+    # So the edge frame was not held, and the later one owns the other.
     obs = synthetic([EDGE_T, EDGE_T + 0.058], [EDGE_T + 20e-6, EDGE_T + 0.058 + 20e-6])
     assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
 
