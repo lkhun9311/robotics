@@ -560,10 +560,12 @@ def judge_x3(obs):
     no_dispatch_after(obs, t_stopping)
     no_motion_after_stop(obs, t_onset)
     t_confirmed = group_confirmed(obs)
+    # Node 3 may not actuate at all after the onset when the first dropped seq is the next one due.
+    last_act = f"last actuated seq {max(act)}" if act else "no actuation after the onset"
     return [f"{len(matched[0])} RPDO2 of node 3 dropped from {t_onset - epoch(obs):.3f} s (first "
             f"seq {first_dropped}); node 3 stopped on its own "
             f"{judges.QS_NAMES[t_own[0]['reason']]} {(t_node3 - t_onset) * 1000:.0f} ms later "
-            f"({halves} missing-half drops, last actuated seq {max(act)}); the master inhibited "
+            f"({halves} missing-half drops, {last_act}); the master inhibited "
             f"{(t_inhibit - t_node3) * 1000:.0f} ms after that and all six were confirmed "
             f"stopped {(t_confirmed - t_node3) * 1000:.0f} ms after it; no command dispatched "
             f"after the inhibit, no drive actuated after its stop"]

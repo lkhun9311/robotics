@@ -292,6 +292,16 @@ def test_x3_node3_actuating_a_dropped_seq_fails():
     expect(obs, "FAIL", "whose RPDO2 was dropped")
 
 
+def test_x3_node3_without_an_actuation_after_the_onset_passes():
+    # A live vcan stage on 2026-11-21 had no node-3 actuation after the onset, and the note crashed.
+    obs = load("X3")
+    t = onset(obs)
+    for r in bank(obs, "actuated", 3):
+        if r["t_ns"] >= t * 1e9:
+            obs["bank"].remove(r)
+    expect(obs, "PASS", "no actuation after the onset")
+
+
 def test_x3_node3_without_its_own_stop_fails():
     obs = load("X3")
     for r in bank(obs, "quick_stop", 3):
