@@ -676,6 +676,16 @@ def test_on_time_edge_frame_beside_an_identical_frame_sent_one_delay_later_is_re
     assert jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME) is False
 
 
+def test_edge_frame_that_may_be_dropped_once_another_copy_moves_is_inconclusive():
+    # The copy 61 ms after the edge frame is the held copy of the edge frame or of the next one.
+    # The copy at 57.5 ms fits all three: held for the first two, on time for the third.
+    # Give it to the next transmission first and the copy at 61 ms has only the edge frame left.
+    # Move it to the third and the edge frame may have been dropped, so the wire allows both.
+    obs = synthetic([EDGE_T, EDGE_T + 0.001, EDGE_T + 0.054], [EDGE_T + 0.0575, EDGE_T + 0.061])
+    with pytest.raises(judges.Inconclusive, match="edge frame"):
+        jm.acted_at_edge(obs, DELAY_60, EDGE_FRAME)
+
+
 def test_dropped_edge_frame_is_refuted_when_the_other_copies_need_the_other_transmission():
     # The later transmission has its own copy 3.5 ms after it, and each transmission has one copy
     # at most, so the copy right after the edge frame is the edge frame's.
@@ -708,3 +718,15 @@ def test_x7_edge_frame_copied_twice_on_the_destination_is_inconclusive(shift):
     obs["device"].append([held[0] + shift, held[1], held[2]])
     obs["device"].sort(key=lambda f: f[0])
     expect(obs, "INCONCLUSIVE", "edge frame")
+
+
+# ---- a long run of identical frames (#40) ----
+
+@pytest.mark.parametrize("delay_s", (None, 0.060))
+def test_edge_frame_at_the_end_of_a_long_identical_run_is_resolved(delay_s):
+    # The peer may resend the same bytes on every SYNC, so an identical run can be long.
+    # 1,500 transmissions 1 ms apart are each forwarded 20 us later, and the last is the edge frame.
+    # Every copy needs its own transmission, so the edge frame cannot have been dropped or held.
+    sent = [EDGE_T - 0.001 * (1499 - i) for i in range(1500)]
+    arrived = [t + 20e-6 for t in sent]
+    assert jm.edge_dispositions(sent, arrived, sent[-1], delay_s) == ({"on time"}, [])
