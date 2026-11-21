@@ -65,7 +65,8 @@ std::uint32_t wire_us(MonoTime t) {
 }
 
 // The wire target (int32 urad) of a position in rad; std::nullopt for a non-finite value or one
-// the wire cannot carry. Never clamped: a clamped target is a different command.
+// the wire cannot carry.
+// Never clamped: a clamped target is a different command.
 std::optional<std::int32_t> to_urad(double rad) {
   const double urad = std::round(rad * 1e6);
   constexpr double lo = std::numeric_limits<std::int32_t>::min();
@@ -76,8 +77,9 @@ std::optional<std::int32_t> to_urad(double rad) {
   return static_cast<std::int32_t>(urad);
 }
 
-// CRC-32/ISO-HDLC over the little-endian bytes of the four staged values (D17). Written here
-// from the contract, not taken from drive_core: the host side computes it independently.
+// CRC-32/ISO-HDLC over the little-endian bytes of the four staged values (D17).
+// Written here from the contract, not taken from drive_core: the host side computes it
+// independently.
 std::uint32_t commit_crc(std::uint32_t attempt, std::uint32_t gen_lo, std::uint32_t gen_hi,
                          std::uint32_t session_lo) {
   std::uint32_t crc = 0xFFFF'FFFFU;
@@ -594,9 +596,9 @@ void VdriveSession::start_configure(MonoTime now) {
   phase_ = SessionPhase::kConfiguring;
   for (std::size_t i = 0; i < kSessionNodes; ++i) {
     NodeState& n = nodes_[i];
-    // A node still Operational (what an inhibit leaves behind) leaves it first. Until it is
-    // Pre-operational its TPDOs (Quick Stop Active, Fault, the old applied_tag) are residue of
-    // the state this configure clears, not events of this op.
+    // A node still Operational (what an inhibit leaves behind) leaves it first.
+    // Until it is Pre-operational its TPDOs (Quick Stop Active, Fault, the old applied_tag) are
+    // residue of the state this configure clears, not events of this op.
     const bool operational = n.commanded == cc::NmtState::kOperational ||
                              master_.nmt_state(config_.nodes[i]) == cc::NmtState::kOperational;
     NodeState fresh;
@@ -1189,8 +1191,9 @@ void VdriveSession::latch(std::optional<Fault> fault, MonoTime now, bool cancell
   for (std::size_t i = 0; i < kSessionNodes; ++i) {
     NodeState& n = nodes_[i];
     if (cancelled_arm && n.enable_sent) {
-      // C10 fence: a delayed 0x0F cannot be recalled, so the node leaves Operational. A node in
-      // Operation Enabled starts its own latched quick stop; in Pre-operational RPDO3 is ignored.
+      // C10 fence: a delayed 0x0F cannot be recalled, so the node leaves Operational.
+      // A node in Operation Enabled starts its own latched quick stop; in Pre-operational RPDO3 is
+      // ignored.
       n.fenced = true;
       command_nmt(i, cc::NmtCommand::kEnterPreOperational, now);
       begin_stop(i, kAcceptInhibit, now);

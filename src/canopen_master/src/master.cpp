@@ -357,8 +357,9 @@ void Master::handle(const cc::Frame& frame, std::vector<cc::Frame>& out) {
 
 void Master::run_callbacks() {
   // Taken out before any is called: a callback only queues commands, but the list must not be
-  // the one a later completion appends to. If a callback throws, the ones not yet called go
-  // back to the front of the list and run at the next call.
+  // the one a later completion appends to.
+  // If a callback throws, the ones not yet called go back to the front of the list and run at the
+  // next call.
   auto done = std::exchange(pending_done_, {});
   for (std::size_t i = 0; i < done.size(); ++i) {
     try {

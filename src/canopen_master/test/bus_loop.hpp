@@ -21,11 +21,13 @@
 #include "runtime_core/time.hpp"
 
 // The test bus: the master core with its vdrive session on one side, six in-memory
-// drive_core::Drive on the other, in logic time. Every frame either side sends is recorded and
-// then offered to a filter that delivers it, drops it or holds it for later re-delivery. Frames
-// are delivered at the instant they are sent (zero transport delay); the drives tick every W and
-// before any frame of the same instant. The device side (the drives, their heartbeats and EMCYs)
-// is the shared DriveBus (canopen_master/testing/drive_bus.hpp).
+// drive_core::Drive on the other, in logic time.
+// Every frame either side sends is recorded and then offered to a filter that delivers it, drops it
+// or holds it for later re-delivery.
+// Frames are delivered at the instant they are sent (zero transport delay); the drives tick every W
+// and before any frame of the same instant.
+// The device side (the drives, their heartbeats and EMCYs) is the shared DriveBus
+// (canopen_master/testing/drive_bus.hpp).
 namespace canopen_master::testing {
 
 namespace cc = canopen_codec;

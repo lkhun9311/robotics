@@ -8,13 +8,15 @@
 #include "canopen_codec/od.hpp"  // Generated from config/od/vdrive_arm.eds at build time.
 
 // CANopen (CiA 301) frame codec for the virtual arm drive: NMT, heartbeat, SYNC, EMCY,
-// expedited SDO and the PDOs of the generated object dictionary. All multi-byte values are
-// little-endian. Every decoder returns std::nullopt for a frame it does not fully understand
-// (wrong COB-ID, wrong DLC, DLC above 8, unknown command); nothing is ever partially decoded.
+// expedited SDO and the PDOs of the generated object dictionary.
+// All multi-byte values are little-endian.
+// Every decoder returns std::nullopt for a frame it does not fully understand (wrong COB-ID, wrong
+// DLC, DLC above 8, unknown command); nothing is ever partially decoded.
 namespace canopen_codec {
 
-// A classic CAN frame with an 11-bit identifier. Bytes at and beyond `dlc` are zero in every
-// frame this codec encodes and are ignored when decoding.
+// A classic CAN frame with an 11-bit identifier.
+// Bytes at and beyond `dlc` are zero in every frame this codec encodes and are ignored when
+// decoding.
 struct Frame {
   std::uint16_t cob_id{};
   std::uint8_t dlc{};
@@ -23,8 +25,9 @@ struct Frame {
   friend bool operator==(const Frame&, const Frame&) = default;
 };
 
-// A CANopen node-ID, 1..127. Invalid IDs cannot be constructed, so no encoder can produce a
-// COB-ID that collides with another service's identifier.
+// A CANopen node-ID, 1..127.
+// Invalid IDs cannot be constructed, so no encoder can produce a COB-ID that collides with another
+// service's identifier.
 class NodeId {
  public:
   static constexpr std::uint8_t kMin = 1;
@@ -101,9 +104,10 @@ std::optional<Emcy> decode_emcy(const Frame& frame);
 // Segmented and block transfers are not part of this drive's contract and do not decode; the
 // drive answers such a request with abort 0x05040001 itself (drive_core).
 //
-// Frames reach the codec from a SocketCAN adapter (E3b). That adapter must drop remote (RTR)
-// frames, extended (29-bit) frames and error frames before calling the codec: Frame carries an
-// 11-bit identifier only and has no flag that could tell them apart.
+// Frames reach the codec from a SocketCAN adapter (E3b).
+// That adapter must drop remote (RTR) frames, extended (29-bit) frames and error frames before
+// calling the codec: Frame carries an 11-bit identifier only and has no flag that could tell them
+// apart.
 
 enum class SdoType : std::uint8_t {
   kUploadRequest,     // client -> server
@@ -117,9 +121,10 @@ enum class SdoType : std::uint8_t {
 struct Sdo {
   SdoType type{};
   od::Address address{};
-  // 1..4 for kUploadResponse and kDownloadRequest, otherwise 0. A decoded kDownloadRequest may
-  // also have size 0: expedited with the size indicator clear (e = 1, s = 0, command byte 0x22),
-  // size unspecified; `value` then holds all four data bytes. encode_sdo never writes size 0.
+  // 1..4 for kUploadResponse and kDownloadRequest, otherwise 0.
+  // A decoded kDownloadRequest may also have size 0: expedited with the size indicator clear (e =
+  // 1, s = 0, command byte 0x22), size unspecified; `value` then holds all four data bytes.
+  // encode_sdo never writes size 0.
   std::uint8_t size{};
   std::uint32_t value{};       // The `size` low bytes; zero-extended (all four for size 0).
   std::uint32_t abort_code{};  // Only for the abort types.

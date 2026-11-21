@@ -21,10 +21,11 @@
 // configure probes every node (C2) and resets the vdrive ones, activate brings them to Switched
 // On, arm commits a new execution identity group-wide and enables after two hold updates, the
 // command stream sends approved commands at each SYNC slot under the dispatch margin (C6), and
-// deactivate stops and confirms before Pre-operational. Feedback is joined per node (C4). Any
-// unexpected event latches the group motion inhibit (C17) and each node's stop is tracked and
-// confirmed from the drive's own evidence (C18). A cancelled arm fences every node it may have
-// enabled with NMT Enter Pre-operational (C10).
+// deactivate stops and confirms before Pre-operational.
+// Feedback is joined per node (C4).
+// Any unexpected event latches the group motion inhibit (C17) and each node's stop is tracked and
+// confirmed from the drive's own evidence (C18).
+// A cancelled arm fences every node it may have enabled with NMT Enter Pre-operational (C10).
 //
 // configure clears the inhibit from whatever an inhibit left behind: it first sends NMT Enter
 // Pre-operational to every node still Operational, and until this configure ends the TPDOs of
@@ -38,24 +39,28 @@
 // - The session owns the master's event queue: the caller calls the session's on_frame and tick
 //   instead of the master's, and never drains the master's events itself.
 // - Lifecycle ops (configure, activate, arm, deactivate) are posted with an OpTicket {op_id,
-//   deadline}. They start at the next on_frame or tick, with that call's time, and progress in
-//   later calls. Completion is read with op_state(op_id) / op_error(op_id); there are no
-//   callbacks. An op still pending at its deadline fails at the first call at or after it,
-//   whether or not anyone waits. Posting an op while another is pending fails the pending one.
-// - Every op runs under an epoch. Ending an op bumps it, and every SDO completion and every
+//   deadline}.
+//   They start at the next on_frame or tick, with that call's time, and progress in later calls.
+//   Completion is read with op_state(op_id) / op_error(op_id); there are no callbacks.
+//   An op still pending at its deadline fails at the first call at or after it, whether or not
+//   anyone waits.
+//   Posting an op while another is pending fails the pending one.
+// - Every op runs under an epoch.
+// Ending an op bumps it, and every SDO completion and every
 //   frame sent for an op checks it first; its SDO requests carry the epoch as their tag and
-//   ending the op cancels the ones still queued in the master. So a failed or timed-out op never
-//   sends anything later: no SDO request, no RPDO, no 0x0F. (A request already on the wire when
-//   the op ends cannot be recalled; its answer is ignored.)
+//   ending the op cancels the ones still queued in the master.
+//   So a failed or timed-out op never sends anything later: no SDO request, no RPDO, no 0x0F. (A
+//   request already on the wire when the op ends cannot be recalled; its answer is ignored.)
 // - A failed op latches the inhibit (C17); only a new configure clears it.
 // - Frames the session sends itself (RPDOs) leave with the return value of the call that made
 //   them, after the master's frames of that call, so a SYNC is always followed by that slot's
-//   RPDOs. An NMT or SDO request the session queues while handling a received frame leaves at
-//   the next call (the master applies queued commands at the start of tick); ops that fail at
-//   their deadline do so at the start of a call, so their fence leaves with that call.
+//   RPDOs.
+//   An NMT or SDO request the session queues while handling a received frame leaves at the next
+//   call (the master applies queued commands at the start of tick); ops that fail at their deadline
+//   do so at the start of a call, so their fence leaves with that call.
 //
-// Pure logic: no sockets, threads or clock reads. Not thread-safe; one caller serializes every
-// call (in E3c, the I/O worker).
+// Pure logic: no sockets, threads or clock reads.
+// Not thread-safe; one caller serializes every call (in E3c, the I/O worker).
 namespace canopen_master {
 
 // Project values (E3a/E3b) the session's rules are built from.
@@ -116,9 +121,11 @@ struct SessionConfig {
       canopen_codec::NodeId::make(5).value(), canopen_codec::NodeId::make(6).value()};
   // C20: exactly 10 ms; it must equal the master's sync_period.
   runtime_core::Duration bus_period{kBusPeriod};
-  // C20: (0, 48] ms. Hold commands carry min(hold_until, slot + lease).
+  // C20: (0, 48] ms.
+  // Hold commands carry min(hold_until, slot + lease).
   runtime_core::Duration lease{kMaxLease};
-  // C20: [20, 30] ms. While armed, an older group sample latches the inhibit (C17).
+  // C20: [20, 30] ms.
+  // While armed, an older group sample latches the inhibit (C17).
   runtime_core::Duration max_feedback_age{kMinFeedbackAge};
 };
 
@@ -173,17 +180,17 @@ struct SessionCounts {
 
 // C6 for a session that is not at hand (the I/O worker's control side): whether a command closing
 // at `valid_until`, offered at `now`, can still be dispatched when the master's last SYNC was at
-// `last_sync` (std::nullopt before the first) on a grid of `bus_period`. VdriveSession::can_apply
-// is this with its own last SYNC.
+// `last_sync` (std::nullopt before the first) on a grid of `bus_period`.
+// VdriveSession::can_apply is this with its own last SYNC.
 bool command_can_apply(std::optional<runtime_core::MonoTime> last_sync,
                        runtime_core::Duration bus_period, runtime_core::MonoTime valid_until,
                        runtime_core::MonoTime now);
 
 class VdriveSession {
  public:
-  // Registers the TPDO1-3 layouts of every node with the master. Throws std::invalid_argument
-  // for a configuration outside C20 (the message lists the allowed values), duplicate nodes, or
-  // a node the master does not know.
+  // Registers the TPDO1-3 layouts of every node with the master.
+  // Throws std::invalid_argument for a configuration outside C20 (the message lists the allowed
+  // values), duplicate nodes, or a node the master does not know.
   VdriveSession(Master& master, SessionConfig config);
 
   // Call these instead of Master::on_frame / Master::tick; they return every frame to send.
@@ -203,10 +210,12 @@ class VdriveSession {
   const char* op_error(std::uint64_t op_id) const;
 
   // ---- control path (no allocation) ----
-  // An approved command for the armed identity. The newest offer wins at the next slot; one
-  // overwritten before it is counted as superseded. Dropped (counted as discarded) unless armed,
-  // not inhibited and `command.id` is the armed identity; refused (counted as refused) when a
-  // position is not finite or does not fit the wire's int32 urad. Never clamped.
+  // An approved command for the armed identity.
+  // The newest offer wins at the next slot; one overwritten before it is counted as superseded.
+  // Dropped (counted as discarded) unless armed, not inhibited and `command.id` is the armed
+  // identity; refused (counted as refused) when a position is not finite or does not fit the wire's
+  // int32 urad.
+  // Never clamped.
   void offer(const hal_contract::ApprovedCommand& command);
   // C6: whether a command closing at `valid_until` offered at `now` can still be dispatched: its
   // deadline floored to 1 us must be strictly later than the SYNC after its dispatch slot + W +
@@ -214,12 +223,14 @@ class VdriveSession {
   bool can_apply(runtime_core::MonoTime valid_until, runtime_core::MonoTime now) const;
   // on_error: latches the inhibit at `now`; its frames leave with the next call.
   void inhibit(runtime_core::MonoTime now);
-  // C10: fails the op `op_id` now, as its deadline would (the caller's wait timed out). It ends
-  // with `why` (static storage), the epoch moves on, the inhibit latches and a cancelled arm
-  // fences; its frames leave with the next call. Nothing for an op that ended or is not known.
+  // C10: fails the op `op_id` now, as its deadline would (the caller's wait timed out).
+  // It ends with `why` (static storage), the epoch moves on, the inhibit latches and a cancelled
+  // arm fences; its frames leave with the next call.
+  // Nothing for an op that ended or is not known.
   void cancel(std::uint64_t op_id, const char* why, runtime_core::MonoTime now);
   // Called with every master event, inside on_frame and tick, before the session handles it
-  // (the I/O worker forwards them). It must not call into the session or the master.
+  // (the I/O worker forwards them).
+  // It must not call into the session or the master.
   using EventObserver = std::function<void(const MasterEvent&)>;
   void set_event_observer(EventObserver observer) { observer_ = std::move(observer); }
   // The instant of the master's last SYNC; std::nullopt before the first.
@@ -238,8 +249,9 @@ class VdriveSession {
   const SessionCounts& counts() const { return counts_; }
   const FeedbackJoin& join() const { return join_; }
   // What the stream sent under a wire command_seq, among the last kSeqRing dispatches: an
-  // approved command (with its source_seq) or an arm hold. For observers of the device side
-  // (traces, the contract fixture); std::nullopt for a seq not among them.
+  // approved command (with its source_seq) or an arm hold.
+  // For observers of the device side (traces, the contract fixture); std::nullopt for a seq not
+  // among them.
   struct Dispatch {
     bool approved{false};
     std::uint64_t source_seq{0};
@@ -350,7 +362,8 @@ class VdriveSession {
   void fail(const char* why, runtime_core::MonoTime now);
   void end_op(hal_contract::OpState state, const char* error);
   // Ends the current op, if any, as failed and leaves the phase it stopped in; true
-  // for an arm. Does not latch.
+  // for an arm.
+  // Does not latch.
   bool end_failed(const char* why);
   void record(std::uint64_t id, hal_contract::OpState state, const char* error);
   bool op_is(OpKind kind) const { return op_ && op_->kind == kind; }

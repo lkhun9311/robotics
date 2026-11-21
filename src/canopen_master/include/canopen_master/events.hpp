@@ -10,8 +10,8 @@
 #include "canopen_codec/codec.hpp"
 #include "runtime_core/time.hpp"
 
-// What the master core reports to its caller. Events are queued in the order they happen and the
-// caller drains them (Master::drain_events).
+// What the master core reports to its caller.
+// Events are queued in the order they happen and the caller drains them (Master::drain_events).
 namespace canopen_master {
 
 enum class MasterEventKind : std::uint8_t {
@@ -46,8 +46,8 @@ struct SdoResult {
   friend bool operator==(const SdoResult&, const SdoResult&) = default;
 };
 
-// Called once per accepted request, from inside Master::on_frame or Master::tick. It may queue
-// further requests or NMT commands; it must not call on_frame or tick (that throws).
+// Called once per accepted request, from inside Master::on_frame or Master::tick.
+// It may queue further requests or NMT commands; it must not call on_frame or tick (that throws).
 using SdoDone = std::function<void(const SdoResult&)>;
 
 struct StateDetail {

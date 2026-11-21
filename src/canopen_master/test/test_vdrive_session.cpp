@@ -22,8 +22,9 @@
 #include "runtime_core/time.hpp"
 
 // The vdrive session against six in-memory drive_core::Drive through the test bus loop, in logic
-// time. Expectations are read from the drives' own state and events and from the frames on the
-// wire, decoded here; the session's own view is checked only where it is the subject.
+// time.
+// Expectations are read from the drives' own state and events and from the frames on the wire,
+// decoded here; the session's own view is checked only where it is the subject.
 namespace {
 
 namespace cc = canopen_codec;

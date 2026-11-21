@@ -12,11 +12,13 @@
 #include "runtime_core/time.hpp"
 
 // The expedited SDO client of one node (C8): one request outstanding at a time, the others wait
-// in a FIFO. A request that is not answered within the timeout fails and the client sends the
-// server abort 0x05040000. A response that does not answer the request (other index or subindex,
-// other command, a segmented initiate) fails the request as a protocol error; when the server may
-// still be inside a transfer (segmented initiate, an unknown or wrong command, a wrong DLC) the
-// client sends abort 0x05040001; a segmented initiate is aborted at the object the server named.
+// in a FIFO.
+// A request that is not answered within the timeout fails and the client sends the server abort
+// 0x05040000.
+// A response that does not answer the request (other index or subindex, other command, a segmented
+// initiate) fails the request as a protocol error; when the server may still be inside a transfer
+// (segmented initiate, an unknown or wrong command, a wrong DLC) the client sends abort 0x05040001;
+// a segmented initiate is aborted at the object the server named.
 namespace canopen_master {
 
 namespace sdo_abort {
@@ -46,7 +48,9 @@ class SdoClient {
                 SdoDone done, std::uint64_t tag = 0);
 
   // Drops every queued request with this nonzero tag before it is sent; their callbacks are never
-  // called. The outstanding request has been sent and is not touched. Returns how many dropped.
+  // called.
+  // The outstanding request has been sent and is not touched.
+  // Returns how many dropped.
   std::size_t cancel(std::uint64_t tag);
 
   // When nothing is outstanding and a request waits: makes it outstanding with its deadline at
