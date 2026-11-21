@@ -53,8 +53,8 @@ MonoTime BankLoop::next_release() const {
 }
 
 void BankLoop::release(MonoTime now) {
-  // Every release due by now: the latest runs, the ones before it are skipped. Drive::tick
-  // advances the model by exactly one W, so a catch-up would compress time.
+  // Every release due by now: the latest runs, the ones before it are skipped.
+  // Drive::tick advances the model by exactly one W, so a catch-up would compress time.
   const auto due = static_cast<std::uint64_t>((now - next_release()).ns / kReleasePeriod.ns) + 1U;
   next_k_ += due;
   counts_.releases_planned += due;
@@ -78,7 +78,8 @@ void BankLoop::release(MonoTime now) {
 
 void BankLoop::overload(MonoTime now) {
   // Spec §10.2 three-miss block: the bank cannot keep its period, so every drive faults with
-  // CiA 301 0x6100 (internal software error). A drive already handling a fault keeps its first.
+  // CiA 301 0x6100 (internal software error).
+  // A drive already handling a fault keeps its first.
   ++counts_.overloads;
   ring_.push(trace::Overload{now, counts_.consecutive_skipped, kOverloadErrorCode});
   char hex[8];
@@ -101,8 +102,8 @@ void BankLoop::run_once(int inject_fd) {
   if (inject_fd >= 0) {
     serve_inject(inject_fd);
   }
-  // The drain: bounded by the next release deadline and by kRxBudget frames. Backlog waits for
-  // the next wake (the socket stays readable, so ppoll returns at once).
+  // The drain: bounded by the next release deadline and by kRxBudget frames.
+  // Backlog waits for the next wake (the socket stays readable, so ppoll returns at once).
   int reads = 0;
   while (now_() < next_release()) {
     if (reads == kRxBudget) {
@@ -128,8 +129,8 @@ Bank::InjectResult BankLoop::inject(std::string_view command) {
 int BankLoop::serve_inject(int fd) {
   using Kind = trace::InjectIo::Kind;
   // Bounded like the CAN drain: at most kInjectBudget datagrams, and none after the next release
-  // is due, except the first, so a wake that starts late still makes progress. The rest stays
-  // queued in the socket, in order, for the next wake (the socket stays readable).
+  // is due, except the first, so a wake that starts late still makes progress.
+  // The rest stays queued in the socket, in order, for the next wake (the socket stays readable).
   int served = 0;
   while (served < kInjectBudget && (served == 0 || now_() < next_release())) {
     std::array<char, 128> buf{};

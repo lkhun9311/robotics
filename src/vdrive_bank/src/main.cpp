@@ -3,14 +3,17 @@
 //   vdrive_bank --if IF --trace PATH [--inject PATH] [--hb-muted NODES]
 // One control thread waits in ppoll on the release timerfd (absolute CLOCK_MONOTONIC, period W),
 // the CAN socket, the inject socket and a signalfd, and runs BankLoop::run_once on every wake
-// (B1). A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX
-// datagram socket for B6 commands; each is answered with "ok" or "err <reason>". At most
-// kInjectBudget commands are served per wake, so a client that keeps the socket full cannot
-// hold off the releases, the CAN drain or a signal. SIGTERM or
-// SIGINT: the writer is flushed, the final snapshots and an `exit` record are written, exit 0.
+// (B1).
+// A writer thread writes the trace as JSON lines to PATH (B7). --inject PATH binds a UNIX datagram
+// socket for B6 commands; each is answered with "ok" or "err <reason>".
+// At most kInjectBudget commands are served per wake, so a client that keeps the socket full cannot
+// hold off the releases, the CAN drain or a signal.
+// SIGTERM or SIGINT: the writer is flushed, the final snapshots and an `exit` record are written,
+// exit 0.
 // Exit 2: bad arguments, or the interface, trace or inject socket cannot be opened (the reason
-// is on stderr). Exit 1: a failure while running; once the trace is open it still ends with the
-// final snapshots and an `exit` record, and the inject socket file is removed on every exit.
+// is on stderr).
+// Exit 1: a failure while running; once the trace is open it still ends with the final snapshots
+// and an `exit` record, and the inject socket file is removed on every exit.
 // --hb-muted NODES (comma-separated node IDs, e.g. "2" or "2,5") applies B6 `hb_mute <node> 1`
 // before power-on (B3): a peer started first sees the boot-up and then no periodic heartbeat.
 // The mutes are traced as inject records.
@@ -188,9 +191,9 @@ int run(const Args& args) {
     std::fprintf(stderr, "vdrive_bank: --if %s: %s\n", args.ifname.c_str(), error.c_str());
     return 2;
   }
-  // Blocked before the writer thread starts, so only the signalfd ever sees them. The signalfd
-  // and the timerfd are made before the trace and the inject socket exist, so a failure here
-  // leaves nothing behind.
+  // Blocked before the writer thread starts, so only the signalfd ever sees them.
+  // The signalfd and the timerfd are made before the trace and the inject socket exist, so a
+  // failure here leaves nothing behind.
   sigset_t signals;
   sigemptyset(&signals);
   sigaddset(&signals, SIGTERM);

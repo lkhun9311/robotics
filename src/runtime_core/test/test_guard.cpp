@@ -173,7 +173,8 @@ TEST(HalGuard, ContinuousSendsUseLastSentCommandAsReference) {
   rc::HalGuard<kN> g{config(), limits()};
   EXPECT_EQ(g.check(f.input(kNow, 0.0005), kNow), rc::GuardVerdict::kSend);
   const rc::MonoTime next = kNow + rc::milliseconds(1);
-  // From last sent 0.0005: 0.9 rad/s, 400 rad/s^2. Both allowed.
+  // From last sent 0.0005: 0.9 rad/s, 400 rad/s^2.
+  // Both allowed.
   EXPECT_EQ(g.check(f.input(next, 0.0014), next), rc::GuardVerdict::kSend);
 }
 

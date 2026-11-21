@@ -7,7 +7,8 @@
 
 namespace runtime_core {
 
-// Host CLOCK_MONOTONIC in integer nanoseconds. Never mixed with simulation time.
+// Host CLOCK_MONOTONIC in integer nanoseconds.
+// Never mixed with simulation time.
 struct MonoTime {
   std::int64_t ns{0};
   auto operator<=>(const MonoTime&) const = default;
@@ -18,8 +19,10 @@ struct Duration {
   auto operator<=>(const Duration&) const = default;
 };
 
-// Checked int64 arithmetic. Wrapping would turn a far-future deadline into a past one (or the
-// reverse), so overflow throws instead. Only reachable with values near +/-292 years.
+// Checked int64 arithmetic.
+// Wrapping would turn a far-future deadline into a past one (or the reverse), so overflow throws
+// instead.
+// Only reachable with values near +/-292 years.
 namespace detail {
 constexpr std::int64_t checked_add(std::int64_t a, std::int64_t b) {
   std::int64_t r{};
@@ -63,7 +66,8 @@ class SystemMonotonicClock final : public Clock {
   MonoTime now() const override;
 };
 
-// Deterministic clock for logic-time tests. It can only move forward.
+// Deterministic clock for logic-time tests.
+// It can only move forward.
 class FakeClock final : public Clock {
  public:
   explicit FakeClock(MonoTime start = MonoTime{}) : now_(start) {}

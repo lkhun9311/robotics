@@ -5,8 +5,8 @@
 #include <vector>
 
 // The distribution of the proxy's normal-path forwarding cost (B10), in the form the exit record
-// carries it: every distinct sample value with how often it occurred. It is exact (no binning),
-// so a histogram can be drawn from it at any bin width.
+// carries it: every distinct sample value with how often it occurred.
+// It is exact (no binning), so a histogram can be drawn from it at any bin width.
 namespace bus_fault_proxy {
 
 struct ValueCount {

@@ -10,8 +10,9 @@
 #include "vdrive_bank/bank.hpp"
 
 // B4: EMCY producer (CiA 301: COB 0x080 + node, DLC 8: error code LE16, error register 1001h,
-// five manufacturer bytes, here zero). Sent on an accepted fault and, as the error reset (code
-// 0x0000, register 0), when the drive leaves Fault; not sent in Stopped.
+// five manufacturer bytes, here zero).
+// Sent on an accepted fault and, as the error reset (code 0x0000, register 0), when the drive
+// leaves Fault; not sent in Stopped.
 namespace vdrive_bank::test {
 namespace {
 

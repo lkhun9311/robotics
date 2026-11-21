@@ -10,7 +10,8 @@ namespace runtime_core {
 PermitIssuer::PermitIssuer(ManagerInstance manager, Duration lease, Duration max_feedback_age)
     : manager_(manager), lease_(lease), max_feedback_age_(max_feedback_age) {
   // A zero or negative lease issues permits that are already expired; a zero feedback age
-  // refuses every renewal. Both are configuration errors, not runtime states.
+  // refuses every renewal.
+  // Both are configuration errors, not runtime states.
   if (lease.ns <= 0) throw std::invalid_argument("PermitIssuer: lease must be positive");
   if (max_feedback_age.ns <= 0) {
     throw std::invalid_argument("PermitIssuer: max_feedback_age must be positive");

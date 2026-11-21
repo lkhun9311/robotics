@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Logic-time harness (test tooling, not production code).
 // Drives the runtime_core contracts with a fake clock, a stub controller and a simplified
-// drive, and writes a JSONL trace that the independent Python oracle judges. Defects stand
-// in for production bugs so we can show the oracle catches them.
+// drive, and writes a JSONL trace that the independent Python oracle judges.
+// Defects stand in for production bugs so we can show the oracle catches them.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -38,8 +38,9 @@ constexpr rc::Duration kDriveTimeout = rc::milliseconds(2);
 constexpr rc::Duration kGuardPeriodW = rc::milliseconds(2);
 constexpr int kRenewEveryTicks = 10;
 // Rest-to-rest bump over the whole duration T: peak velocity A*2*pi/T, peak acceleration
-// A*(2*pi/T)^2. With A = 0.05 rad and the shortest T = 500 ms: 0.63 rad/s and 7.9 rad/s^2,
-// inside the 1.0 rad/s and 10 rad/s^2 limits.
+// A*(2*pi/T)^2.
+// With A = 0.05 rad and the shortest T = 500 ms: 0.63 rad/s and 7.9 rad/s^2, inside the 1.0 rad/s
+// and 10 rad/s^2 limits.
 constexpr double kAmplitudeRad = 0.05;
 constexpr rc::ManagerInstance kManager{1};
 constexpr double kPi = 3.14159265358979323846;
@@ -225,8 +226,8 @@ class Drive {
   // The manager announces the session at ARMING; frames from any other session are stale.
   void set_session(rc::SessionId session) { session_ = session; }
 
-  // A frame that arrives again (e.g. a delayed duplicate after a reconnect). `bypass` stands
-  // in for a production bug where the replay path skips validation.
+  // A frame that arrives again (e.g. a delayed duplicate after a reconnect).
+  // `bypass` stands in for a production bug where the replay path skips validation.
   void redeliver(rc::MonoTime now, const DriveCommand& cmd, bool bypass, rc::TraceSink& trace) {
     trace.emit(now, "command_redelivered", {f("seq", cmd.seq)});
     if (bypass) {

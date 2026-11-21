@@ -69,8 +69,9 @@ DeviceCapabilities virtual_canopen_profile() {
           Support::kSupported};
 }
 
-// As documented by CiA 402 without project extensions. Quick-stop behaviour and source
-// timestamps depend on the drive and its configuration, so they stay unknown until checked.
+// As documented by CiA 402 without project extensions.
+// Quick-stop behaviour and source timestamps depend on the drive and its configuration, so they
+// stay unknown until checked.
 DeviceCapabilities generic_cia402_profile() {
   return {Support::kUnsupported, Support::kUnsupported, Support::kUnknown, Support::kUnsupported,
           Support::kUnknown};

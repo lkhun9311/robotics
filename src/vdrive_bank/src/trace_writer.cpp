@@ -11,7 +11,8 @@ namespace vdrive_bank {
 
 namespace {
 
-// Appends "key":value pairs to one JSON object. Only integers and strings occur in the trace.
+// Appends "key":value pairs to one JSON object.
+// Only integers and strings occur in the trace.
 class Json {
  public:
   Json(std::string_view event, runtime_core::MonoTime at) {

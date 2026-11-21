@@ -6,7 +6,8 @@
 
 namespace runtime_core {
 
-// Project-specific upper motion authority (spec §6.1). Not an industry-standard lease.
+// Project-specific upper motion authority (spec §6.1).
+// Not an industry-standard lease.
 struct MotionPermit {
   ManagerInstance manager{};
   SessionId session{};

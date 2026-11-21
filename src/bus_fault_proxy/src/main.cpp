@@ -4,13 +4,15 @@
 //   bus_fault_proxy --host IF --device IF [--rules FILE] --trace PATH
 // A frame read on --host is written only to --device and the reverse (B9); each socket is bound
 // to one interface with CAN_RAW_RECV_OWN_MSGS off, so a written frame never comes back to the
-// proxy. The trace (JSON lines) has a `start` record once both sockets are open and an `exit`
-// record on SIGTERM or SIGINT with the forwarding counts, the per-rule counts, the socket counters
-// and the forwarding cost of the normal path (B10: CLOCK_MONOTONIC right after recvmsg to right
-// after write returns; a measurement, not a gate), with its distribution as [value, count] pairs
-// ("dist", ascending, summing to "samples"). Frames still held at exit are not written and
-// are reported as dropped_at_exit. Exit 2: bad arguments or rules (the line is named), or an
-// interface or the trace cannot be opened.
+// proxy.
+// The trace (JSON lines) has a `start` record once both sockets are open and an `exit` record on
+// SIGTERM or SIGINT with the forwarding counts, the per-rule counts, the socket counters and the
+// forwarding cost of the normal path (B10: CLOCK_MONOTONIC right after recvmsg to right after write
+// returns; a measurement, not a gate), with its distribution as [value, count] pairs ("dist",
+// ascending, summing to "samples").
+// Frames still held at exit are not written and are reported as dropped_at_exit.
+// Exit 2: bad arguments or rules (the line is named), or an interface or the trace cannot be
+// opened.
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <net/if.h>

@@ -49,8 +49,9 @@ struct PolicyResult {
   RobotState state{RobotState::kBoot};
 };
 
-// Robot policy states (spec §8.1, §8.4). Reset never enables motion; a fault stop always
-// latches; a normal stop returns to READY without Reset.
+// Robot policy states (spec §8.1, §8.4).
+// Reset never enables motion; a fault stop always latches; a normal stop returns to READY without
+// Reset.
 class PolicyStateMachine {
  public:
   RobotState state() const { return state_; }

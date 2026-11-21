@@ -147,9 +147,9 @@ TEST(BankLoop, TicksContinueUnderContinuousTraffic) {
 
 TEST(BankLoop, SlowDispatchSkipsAndThreeSkipsOverload) {
   Rig rig;
-  // A dispatch of 2.5 ms against W = 2 ms: the loop falls behind and skips releases. Skipped
-  // releases are never caught up: one tick per executed release, and the drive model advances by
-  // exactly one W per tick.
+  // A dispatch of 2.5 ms against W = 2 ms: the loop falls behind and skips releases.
+  // Skipped releases are never caught up: one tick per executed release, and the drive model
+  // advances by exactly one W per tick.
   rig.sim.per_read = microseconds(2500);
   for (int i = 0; i < 40; ++i) {
     rig.loop.run_once();

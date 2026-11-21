@@ -5,7 +5,8 @@
 
 namespace runtime_core {
 
-// A validity window is open while now < valid_until. At now == valid_until it is closed.
+// A validity window is open while now < valid_until.
+// At now == valid_until it is closed.
 constexpr bool is_expired(MonoTime now, MonoTime valid_until) { return now >= valid_until; }
 
 // A command may never outlive the permit it was sent under.

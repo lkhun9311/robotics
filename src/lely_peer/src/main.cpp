@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Independent CANopen master for the interoperability tests: Lely AsyncMaster with one
-// FiberDriver per slave assigned in the DCF (0x1F81). Reports what Lely decodes as JSON lines on
-// stdout, one object per line, each with "t" (CLOCK_MONOTONIC seconds) and "event":
+// FiberDriver per slave assigned in the DCF (0x1F81).
+// Reports what Lely decodes as JSON lines on stdout, one object per line, each with "t"
+// (CLOCK_MONOTONIC seconds) and "event":
 //   start  {node, ifname, slaves}         master reset, drivers registered
 //   state  {node, state}                  Lely OnState for a slave
 //   boot   {node, state, es, what}        Lely OnBoot ('boot slave' process result)
@@ -120,8 +121,9 @@ std::string num(const char* key, std::int64_t value) {
   return std::string(",\"") + key + "\":" + std::to_string(value);
 }
 
-// The value of an SDO transfer as a JSON integer. An INTEGER8 goes through its unsigned byte, so
-// the sign is restored explicitly rather than by a signed-char widening.
+// The value of an SDO transfer as a JSON integer.
+// An INTEGER8 goes through its unsigned byte, so the sign is restored explicitly rather than by a
+// signed-char widening.
 template <typename T>
 std::int64_t widen(T value) {
   if constexpr (std::is_same_v<T, std::int8_t>) {
@@ -237,9 +239,10 @@ class PeerDriver : public canopen::FiberDriver {
 
   // Values Lely decoded from the drive's TPDOs into the remote-mapped objects.
   // AsyncMaster posts this to the driver's executor after Lely wrote the object (reading the
-  // value inside the master's own OnRpdoWrite stopped the event loop). Assumed, not proven: the
-  // posted task runs before the next frame is handled, so the value read is this PDO's; the M4
-  // judge compares every TPDO frame with these values, so a value from a later PDO would fail it.
+  // value inside the master's own OnRpdoWrite stopped the event loop).
+  // Assumed, not proven: the posted task runs before the next frame is handled, so the value read
+  // is this PDO's; the M4 judge compares every TPDO frame with these values, so a value from a
+  // later PDO would fail it.
   void OnRpdoWrite(std::uint16_t idx, std::uint8_t subidx) noexcept override {
     if (id() == run_.node) {
       Report(idx, subidx);
@@ -262,7 +265,8 @@ class PeerDriver : public canopen::FiberDriver {
     }
   }
 
-  // One `rpdo` line per decoded entry. Types are those of our EDS for the TPDO-mapped objects.
+  // One `rpdo` line per decoded entry.
+  // Types are those of our EDS for the TPDO-mapped objects.
   void Report(std::uint16_t idx, std::uint8_t subidx) {
     std::error_code ec;
     std::optional<std::int64_t> value;
@@ -308,12 +312,13 @@ class PeerDriver : public canopen::FiberDriver {
     --remaining_;
     ++sent_;
     if (enable_pending_ && (sent_ == 2 || remaining_ == 0)) {
-      // Enable Operation right after the second update. Lely sent the first one at this SYNC,
-      // ahead of this controlword, so the drive enters Operation Enabled with a command in its
-      // window and actuates it at the next SYNC, 10 ms after the entry. The guards count from
-      // the entry: were the first update lost, the second is actuated 20 ms after it, still
-      // 10 ms inside the 30 ms command timeout (enabling after the first update would put that
-      // case on the timeout itself).
+      // Enable Operation right after the second update.
+      // Lely sent the first one at this SYNC, ahead of this controlword, so the drive enters
+      // Operation Enabled with a command in its window and actuates it at the next SYNC, 10 ms
+      // after the entry.
+      // The guards count from the entry: were the first update lost, the second is actuated 20 ms
+      // after it, still 10 ms inside the 30 ms command timeout (enabling after the first update
+      // would put that case on the timeout itself).
       enable_pending_ = false;
       if (!Controlword(0x0F)) {
         streaming_ = false;
@@ -424,8 +429,9 @@ class PeerDriver : public canopen::FiberDriver {
 
   // Lely 2.3.5's FiberDriver::Wait(SdoFuture<T>, error_code&) crashed here (SIGSEGV in
   // __cxa_begin_catch) on the first SDO abort; its error path also has no return statement in
-  // a non-void function. The transfers therefore use Lely's confirmation callbacks (no
-  // exception) and the fiber polls for them.
+  // a non-void function.
+  // The transfers therefore use Lely's confirmation callbacks (no exception) and the fiber polls
+  // for them.
   // kOk when Lely confirmed the transfer (successfully or not); kCancelled when the run
   // finished first (nothing is reported then); kTimeout when no confirmation came within the
   // budget, which is longer than Lely's own SDO timeout.
@@ -528,8 +534,9 @@ class PeerDriver : public canopen::FiberDriver {
     return true;
   }
 
-  // One console step. A read or a write is carried out when Lely confirmed it (any result) or
-  // timed it out; it is not when the run finished first.
+  // One console step.
+  // A read or a write is carried out when Lely confirmed it (any result) or timed it out; it is not
+  // when the run finished first.
   bool Do(const lely_peer::ConsoleCommand& c) {
     using Verb = lely_peer::ConsoleCommand::Verb;
     using Type = lely_peer::ConsoleCommand::Type;
@@ -629,8 +636,9 @@ class PeerDriver : public canopen::FiberDriver {
   }
 
   // Every step has its expected outcome: success (with the EDS value where the drive's answer
-  // is fixed) or the CiA 301 abort code of the M3 list. Every step runs and is reported; any
-  // mismatch makes the scenario fail and is named in the reason.
+  // is fixed) or the CiA 301 abort code of the M3 list.
+  // Every step runs and is reported; any mismatch makes the scenario fail and is named in the
+  // reason.
   void SdoSuite() {
     std::string mismatches;
     const auto check = [&](const std::string& step, std::optional<std::uint32_t> abort_code,
@@ -687,8 +695,8 @@ class PeerDriver : public canopen::FiberDriver {
   }
 
   // NMT Start, 0x06, 0x07, the commit transaction (D17), then 0x0F (or, with `stream`, the
-  // first RPDO1/RPDO2 update and 0x0F at the next SYNC). The drive accepts a commit only in
-  // Switched On, so the transaction sits between 0x07 and 0x0F.
+  // first RPDO1/RPDO2 update and 0x0F at the next SYNC).
+  // The drive accepts a commit only in Switched On, so the transaction sits between 0x07 and 0x0F.
   bool CommitAndEnable(bool stream, std::string& fields) {
     const std::string node = std::to_string(id());
     if (!Nmt(canopen::NmtCommand::START)) {
@@ -760,7 +768,8 @@ class PeerDriver : public canopen::FiberDriver {
       return;
     }
     // The last update goes out at the next SYNC and is applied at the one after; the drive's
-    // TPDO2 reports it one SYNC later. Not required: the bank's trace is the judge.
+    // TPDO2 reports it one SYNC later.
+    // Not required: the bank's trace is the judge.
     WaitFor([this]() { return applied_seq_ == seq_; }, 100);
     streaming_ = false;
     run_.finish(true, node_field(id()) + num("tag", tag_) + num("sent", sent_) +
@@ -787,14 +796,16 @@ class PeerDriver : public canopen::FiberDriver {
   std::uint32_t sent_ = 0;
 };
 
-// B15 override. Lely 2.3.5's default heartbeat indication (co_nmt_on_hb) answers a consumer
-// timeout of a slave with the CiA 302 error handling (co_nmt_node_err_ind), which restarts the
-// 'boot slave' process and puts NMT Reset Node (0x81) for that slave on the wire 0.25 s after
-// the last heartbeat. No dcfgen option suppresses it (observed with start_nodes, mandatory and
-// reset_communication each set; see tools/interop/test_peer_config.py). The peer therefore
-// installs its own indication: a timeout that occurs is reported to the driver (`hb` event) and
-// nothing else happens; every other heartbeat event goes to Lely's own handler unchanged. A
-// slave that comes back is booted again by Lely on its boot-up message (co_nmt_on_st).
+// B15 override.
+// Lely 2.3.5's default heartbeat indication (co_nmt_on_hb) answers a consumer timeout of a slave
+// with the CiA 302 error handling (co_nmt_node_err_ind), which restarts the 'boot slave' process
+// and puts NMT Reset Node (0x81) for that slave on the wire 0.25 s after the last heartbeat.
+// No dcfgen option suppresses it (observed with start_nodes, mandatory and reset_communication each
+// set; see tools/interop/test_peer_config.py).
+// The peer therefore installs its own indication: a timeout that occurs is reported to the driver
+// (`hb` event) and nothing else happens; every other heartbeat event goes to Lely's own handler
+// unchanged.
+// A slave that comes back is booted again by Lely on its boot-up message (co_nmt_on_st).
 class PeerMaster : public canopen::AsyncMaster {
  public:
   PeerMaster(io::TimerBase& timer, io::CanChannelBase& chan, const std::string& dcf_txt)
@@ -933,8 +944,8 @@ int run(const lely_peer::Options& opts) {
     master.AsyncDeconfig().submit(exec, [&]() { ctx.shutdown(); });
   };
   // A finished scenario's fiber returns within a millisecond (WaitFor sees run.finished); a
-  // request it left in Lely's client ends with Lely's SDO timeout. Stop after both, at most
-  // kSdoTimeout + 1 s later.
+  // request it left in Lely's client ends with Lely's SDO timeout.
+  // Stop after both, at most kSdoTimeout + 1 s later.
   io::Timer drain(poll, exec, CLOCK_MONOTONIC);
   double drain_until = 0;
   std::function<void()> stop_when_idle = [&]() {
@@ -974,9 +985,9 @@ int run(const lely_peer::Options& opts) {
     return console ? num("emcy", static_cast<std::int64_t>(run.emcy)) : std::string();
   };
   // console: commands handed to a driver whose cmd_done has not come yet, commands whose
-  // cmd_done said they were not carried out, and whether `quit` was read. `quit` ends the run
-  // only once every command before it is done; a run with a command pending or not carried out
-  // ends with scenario_failed, whatever ended it.
+  // cmd_done said they were not carried out, and whether `quit` was read.
+  // `quit` ends the run only once every command before it is done; a run with a command pending or
+  // not carried out ends with scenario_failed, whatever ended it.
   std::uint64_t console_pending = 0;
   std::uint64_t console_not_done = 0;
   bool console_quit = false;
@@ -1060,8 +1071,8 @@ int run(const lely_peer::Options& opts) {
         return;
       }
       if (c.verb == lely_peer::ConsoleCommand::Verb::kQuit) {
-        // Lines after `quit` are not read. With commands still pending, the last cmd_done ends
-        // the run.
+        // Lines after `quit` are not read.
+        // With commands still pending, the last cmd_done ends the run.
         console_quit = true;
         if (console_pending == 0) {
           console_end("quit");

@@ -5,7 +5,8 @@ project(ur5e_description NONE)
 find_package(ament_cmake REQUIRED)
 
 # The Menagerie model is not vendored: the dev image installs the pinned, verified copy and
-# points MENAGERIE_UR5E_DIR at it. Without it the package would install a scene that cannot load.
+# points MENAGERIE_UR5E_DIR at it.
+# Without it the package would install a scene that cannot load.
 set(MENAGERIE_UR5E_DIR "$ENV{MENAGERIE_UR5E_DIR}")
 if(NOT MENAGERIE_UR5E_DIR)
   message(FATAL_ERROR "MENAGERIE_UR5E_DIR is not set; build inside the dev image")

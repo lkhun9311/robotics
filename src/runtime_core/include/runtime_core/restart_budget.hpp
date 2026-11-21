@@ -8,7 +8,8 @@
 
 namespace runtime_core {
 
-// Sliding-window restart budget (spec §8.4). There is deliberately no reset method:
+// Sliding-window restart budget (spec §8.4).
+// There is deliberately no reset method:
 // reconnecting or restarting a peer must not refill the budget.
 class RestartBudget {
  public:

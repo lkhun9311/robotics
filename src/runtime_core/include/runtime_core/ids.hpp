@@ -21,8 +21,9 @@ struct ManagerInstance {
   auto operator<=>(const ManagerInstance&) const = default;
 };
 
-// Strictly increasing, never-zero identifiers. Generations are global across sessions,
-// so an old execution can never share a generation with a new one.
+// Strictly increasing, never-zero identifiers.
+// Generations are global across sessions, so an old execution can never share a generation with a
+// new one.
 class IdAllocator {
  public:
   SessionId next_session() { return SessionId{++session_}; }

@@ -15,8 +15,9 @@
 #include "runtime_core/time.hpp"
 #include "vdrive_bank/bank.hpp"
 
-// A bank in logic time with a record log. Expected frames in the tests are written from CiA 301
-// byte by byte; the codec builds only the frames the bank receives.
+// A bank in logic time with a record log.
+// Expected frames in the tests are written from CiA 301 byte by byte; the codec builds only the
+// frames the bank receives.
 namespace vdrive_bank::test {
 
 namespace cc = canopen_codec;

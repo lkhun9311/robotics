@@ -24,8 +24,9 @@ class TraceSink {
                     std::initializer_list<TraceField> fields) = 0;
 };
 
-// One JSON object per line. The clock domain is written on every line so a reader
-// never subtracts timestamps from different clocks (spec §18.5).
+// One JSON object per line.
+// The clock domain is written on every line so a reader never subtracts timestamps from different
+// clocks (spec §18.5).
 class JsonlTraceSink final : public TraceSink {
  public:
   JsonlTraceSink(std::ostream& out, std::string clock_domain);
