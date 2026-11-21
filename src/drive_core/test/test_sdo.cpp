@@ -15,8 +15,8 @@
 #include "runtime_core/time.hpp"
 
 // The SDO server (CiA 301 expedited) and the execution commit transaction (contract D17), driven
-// only through frames: no private state is seeded. Logic time: a FakeClock, W ticks before the
-// frames of the same instant.
+// only through frames: no private state is seeded.
+// Logic time: a FakeClock, W ticks before the frames of the same instant.
 namespace {
 
 namespace cc = canopen_codec;
@@ -111,7 +111,8 @@ struct Wire {
     return static_cast<std::uint16_t>(value(od::addr::feedback_ext_drive_flags));
   }
 
-  // D17 staging: 0x2010:04 first, then 01-03. Returns the matching 0x2011 value.
+  // D17 staging: 0x2010:04 first, then 01-03.
+  // Returns the matching 0x2011 value.
   std::uint32_t stage(const CommitRequest& r) {
     EXPECT_TRUE(is_ok(write(od::addr::exec_request_attempt_id, r.attempt_id)));
     EXPECT_TRUE(is_ok(write(od::addr::exec_request_generation_lo, r.generation_lo)));
@@ -286,9 +287,10 @@ TEST(Sdo, FixedParametersAreConst) {
 }
 
 TEST(Sdo, UnsupportedCommandSpecifierAborts) {
-  // Segmented and block transfers are not served. Every client command specifier this server
-  // does not serve is answered with abort 0x05040001; the multiplexer is echoed for the
-  // specifiers that carry one and is zero for segments. A client abort is never answered.
+  // Segmented and block transfers are not served.
+  // Every client command specifier this server does not serve is answered with abort 0x05040001;
+  // the multiplexer is echoed for the specifiers that carry one and is zero for segments.
+  // A client abort is never answered.
   struct Case {
     std::uint8_t command;
     bool has_multiplexer;

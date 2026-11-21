@@ -5,9 +5,10 @@
 
 namespace hal_contract {
 
-// Faults a backend reports in Feedback. Each is one bit, so a set travels as one uint32 (the
-// ros2_control `hal/faults` state interface). A policy refusal of a write is never a fault: it
-// is a HalVerdict, and it changes nothing here (spec §8.2).
+// Faults a backend reports in Feedback.
+// Each is one bit, so a set travels as one uint32 (the ros2_control `hal/faults` state interface).
+// A policy refusal of a write is never a fault: it is a HalVerdict, and it changes nothing here
+// (spec §8.2).
 enum class Fault : std::uint32_t {
   kTransportLost = 1U << 0,    // the bus or socket is gone
   kNodeLost = 1U << 1,         // a node's heartbeat stopped

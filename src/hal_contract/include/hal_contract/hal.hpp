@@ -19,8 +19,9 @@ enum class ArmState : std::uint8_t { kIdle, kArming, kArmed, kFailed };
 
 const char* to_string(ArmState state);
 
-// The host side of one arm (C1). Owns the backend, a HalGuard<6>, the capability requirements
-// and the adopted AuthorityId, which changes only when an arm op completes.
+// The host side of one arm (C1).
+// Owns the backend, a HalGuard<6>, the capability requirements and the adopted AuthorityId, which
+// changes only when an arm op completes.
 //
 // write() decides in this order, and submits only on kSend:
 //   kInhibited, kHardwareNotActive, kNotArmed (no adopted identity yet, nothing to compare),
@@ -31,18 +32,19 @@ const char* to_string(ArmState state);
 //   kExpiresBeforeApplication for a command the guard approved but the backend could no
 //   longer apply.
 // Every refusal except kDuplicate resets the guard's reference, so the next send is measured
-// against feedback at rest; a duplicate leaves the device on the original command. A skewed
-// feedback snapshot is passed to the guard as stale (C4).
+// against feedback at rest; a duplicate leaves the device on the original command.
+// A skewed feedback snapshot is passed to the guard as stale (C4).
 //
 // Once active, write(), read(), op_state() and arm() (which Task 9 posts from write()) do not
-// allocate: refusals carry a static reason, and only wait() builds an OpResult. The activation
-// gate's missing list is built in activate(), a lifecycle call.
+// allocate: refusals carry a static reason, and only wait() builds an OpResult.
+// The activation gate's missing list is built in activate(), a lifecycle call.
 //
 // Not thread-safe: the caller serializes every call (lifecycle and control path alike).
 //
-// Ops are kept in a ring of kOpSlots. A slot still pending when the ring reuses it is settled
-// as failed (an evicted arm leaves the Hal kFailed, never kArming). An op posted before the last
-// configure() or deactivate() changes no Hal state when it settles.
+// Ops are kept in a ring of kOpSlots.
+// A slot still pending when the ring reuses it is settled as failed (an evicted arm leaves the Hal
+// kFailed, never kArming).
+// An op posted before the last configure() or deactivate() changes no Hal state when it settles.
 class Hal {
  public:
   // Throws std::invalid_argument on a null backend or a lease outside (0, kMaxLease], and
@@ -55,7 +57,8 @@ class Hal {
   // The capability gate: refuses with the missing_capabilities list before Backend::activate.
   OpHandle activate(runtime_core::MonoTime now);
   // Refused without calling the backend when not active or when hold_until is not in
-  // (now, now + kMaxHold]. From the call on, writes are kNotArmed until the op completes.
+  // (now, now + kMaxHold].
+  // From the call on, writes are kNotArmed until the op completes.
   OpHandle arm(const ArmRequest& request, runtime_core::MonoTime now);
   OpHandle deactivate(runtime_core::MonoTime now);
   void on_error_nonblocking();

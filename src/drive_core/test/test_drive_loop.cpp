@@ -16,8 +16,9 @@
 #include "runtime_core/time.hpp"
 
 // The drive loop (contract D7-D13): SYNC timeline, guards, quick stop, policy latch, faults,
-// joint model and TPDO feedback. Logic time only: a FakeClock moves in W steps, the W tick runs
-// before the frames of the same instant, and SYNC comes every T_bus.
+// joint model and TPDO feedback.
+// Logic time only: a FakeClock moves in W steps, the W tick runs before the frames of the same
+// instant, and SYNC comes every T_bus.
 namespace {
 
 namespace cc = canopen_codec;
@@ -824,9 +825,9 @@ TEST(Integrity, RearmAfterViolationDoesNotStopAgain) {
 }
 
 TEST(Integrity, ResendOfPairDroppedWhileNotEnabledIsAccepted) {
-  // A complete pair evaluated while Switched On is dropped, not actuated. The master enables and
-  // sends the same seq again with a new deadline: that is a fresh command, not a second payload
-  // for an actuated seq.
+  // A complete pair evaluated while Switched On is dropped, not actuated.
+  // The master enables and sends the same seq again with a new deadline: that is a fresh command,
+  // not a second payload for an actuated seq.
   Loop l;
   l.cw(0x06);
   l.cw(0x07);
@@ -850,7 +851,8 @@ TEST(Integrity, ResendOfPairDroppedWhileNotEnabledIsAccepted) {
 }
 
 // Switched On with a tag; one complete pair (seq 1, target `target`) evaluated and dropped as not
-// enabled; then Enable Operation. Returns the dropped pair's deadline.
+// enabled; then Enable Operation.
+// Returns the dropped pair's deadline.
 std::uint32_t drop_one_pair_then_enable(Loop& l, std::int32_t target) {
   l.cw(0x06);
   l.cw(0x07);
@@ -885,9 +887,10 @@ TEST(Integrity, ResendOfDroppedSeqWithAnotherTargetIsAViolation) {
 
 TEST(Integrity, DelayedCopyOfDroppedTargetIsTheOnlyTargetForItsSeq) {
   // The re-review sequence: after the drop, a delayed copy of RPDO1(s, A) arrives, the host's
-  // RPDO1(s, B) is lost and its fresh RPDO2(s, d2) arrives. A and d2 pair: A is the one target
-  // the drive accepts for s, so this is what a conforming host (which re-sends s only with A)
-  // asked for. When B shows up later it is a second payload for an actuated seq: a violation.
+  // RPDO1(s, B) is lost and its fresh RPDO2(s, d2) arrives.
+  // A and d2 pair: A is the one target the drive accepts for s, so this is what a conforming host
+  // (which re-sends s only with A) asked for.
+  // When B shows up later it is a second payload for an actuated seq: a violation.
   Loop l;
   drop_one_pair_then_enable(l, kFar);
   l.rpdo1(l.seq, kFar);  // The delayed copy.
@@ -902,8 +905,9 @@ TEST(Integrity, DelayedCopyOfDroppedTargetIsTheOnlyTargetForItsSeq) {
 }
 
 TEST(Lifetime, StreamPastTagLifetimeEndsInTimeoutStop) {
-  // D3: a tag lives at most 5 min, even while commands stream. Once it is revoked, every
-  // fragment is of another tag, nothing actuates and the command timeout stops the drive.
+  // D3: a tag lives at most 5 min, even while commands stream.
+  // Once it is revoked, every fragment is of another tag, nothing actuates and the command timeout
+  // stops the drive.
   Loop l;
   const MonoTime committed = l.now();  // enable() commits at this instant.
   l.run_at_vmax();
@@ -1207,9 +1211,9 @@ TEST(Fault, StuckJointFaultReactionEndsAtDeadline) {
 }
 
 TEST(Fault, UnconfirmedStopRefusesEnableUntilObservedAtRest) {
-  // Spec §8.4: no Enable Operation while the latest stop is unconfirmed. A stuck fault reaction
-  // ends in Fault with stop_unconfirmed; Fault Reset and the full rearm must not re-enable, and
-  // nothing but an observed rest clears the flag.
+  // Spec §8.4: no Enable Operation while the latest stop is unconfirmed.
+  // A stuck fault reaction ends in Fault with stop_unconfirmed; Fault Reset and the full rearm must
+  // not re-enable, and nothing but an observed rest clears the flag.
   Loop l;
   l.run_at_vmax();
   l.drive.inject_stuck_joint(true);

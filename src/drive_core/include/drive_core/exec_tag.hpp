@@ -6,21 +6,27 @@
 
 #include "runtime_core/time.hpp"
 
-// Drive-issued execution identity (contract D3, D12). The drive, not the host, allocates the
-// 16-bit exec_tag, so the side that checks a tag is the side that made it. Every time value is
-// drive-local monotonic time passed in by the caller; nothing here reads a clock.
+// Drive-issued execution identity (contract D3, D12).
+// The drive, not the host, allocates the 16-bit exec_tag, so the side that checks a tag is the side
+// that made it.
+// Every time value is drive-local monotonic time passed in by the caller; nothing here reads a
+// clock.
 namespace drive_core {
 
-// A tag is valid for at most this long (D3). It stays below half a 16-bit command_seq wrap at
-// 100 Hz (327 s), so seq16_newer is unambiguous within one tag.
+// A tag is valid for at most this long (D3).
+// It stays below half a 16-bit command_seq wrap at 100 Hz (327 s), so seq16_newer is unambiguous
+// within one tag.
 inline constexpr runtime_core::Duration kTagLifetime{300'000'000'000};  // 5 min
-// After boot-up the drive refuses commits this long (D3). It exceeds the 48 ms lease, so no
-// command of a previous boot can still have an open deadline once the first tag exists.
+// After boot-up the drive refuses commits this long (D3).
+// It exceeds the 48 ms lease, so no command of a previous boot can still have an open deadline once
+// the first tag exists.
 inline constexpr runtime_core::Duration kBootQuarantine{100'000'000};  // 100 ms
 
-// The first tag of a boot, derived from boot_id (0x2013). Never 0. Tags are then issued in
-// strictly increasing order from this value up to 0xFFFF; a start near the top leaves few tags
-// for that boot, which is the price of an unpredictable start (D3's residual-risk argument).
+// The first tag of a boot, derived from boot_id (0x2013).
+// Never 0.
+// Tags are then issued in strictly increasing order from this value up to 0xFFFF; a start near the
+// top leaves few tags for that boot, which is the price of an unpredictable start (D3's
+// residual-risk argument).
 std::uint16_t exec_tag_start(std::uint32_t boot_id);
 
 enum class CommitRefusal : std::uint8_t {
@@ -48,9 +54,9 @@ class ExecTagIssuer {
                 runtime_core::Duration lifetime = kTagLifetime,
                 runtime_core::Duration quarantine = kBootQuarantine);
 
-  // Issues the next tag, or refuses (abort 0x08000022 at the SDO layer, D3). A refused
-  // commit also revokes the current tag: the host asked to leave it, and an exhausted drive must
-  // not keep running on its last tag. generation and session are recorded with the tag.
+  // Issues the next tag, or refuses (abort 0x08000022 at the SDO layer, D3).
+  // A refused commit also revokes the current tag: the host asked to leave it, and an exhausted
+  // drive must not keep running on its last tag. generation and session are recorded with the tag.
   struct CommitOutcome {
     std::optional<std::uint16_t> tag;
     std::optional<CommitRefusal> refusal;

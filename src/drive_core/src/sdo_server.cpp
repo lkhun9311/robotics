@@ -87,8 +87,8 @@ std::optional<cc::Sdo> SdoServer::handle(const cc::Sdo& request, ObjectAccess& o
   if (!writable(entry->access)) {
     return abort_response(address, sdo_abort::kReadOnly);
   }
-  // Size 0: an expedited download with the size unspecified. The entry's size applies, and the
-  // data bytes beyond it must be zero.
+  // Size 0: an expedited download with the size unspecified.
+  // The entry's size applies, and the data bytes beyond it must be zero.
   const bool size_ok = request.size == 0U ? low_bytes(request.value, entry->size) == request.value
                                           : request.size == entry->size;
   if (!size_ok) {

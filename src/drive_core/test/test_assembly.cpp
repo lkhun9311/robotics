@@ -289,7 +289,8 @@ TEST(Assembly, ViolationDetectedAtIngestionWithoutSync) {
 
 TEST(Assembly, ViolationStaysPendingAcrossTagChangeUntilReported) {
   // The tag changes (revoke, or lifetime expiry at the W tick) between detection and the next
-  // SYNC. The violation must still be reported, exactly once.
+  // SYNC.
+  // The violation must still be reported, exactly once.
   for (const bool by_expiry : {false, true}) {
     SCOPED_TRACE(by_expiry ? "lifetime expiry" : "revoke");
     Drive d;
@@ -376,7 +377,8 @@ TEST(Replay, OldCommandWithOpenDeadlineAfterResetCommunicationIsDropped) {
   d.tag = d.commit();
   EXPECT_EQ(static_cast<std::uint32_t>(d.tag), static_cast<std::uint32_t>(old_tag) + 1U);
   // The old command is replayed while its deadline is still open, and with a seq that is new
-  // for the cleared state. It carries the revoked tag, so it is dropped.
+  // for the cleared state.
+  // It carries the revoked tag, so it is dropped.
   ASSERT_TRUE(drive_core::validity_open(old2.valid_until_us, kNow + 1'000, drive_core::kLeaseUs));
   EXPECT_EQ(d.assembler.offer(old1), OfferResult::kDroppedOtherTag);
   EXPECT_EQ(d.assembler.offer(old2), OfferResult::kDroppedOtherTag);
@@ -423,8 +425,8 @@ TEST(Assembly, AcknowledgedViolationIsNotReportedAgain) {
   EXPECT_TRUE(d.assembler.integrity_violation());
   EXPECT_EQ(d.assembler.offer(r1(d.tag, 6, 1)), OfferResult::kBlocked);
   // The owner acted on it (its stop revokes the tag) before any SYNC: the first SYNC after the
-  // change does not report it again. Unacknowledged, it would
-  // (ViolationStaysPendingAcrossTagChangeUntilReported).
+  // change does not report it again.
+  // Unacknowledged, it would (ViolationStaysPendingAcrossTagChangeUntilReported).
   d.issuer.revoke();
   EXPECT_FALSE(d.assembler.on_sync(kNow).integrity_violation);
   EXPECT_FALSE(d.assembler.integrity_violation());
@@ -459,7 +461,8 @@ TEST(Assembly, EvictedSeqKeepsItsTargetBound) {
   for (std::uint16_t seq = 1; seq <= 9; ++seq) {
     ASSERT_EQ(d.assembler.offer(r1(d.tag, seq, 10 * seq)), OfferResult::kAccepted) << seq;
   }
-  // Seq 9 evicted seq 1 (target 10). Another target for seq 1 is a violation, not a silent drop.
+  // Seq 9 evicted seq 1 (target 10).
+  // Another target for seq 1 is a violation, not a silent drop.
   EXPECT_EQ(d.assembler.offer(r1(d.tag, 1, 99)), OfferResult::kIntegrityViolation);
   EXPECT_TRUE(d.assembler.integrity_violation());
   EXPECT_EQ(d.assembler.offer(r2(d.tag, 9, kNow + 20'000)), OfferResult::kBlocked);
