@@ -128,14 +128,17 @@ def replay(obs, rules, tol):
 def acted_at_edge(obs, rule, frame):
     """Whether the proxy acted on a frame that lies within EDGE_S of its rule's window edge, read
     from the capture the rule forwards to: vcan_device for h2d, vcan_host for d2h.
-    A drop rule acted when no copy of the frame arrived within HELD_SLACK_S of it.
-    A delay rule acted when a copy arrived one delay later and none within HELD_SLACK_S of it.
+    A copy is on time when it arrived within HELD_SLACK_S after the frame, or up to EDGE_S before
+    it (the two captures estimate their clock offsets apart, and that is the bound the repo gives
+    their difference).
+    A drop rule acted when no copy of the frame arrived on time.
+    A delay rule acted when a copy arrived one delay later and none on time.
     Anything else is a frame the wire cannot place, and the verdict is not reached."""
     t, cob, data = frame
     side = "device" if rule["dir"] == "h2d" else "host"
     slack = judges.HELD_SLACK_S
-    hops = [c[0] - t for c in judges.frames(obs, side, cob, t) if c[2] == data]
-    on_time = any(hop <= slack for hop in hops)
+    hops = [c[0] - t for c in judges.frames(obs, side, cob, t - EDGE_S) if c[2] == data]
+    on_time = any(-EDGE_S <= hop <= slack for hop in hops)
     where = (f"{rule['dir']} edge frame {cob:#x} {data.hex()} {t - epoch(obs):.6f} s after the "
              f"proxy's start")
     if rule["action"] == "drop":

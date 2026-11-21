@@ -534,9 +534,9 @@ def test_x7_delayed_frame_inside_the_start_slack_passes():
     expect(obs, "PASS", "18 reached the drive with the tag current = 18 not-valid drops")
 
 
-def test_x7_on_time_frame_inside_the_edge_slack_passes():
-    # The control: the same placement, but the proxy forwarded the last frame on time.
-    # Its device copy is 20 us after the host one, its not-valid drop is gone, the proxy counts 17.
+def on_time_x7_edge_frame():
+    """X7 with the last frame forwarded on time: its device copy is 20 us after the host one, its
+    not-valid drop is gone, and the proxy counts 17."""
     obs = load("X7")
     frame = place_at_edge(obs, "end")
     held = copies(obs, "device", frame)
@@ -548,6 +548,20 @@ def test_x7_on_time_frame_inside_the_edge_slack_passes():
     assert drop["count"] == 1, drop
     obs["bank"].remove(drop)
     obs["proxy_exit"]["rules"][0]["matched"] = 17
+    return obs
+
+
+def test_x7_on_time_frame_inside_the_edge_slack_passes():
+    # The control: the same placement, but the proxy forwarded the last frame on time.
+    expect(on_time_x7_edge_frame(), "PASS",
+           "17 reached the drive with the tag current = 17 not-valid drops")
+
+
+def test_x7_on_time_frame_with_the_device_capture_30_us_early_passes():
+    # The two captures estimate their clock offsets apart, so a correct copy may stamp earlier.
+    obs = on_time_x7_edge_frame()
+    for entry in obs["device"]:
+        entry[0] -= 30e-6
     expect(obs, "PASS", "17 reached the drive with the tag current = 17 not-valid drops")
 
 
@@ -588,3 +602,4 @@ def test_dropped_edge_frame_found_on_the_destination_is_inconclusive(row):
     obs[side].append([frame[0] + 20e-6, frame[1], frame[2].hex()])
     obs[side].sort(key=lambda f: f[0])
     expect(obs, "INCONCLUSIVE", "match counts")
+
