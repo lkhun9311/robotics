@@ -134,7 +134,13 @@ def edge_dispositions(sent, arrived, frame, delay_s):
     A copy belongs to a transmission when it arrived on time (up to EDGE_S before it and
     HELD_SLACK_S after it) or, for a delay rule, one delay later (within HELD_SLACK_S).
     A disposition is allowed when some assignment of every arrival to a transmission gives the
-    frame that disposition."""
+    frame that disposition.
+    Arrivals are told apart by position, so two entries with one timestamp are two copies.
+    Returns (the allowed dispositions, the times of the arrivals no transmission can claim from
+    EDGE_S before the frame on).
+    The proxy forwards a frame at once or, for a delay rule, one delay later.
+    An arrival that fits neither is no proof of a drop.
+    The horizon is the rest of the capture, because a bound would pass what lies beyond it."""
     slack = judges.HELD_SLACK_S
 
     def kinds(s, a):
@@ -142,33 +148,34 @@ def edge_dispositions(sent, arrived, frame, delay_s):
         return ({"on time"} if -EDGE_S <= hop <= slack else set()) | \
                ({"held"} if delay_s is not None and abs(hop - delay_s) <= slack else set())
 
-    owners = {a: [i for i, s in enumerate(sent) if kinds(s, a)] for a in arrived}
-    owners = {a: o for a, o in owners.items() if o}
+    owners = {k: [i for i, s in enumerate(sent) if kinds(s, a)] for k, a in enumerate(arrived)}
+    unexplained = [arrived[k] for k, o in owners.items() if not o and arrived[k] >= frame - EDGE_S]
+    owners = {k: o for k, o in owners.items() if o}
     me = min(range(len(sent)), key=lambda i: abs(sent[i] - frame))
     owner_of = {}
 
-    def place(a, banned, seen):
-        for i in owners[a]:
+    def place(k, banned, seen):
+        for i in owners[k]:
             if i == banned or i in seen:
                 continue
             seen.add(i)
             if i not in owner_of or place(owner_of[i], banned, seen):
-                owner_of[i] = a
+                owner_of[i] = k
                 return True
         return False
 
     def all_placed(banned, skip):
         owner_of.clear()
-        return all(place(a, banned, set()) for a in owners if a != skip)
+        return all(place(k, banned, set()) for k in owners if k != skip)
 
     allowed = set()
     if all_placed(me, None):
         allowed.add("dropped")
-    for a in owners:
-        for kind in kinds(sent[me], a) if me in owners[a] else ():
-            if kind not in allowed and all_placed(me, a):
+    for k in owners:
+        for kind in kinds(sent[me], arrived[k]) if me in owners[k] else ():
+            if kind not in allowed and all_placed(me, k):
                 allowed.add(kind)
-    return allowed
+    return allowed, unexplained
 
 
 def acted_at_edge(obs, rule, frame):
@@ -188,7 +195,11 @@ def acted_at_edge(obs, rule, frame):
          f"{where}: a {rule['action']} rule is not resolved at the edge")
     sent = [f[0] for f in judges.source_frames(obs, rule["dir"]) if f[1] == cob and f[2] == data]
     arrived = [f[0] for f in judges.frames(obs, side, cob) if f[2] == data]
-    allowed = edge_dispositions(sent, arrived, t, delay_s)
+    allowed, unexplained = edge_dispositions(sent, arrived, t, delay_s)
+    if unexplained:
+        raise judges.Inconclusive(
+            f"{where}: a copy on vcan_{side} {(unexplained[0] - t) * 1000:.3f} ms after it that "
+            f"no transmission can claim, neither on time nor one delay later")
     need(len(allowed) == 1, f"{where}: its copies on vcan_{side} allow {sorted(allowed) or 'none'}"
                             f", so the wire does not say what the proxy did")
     if rule["action"] == "drop":

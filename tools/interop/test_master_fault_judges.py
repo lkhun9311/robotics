@@ -604,7 +604,6 @@ def test_dropped_edge_frame_found_on_the_destination_is_inconclusive(row):
     expect(obs, "INCONCLUSIVE", "match counts")
 
 
-
 # ---- identical frames at a window edge (#38) ----
 # The master resends the same RPDO2 bytes, so a destination frame with the edge frame's bytes may
 # be the copy of another transmission.
@@ -672,3 +671,30 @@ def test_dropped_edge_frame_is_refuted_when_the_other_copies_need_the_other_tran
     # at most, so the copy right after the edge frame is the edge frame's.
     obs = synthetic([EDGE_T, EDGE_T + 0.001], [EDGE_T + 0.0002, EDGE_T + 0.0045])
     assert jm.acted_at_edge(obs, {"dir": "h2d", "action": "drop", "args": []}, EDGE_FRAME) is False
+
+
+# ---- arrivals no transmission can claim, and arrivals with one timestamp (#38) ----
+
+@pytest.mark.parametrize("row", ("X1", "X2", "X3", "X4", "X5"))
+def test_edge_frame_with_an_arrival_no_transmission_can_claim_is_inconclusive(row):
+    # A copy of the edge frame 30 ms after it is neither on time nor one delay later.
+    # The proxy did not drop the frame as far as the wire shows, so the row must not pass.
+    # X3 forwards to vcan_device (h2d), X5 and the other rows to vcan_host (d2h).
+    obs = load(row)
+    frame = place_at_edge(obs, "end")
+    side = destination(obs, frame)
+    obs[side].append([frame[0] + 0.030, frame[1], frame[2].hex()])
+    obs[side].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "no transmission")
+
+
+@pytest.mark.parametrize("shift", (0.0, 1e-6))
+def test_x7_edge_frame_copied_twice_on_the_destination_is_inconclusive(shift):
+    # The delayed copy appears twice, with the same timestamp or 1 us apart.
+    # Two copies of one transmission are not one, whatever their timestamps.
+    obs = load("X7")
+    frame = place_at_edge(obs, "end")
+    held = copies(obs, "device", frame)[0]
+    obs["device"].append([held[0] + shift, held[1], held[2]])
+    obs["device"].sort(key=lambda f: f[0])
+    expect(obs, "INCONCLUSIVE", "edge frame")
