@@ -55,8 +55,9 @@ def test_trace_overflow_is_inconclusive(row):
 
 
 # M1 resets: a heartbeat the bank sent just before it handled the reset can cross the reset
-# command in the proxy and be stamped on vcan_host after the NMT frame. Only such a frame (the
-# previous state, before the boot-up, within GRACE_S of the command) is tolerated.
+# command in the proxy and be stamped on vcan_host after the NMT frame.
+# Only such a frame (the previous state, before the boot-up, within GRACE_S of the command) is
+# tolerated.
 
 def m1_reset(obs, cs):
     """(t of the reset NMT frame to node 3 on vcan_host, index of its boot-up in obs['host'])."""
@@ -115,7 +116,8 @@ def test_m1_heartbeat_right_after_boot_up_fails(cs):
 
 # M1 Stopped/Pre-op: Lely applies a synchronous TPDO it received at the next SYNC (CiA 301
 # synchronous reception), so the TPDO the node sent right before the command is reported by
-# Lely at its first SYNC after the command. Only that one SYNC of lag is tolerated.
+# Lely at its first SYNC after the command.
+# Only that one SYNC of lag is tolerated.
 
 def m1_lely_pdo_group(obs, cs, nth_sync, after_s=0.0):
     """Adds Lely rpdo lines for node 3 after Lely's nth SYNC line after the NMT command cs

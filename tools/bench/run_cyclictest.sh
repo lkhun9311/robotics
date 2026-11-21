@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Usage: tools/bench/run_cyclictest.sh OUT_DIR [LOOPS]
-# Baseline OS wake-up latency at 1 ms, FIFO 80, memory locked. Run alone, not next to the app.
+# Baseline OS wake-up latency at 1 ms, FIFO 80, memory locked.
+# Run alone, not next to the app.
 set -euo pipefail
 out_dir="$1"
 loops="${2:-100000}"

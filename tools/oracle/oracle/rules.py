@@ -27,15 +27,18 @@ from oracle.trace import load_trace
 
 PASS, FAIL, INCONCLUSIVE, NOT_RUN = "PASS", "FAIL", "INCONCLUSIVE", "NOT_RUN"
 
-# Contract values the oracle owns. A trace may declare them, but it cannot change them:
-# the judged side never supplies its own thresholds. Project-declared (spec §10.1,
-# storage analysis/2026-11-13-lease-bound.md): lease <= 48 ms, stop deadline 2W = 4 ms.
+# Contract values the oracle owns.
+# A trace may declare them, but it cannot change them:
+# the judged side never supplies its own thresholds.
+# Project-declared (spec §10.1, storage analysis/2026-11-13-lease-bound.md): lease <= 48 ms, stop
+# deadline 2W = 4 ms.
 MAX_LEASE_NS = 48_000_000
 STOP_DEADLINE_NS = 4_000_000
 EXIT_CODES = {PASS: 0, FAIL: 1, INCONCLUSIVE: 2, NOT_RUN: 3}
 IDENTITY = ("session", "generation", "valid_until_ns")
-# Every fault the oracle has rules for. An injected fault outside this set has no obligation,
-# so a trace with one cannot PASS: the oracle would not know what it was meant to check.
+# Every fault the oracle has rules for.
+# An injected fault outside this set has no obligation, so a trace with one cannot PASS: the oracle
+# would not know what it was meant to check.
 KNOWN_FAULTS = ("injected_fault", "manager_stall")
 
 INT_FIELDS = {

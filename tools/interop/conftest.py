@@ -98,14 +98,15 @@ def probe_eds(tmp_path_factory):
     return derived_eds(tmp_path_factory.mktemp("eds") / "probe.eds")
 
 
-# SO_TIMESTAMPNS (asm-generic/socket.h; Python's socket module does not export it). On 64-bit
-# Linux the control message carries a struct timespec of two 64-bit fields.
+# SO_TIMESTAMPNS (asm-generic/socket.h; Python's socket module does not export it).
+# On 64-bit Linux the control message carries a struct timespec of two 64-bit fields.
 _SO_TIMESTAMPNS = 35
 _TIMESPEC = struct.Struct("=qq")
 CLOCK_OFFSET_SAMPLES = 50
-# Realtime - monotonic may move this much during a capture. An NTP slew changes the rate of both
-# clocks alike, so only a step of CLOCK_REALTIME moves the difference; what is left is the error
-# of the bracket reads (best of CLOCK_OFFSET_SAMPLES, microseconds), well inside 100 us.
+# Realtime - monotonic may move this much during a capture.
+# An NTP slew changes the rate of both clocks alike, so only a step of CLOCK_REALTIME moves the
+# difference; what is left is the error of the bracket reads (best of CLOCK_OFFSET_SAMPLES,
+# microseconds), well inside 100 us.
 CLOCK_DRIFT_LIMIT_NS = 100_000
 
 

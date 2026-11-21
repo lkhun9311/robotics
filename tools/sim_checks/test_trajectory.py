@@ -12,14 +12,16 @@ from sim import CONTROLLER_STATE, MUJOCO_STATES, SimError
 STEP = 0.2  # rad, single-joint move in the mapping check
 
 # The out-of-range goal moves wrist_3: from HOME it reaches within GOAL_TOLERANCE of its +6.28319
-# limit. The elbow does not: under the plugin it stopped at about 2.89 rad, short of +3.1415, and
-# a standalone MuJoCo 4.0.1 run of the same scene showed the elbow actuator at its force limit
-# and upper_arm_link touching wrist_3_link (measured 2026-11-14).
+# limit.
+# The elbow does not: under the plugin it stopped at about 2.89 rad, short of +3.1415, and a
+# standalone MuJoCo 4.0.1 run of the same scene showed the elbow actuator at its force limit and
+# upper_arm_link touching wrist_3_link (measured 2026-11-14).
 OUT_OF_RANGE_JOINT = "wrist_3_joint"
 OUT_OF_RANGE_GOAL = 6.5  # rad, beyond RANGE (6.28319) and the actuator ctrlrange (6.2831)
 # Largest allowed gap between the header stamps of consecutive recorded /mujoco_actuators_states
-# messages. It bounds the recorded data's coverage in simulation time, independent of when the
-# test process happened to receive the messages.
+# messages.
+# It bounds the recorded data's coverage in simulation time, independent of when the test process
+# happened to receive the messages.
 MAX_STAMP_GAP_S = 0.1
 # How long after the action result the recording runs, in simulation time.
 AFTER_RESULT_S = 2.0
@@ -122,8 +124,9 @@ def test_out_of_range_goal_never_leaves_the_joint_range(sim):
     assert (r.accepted, r.status, r.error_code) == (True, GoalStatus.STATUS_ABORTED, OUT_OF_RANGE_ERROR_CODE), r
     output = max(s.joints[joint][1] for _, s in state)
     # Exact equality on purpose: the controller copies the goal value into its output; it is not
-    # computed. 6.5 survives the double round trip unchanged, so any difference means the
-    # controller altered the goal (clamped or interpolated it), which is what this check is for.
+    # computed.
+    # 6.5 survives the double round trip unchanged, so any difference means the controller altered
+    # the goal (clamped or interpolated it), which is what this check is for.
     assert output == OUT_OF_RANGE_GOAL, f"controller output max {output}, expected the goal passed through"
 
 

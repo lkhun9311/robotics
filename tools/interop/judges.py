@@ -247,8 +247,9 @@ def judge_m1(obs):
         states = [e["state"] for e in events(obs, "state", t0 - GRACE_S, lt1, node=NODE)]
         if cs in cia301.RESETS:
             # A heartbeat of the state before the reset, sent just before the node handled the
-            # command, may cross the command in the proxy and be stamped after it. Only that is
-            # tolerated: the previous state's byte, ahead of the boot-up, within GRACE_S.
+            # command, may cross the command in the proxy and be stamped after it.
+            # Only that is tolerated: the previous state's byte, ahead of the boot-up, within
+            # GRACE_S.
             crossing = []
             while (beats and beats[0][0] <= t0 + GRACE_S and
                    beats[0][2] == bytes([before]) and before != cia301.STATE_BOOT_UP):
@@ -282,9 +283,10 @@ def judge_m1(obs):
         if expected not in cia301.PDO_STATES:
             # Lely applies a synchronous TPDO at the next SYNC (CiA 301 synchronous
             # reception): the TPDO sent before the command is reported after Lely's first SYNC
-            # line after it. Lely prints each SYNC's rpdo lines from its event loop before it
-            # handles the next SYNC, so Lely's lines are judged from its second SYNC line after
-            # the command on: ordering, not a time window (one SYNC of observation is spent).
+            # line after it.
+            # Lely prints each SYNC's rpdo lines from its event loop before it handles the next
+            # SYNC, so Lely's lines are judged from its second SYNC line after the command on:
+            # ordering, not a time window (one SYNC of observation is spent).
             lt0 = lely_starts[t0]
             lely_syncs = [e["t"] for e in events(obs, "sync", lt0)]
             need(len(lely_syncs) >= 2, f"NMT 0x{cs:02X}: fewer than two Lely SYNCs after the "
@@ -545,8 +547,8 @@ def judge_m4(obs):
     # The window is closed on the bank's own clock: `before` is the last snapshot before the
     # harness sent the DLC 7 frame; `after` is the first snapshot after the bank actuated the
     # control pair sent behind it, so the bank had dispatched the DLC 7 frame by then (a snapshot
-    # between the send and the dispatch still shows the old count). Lely sends only DLC 8 RPDOs,
-    # so nothing else in the window can raise `malformed`.
+    # between the send and the dispatch still shows the old count).
+    # Lely sends only DLC 8 RPDOs, so nothing else in the window can raise `malformed`.
     bad, control = h["bad"], h["control"]
     snaps = records(obs, "dispatch", node=NODE)
     actuated = records(obs, "drive", node=NODE, kind="actuated")
@@ -700,10 +702,11 @@ def verdict(obs):
 # ---- Proxy faults through to the drive (E3b Task 7) ----
 #
 # Rows F1-F6 run pdo_stream --node 3 --count 60 through one rule file of config/interop/faults;
-# R1 is the restart row. Preconditions first: the scenario finished, each rule's match count in
-# the proxy's exit record equals the frames the rule selects in the capture of its source
-# interface (B8 replayed here from the rule text), the 60 seqs are on vcan_host, the traces are
-# complete. Then the verdict from the bank trace and the TPDO2 applied_seq on vcan_host.
+# R1 is the restart row.
+# Preconditions first: the scenario finished, each rule's match count in the proxy's exit record
+# equals the frames the rule selects in the capture of its source interface (B8 replayed here from
+# the rule text), the 60 seqs are on vcan_host, the traces are complete.
+# Then the verdict from the bank trace and the TPDO2 applied_seq on vcan_host.
 
 STREAM_COUNT = 60
 # Encodings of the vdrive_bank trace's `drive` records (drive_core DropReason, QuickStopReason).
@@ -716,8 +719,9 @@ QUICK_STOP_ACTIVE = 0x07  # CiA 402 statusword, mask 0x6F
 DRIVE_FLAGS = (0x2030, 5)
 FLAG_POLICY_LATCHED = 0x01
 FLAG_INTEGRITY = 0x04
-# B8 directions: a rule sees the frames read on its source interface. The capture of an
-# interface also holds what the proxy wrote there, so the source frames are taken by producer:
+# B8 directions: a rule sees the frames read on its source interface.
+# The capture of an interface also holds what the proxy wrote there, so the source frames are taken
+# by producer:
 # the master produces NMT, SYNC, RPDOs and SDO requests; the drives the rest.
 MASTER_COBS = {"nmt": (0x000, 0x000), "sync": (0x080, 0x080), "rpdo": (0x201, 0x47F),
                "sdo_rx": (0x601, 0x67F)}
@@ -928,8 +932,9 @@ def judge_f1(obs):
     live = [s for t, s, _ in on_device if t < t_stop]
     not_valid = dropped(obs, DROP_NOT_VALID)
     # A delayed RPDO2 reaching the drive while its tag is current is a not-valid drop at
-    # receipt (D5). After the stop revoked the tag, D8 classifies the tag first: every RPDO1 and
-    # RPDO2 of node 3 between two SYNCs is then one other-tag drop at the second SYNC, exactly.
+    # receipt (D5).
+    # After the stop revoked the tag, D8 classifies the tag first: every RPDO1 and RPDO2 of node 3
+    # between two SYNCs is then one other-tag drop at the second SYNC, exactly.
     check(not_valid == len(live), f"{len(live)} delayed RPDO2 before the stop, {not_valid} "
                                   f"not-valid drops")
     need({s for _, s, _ in on_device} == set(seqs),
@@ -981,13 +986,13 @@ def applied_matches(obs, act):
                           f"the actuated seqs")
 
 
-# A lost update is an ordinary gap only while the previous command outlasts it. Lely sends a
-# write at the next SYNC and the drive actuates it at the one after, so after one lost update
-# the next command is actuated 4 T_bus = 40 ms after the previous write: a validity of 40 ms
+# A lost update is an ordinary gap only while the previous command outlasts it.
+# Lely sends a write at the next SYNC and the drive actuates it at the one after, so after one lost
+# update the next command is actuated 4 T_bus = 40 ms after the previous write: a validity of 40 ms
 # expires at that instant, and whether the drive stops depends on which comes first in its loop.
-# The rows with a gap need a validity longer by at least 3 W (the lease allows 48 ms). Which
-# seqs a rule hits depends on how many frames of its identifier Lely sent during the commit, so
-# the first update may be lost too: the guards count from the entry into Operation Enabled, and
+# The rows with a gap need a validity longer by at least 3 W (the lease allows 48 ms).
+# Which seqs a rule hits depends on how many frames of its identifier Lely sent during the commit,
+# so the first update may be lost too: the guards count from the entry into Operation Enabled, and
 # the entry must come after Lely sent the first update (the peer enables after the second), or a
 # lost first update puts the first actuation on the 30 ms command timeout.
 GAP_VALIDITY_MIN_US = 40_000 + 3 * 2_000
@@ -1281,8 +1286,8 @@ def judge_f7(obs):
     need(len(delayed_seqs - {last}) >= len(seqs) // rules[0]["every"] - 1,
          f"only {len(delayed_seqs)} stream seqs had their RPDO2 delayed")
     gap_margins(obs, tag)
-    # The delayed copy of each held frame: the same bytes on vcan_device one delay later. Lely
-    # repeats seq 60's frame at every SYNC after the stream, so a held repeat has identical
+    # The delayed copy of each held frame: the same bytes on vcan_device one delay later.
+    # Lely repeats seq 60's frame at every SYNC after the stream, so a held repeat has identical
     # copies that were forwarded at once; those are not the held one.
     delay_s = int(rules[0]["args"][0]) / 1000
     device_rpdo2 = rpdo_seqs(obs, "device", 2, tag)
@@ -1305,7 +1310,8 @@ def judge_f7(obs):
     trailing = [s for t, s in on_device if t > t_stop]
     # The stream ends, the last command expires and the drive stops: an RPDO2 delayed in the
     # last 60 ms of the stream arrives after that stop, with the tag revoked (named, not counted
-    # as not-valid). The stop is after the last actuation (checked above).
+    # as not-valid).
+    # The stop is after the last actuation (checked above).
     tail = last - DELAY_TAIL_SEQS
     need(all(s > tail for s in trailing),
          f"delayed RPDO2 of seqs {trailing} reached the drive after its stop, earlier than the "
@@ -1334,7 +1340,8 @@ JUDGES["F7"] = judge_f7
 # ---- Our master against CANopenNode: the interop matrix N1-N7 (E3c Task 8) ----
 #
 # canopen_master_cli on vcan_host, bus_fault_proxy with no rules, canopend (CANopenNode v4.1,
-# node 2; N7: nodes 1-6) on vcan_device. An observation (test_master_matrix.py) holds:
+# node 2; N7: nodes 1-6) on vcan_device.
+# An observation (test_master_matrix.py) holds:
 #   host, device   frames on both links, as above
 #   cli            the JSON lines canopen_master_cli printed (console: its cmd/cmd_done lines carry
 #                  the console line and its number n; master events carry at_ns)

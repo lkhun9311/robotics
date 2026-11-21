@@ -4,17 +4,19 @@ ARG ROS_IMAGE
 # Default keeps every stage's FROM resolvable when only the dev target is built (BuildKit
 # resolves all stages); release builds pass the pinned digest from .env.
 ARG RUNTIME_IMAGE=ros:jazzy-ros-core
-# Base of the build stage: the dev stage below, or an already built dev image. CI passes the dev
-# image it has just checked, so the runtime build neither rebuilds the dev stage nor fetches the
-# model again when the layer cache misses, and ships from the very image the checks ran in.
+# Base of the build stage: the dev stage below, or an already built dev image.
+# CI passes the dev image it has just checked, so the runtime build neither rebuilds the dev stage
+# nor fetches the model again when the layer cache misses, and ships from the very image the checks
+# ran in.
 ARG BUILD_FROM=dev
 FROM ${ROS_IMAGE} AS base
 ARG ROS_SNAPSHOT
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
-# Pin ROS packages to a dated, signed snapshot. The key file must hold exactly one primary key
-# with the expected fingerprint, so a swapped key, or a second key appended to the file (apt
-# would trust every key in the keyring), fails the build instead of changing the trust root.
+# Pin ROS packages to a dated, signed snapshot.
+# The key file must hold exactly one primary key with the expected fingerprint, so a swapped key, or
+# a second key appended to the file (apt would trust every key in the keyring), fails the build
+# instead of changing the trust root.
 COPY docker/keys/ros-snapshots.asc /tmp/ros-snapshots.asc
 RUN gpg --dearmor < /tmp/ros-snapshots.asc > /usr/share/keyrings/ros-snapshots.gpg \
  && keys="$(gpg --show-keys --with-colons /usr/share/keyrings/ros-snapshots.gpg)" \
@@ -70,10 +72,11 @@ RUN apt-get update \
       -r /tmp/mujoco-requirements.txt \
  && rm /tmp/mujoco-requirements.txt \
  && python3 -c 'import mujoco; v = mujoco.mj_versionString(); assert v == "3.12.0", v'
-# CANopenNode (CANopenLinux canopend), the independent slave of the E3c interop tests. Both
-# tarballs are GitHub archives of a commit (no git clone), pinned by SHA-256; the CANopenNode
-# tree goes where the CANopenLinux Makefile expects its submodule. The build differs from the
-# shipped one in docker/canopennode_build.h only (no self-start to Operational, log to stderr).
+# CANopenNode (CANopenLinux canopend), the independent slave of the E3c interop tests.
+# Both tarballs are GitHub archives of a commit (no git clone), pinned by SHA-256; the CANopenNode
+# tree goes where the CANopenLinux Makefile expects its submodule.
+# The build differs from the shipped one in docker/canopennode_build.h only (no self-start to
+# Operational, log to stderr).
 # CANopenLinux has no release after v4.0, whose submodule predates the sync RPDO fix (#320).
 # So CANopenNode is the tag v4.1, built by the CANopenLinux master head, not by its submodule.
 ARG CANOPENLINUX_COMMIT=f1348d4072cdabea4c3435a13c721ac29ab4cc91

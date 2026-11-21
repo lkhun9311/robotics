@@ -29,8 +29,9 @@ TPDO_ACCESS = {"rwr", "rw", "ro", "const"}
 MAX_PDO_BITS = 64
 VAR, ARRAY, RECORD = 0x7, 0x8, 0x9
 
-# A plain integer, optionally preceded by `$NODEID+`. Lely dcf-tools 2.3.5 parse only this
-# order; `0x80+$NODEID` fails there (E3 gate, check 3), so it is rejected here as well.
+# A plain integer, optionally preceded by `$NODEID+`.
+# Lely dcf-tools 2.3.5 parse only this order; `0x80+$NODEID` fails there (E3 gate, check 3), so it
+# is rejected here as well.
 _VALUE = re.compile(r"(?P<node>\$NODEID(?:\s*\+\s*)?)?(?P<num>-?(?:0x[0-9a-f]+|[0-9]+))?$", re.I)
 
 

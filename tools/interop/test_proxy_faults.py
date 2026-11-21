@@ -184,8 +184,8 @@ def test_restart_rejects_captured_old_tag_frames(capture, start_bank, start_prox
         new_tag = commit_tag(console)
         if new_tag != old_tag:
             break
-        # The D3 residual (about 2^-16): the restarted node drew the old tag again. Recorded,
-        # and the bank is restarted once more.
+        # The D3 residual (about 2^-16): the restarted node drew the old tag again.
+        # Recorded, and the bank is restarted once more.
         harness["collisions"].append({"tag": new_tag, "t": time.monotonic()})
         console.send("quit")
         console.wait_exit(timeout=5)
@@ -201,9 +201,9 @@ def test_restart_rejects_captured_old_tag_frames(capture, start_bank, start_prox
     for c, d in old:
         harness["replay"].append([raw.send(c, d), c, d.hex()])
         time.sleep(0.001)
-    # Control: one RPDO1 of the new tag (a seq the drive has not seen). While the tag is
-    # current it is held in the window and dropped as a lone half at the SYNC; were the tag
-    # revoked, it would be one more other-tag drop and the replay would prove nothing.
+    # Control: one RPDO1 of the new tag (a seq the drive has not seen).
+    # While the tag is current it is held in the window and dropped as a lone half at the SYNC; were
+    # the tag revoked, it would be one more other-tag drop and the replay would prove nothing.
     control = judges.encode("RPDO1", {"target_position": 0, "command_seq": CONTROL_SEQ,
                                       "exec_tag": new_tag})
     harness["control"] = [raw.send(judges.cia301.RPDO_BASE[1] + NODE, control),

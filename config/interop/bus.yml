@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # dcfgen (dcf-tools 2.3.5) input for the Lely peer: master plus six drives on one bus.
 # Generate with `dcfgen -r -d DIR config/interop/bus.yml` from the repository root (-r: remote
-# PDO mappings 0x5800-0x5FFF). Calibrated against liblely-coapp 2.3.5 by
-# tools/interop/test_peer_config.py; each option below changed one observed behaviour.
+# PDO mappings 0x5800-0x5FFF).
+# Calibrated against liblely-coapp 2.3.5 by tools/interop/test_peer_config.py; each option below
+# changed one observed behaviour.
 options:
   # Consumer time = the slave's 0x1017 (100 ms, read from the EDS) x 2.5 = 250 ms in 0x1016.
   # dcfgen's default multiplier 3.0 gave 300 ms.
@@ -10,10 +11,11 @@ options:
 
 master:
   node_id: 127
-  # 0x1F80 bit 3 set: the master does not start slaves after booting them. Without it Lely sent
-  # NMT Start (0x01) to each of nodes 1-6 about 0.1 s after the startup reset.
+  # 0x1F80 bit 3 set: the master does not start slaves after booting them.
+  # Without it Lely sent NMT Start (0x01) to each of nodes 1-6 about 0.1 s after the startup reset.
   start_nodes: false
-  # SYNC producer every 10 ms (0x1006, microseconds). Without it no SYNC was produced.
+  # SYNC producer every 10 ms (0x1006, microseconds).
+  # Without it no SYNC was produced.
   sync_period: 10000
   # Finite boot time (0x1F89, ms) for the mandatory slaves.
   boot_time: 2000

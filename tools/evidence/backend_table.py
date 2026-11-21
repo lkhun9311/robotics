@@ -27,9 +27,10 @@ END = "<!-- end of backend table -->"
 BACKENDS = [("Direct", "direct_backend/direct_backend_tests"),
             ("CANopen", "canopen_backend/canopen_backend_tests")]
 PREFIX = {"Direct": "Direct/Contract/", "CANopen": "Canopen/Contract/"}
-# The values each case records, in the order shown, with their unit. The reference of
-# motion_end_ms and travel_rad is the last approval the device got, or the injected single-axis
-# stop in InhibitStopsEveryAxisAndConfirms (contract_suite.hpp, expect_stopped_within_bound).
+# The values each case records, in the order shown, with their unit.
+# The reference of motion_end_ms and travel_rad is the last approval the device got, or the injected
+# single-axis stop in InhibitStopsEveryAxisAndConfirms (contract_suite.hpp,
+# expect_stopped_within_bound).
 UNITS = {"arm_latency_ms": "arm {} ms", "fastest_rad_s": "fastest {} rad/s",
          "motion_end_ms": "motion ended {} ms after the reference",
          "travel_rad": "travel {} rad", "acceptance_latency_ms": "acceptance at most {} ms",

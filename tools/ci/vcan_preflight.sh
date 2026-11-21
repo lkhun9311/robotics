@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Host step of the CI vcan gate (B13), run on the runner before the checks container starts:
-# loads the vcan module and proves a vcan link can be created here. Always writes the status
-# file (default artifacts/preflight/vcan-status.txt): "OK", or "NOT_RUN: <reason>" and exit 3.
+# loads the vcan module and proves a vcan link can be created here.
+# Always writes the status file (default artifacts/preflight/vcan-status.txt): "OK", or "NOT_RUN:
+# <reason>" and exit 3.
 # The status is uploaded by the workflow whether or not this step fails.
 # VCAN_PREFLIGHT_FORCE_FAIL=1 takes the NOT_RUN path on purpose.
 set -uo pipefail
